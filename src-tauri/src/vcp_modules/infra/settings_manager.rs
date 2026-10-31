@@ -7,7 +7,7 @@ pub mod schema;
 pub mod types;
 
 pub use backup::{export_config_domains, export_group_preferences, parse_config_backup};
-pub use repository::SettingsState;
+pub use repository::{BackupImportPayload, SettingsState};
 pub use types::*;
 
 use crate::vcp_modules::db_manager::DbState;
@@ -62,20 +62,43 @@ pub async fn import_settings_backup<R: Runtime>(
     app_handle: AppHandle<R>,
     state: State<'_, SettingsState>,
     request: ConfigUpdate,
-    group_preferences: serde_json::Value,
+    group_preferences: Option<serde_json::Value>,
+    agent_preferences: Option<serde_json::Value>,
+    standalone_data: Option<serde_json::Value>,
 ) -> Result<ConfigBackupImportResult, String> {
-    let preferences =
-        crate::vcp_modules::group::group_service::parse_group_local_settings_backup(&group_preferences)?;
-    let group_ids: Vec<_> = preferences.keys().cloned().collect();
+    let group_patches = match group_preferences {
+        Some(val) => crate::vcp_modules::group::group_service::parse_group_local_settings_backup(&val)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let agent_patches = match agent_preferences {
+        Some(val) => crate::vcp_modules::agent::agent_service::parse_agent_local_settings_backup(&val)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let (model_favorites, tarven_rules) = match standalone_data {
+        Some(val) => backup::parse_standalone_data_backup(&val)?,
+        None => (Vec::new(), Vec::new()),
+    };
+
+    let group_ids: Vec<_> = group_patches.keys().cloned().collect();
+    let payload = BackupImportPayload {
+        group_preferences: group_patches,
+        agent_preferences: agent_patches,
+        model_favorites,
+        tarven_rules,
+    };
+
     let app = app_handle.clone();
     state
         .import_backup(
             app_handle.state::<DbState>().inner(),
             request,
-            preferences,
+            payload,
             move |old, snapshot| {
                 if let Some(groups) = app.try_state::<crate::vcp_modules::group::group_service::GroupManagerState>() {
                     groups.invalidate_cache();
+                }
+                if let Some(agents) = app.try_state::<crate::vcp_modules::agent::agent_service::AgentConfigState>() {
+                    agents.invalidate_cache();
                 }
                 if let Some(turns) = app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
                     for id in &group_ids {

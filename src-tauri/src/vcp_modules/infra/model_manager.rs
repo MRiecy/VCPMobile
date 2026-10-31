@@ -201,16 +201,11 @@ pub async fn get_hot_models<R: Runtime>(
     Ok(models)
 }
 
-#[tauri::command]
-pub async fn get_favorite_models<R: Runtime>(
-    app: AppHandle<R>,
-    _state: State<'_, ModelManagerState>,
+pub async fn export_favorite_models(
+    db: &DbState,
 ) -> Result<Vec<String>, String> {
-    let db_state = app.state::<DbState>();
-    let pool = &db_state.pool;
-
     let rows = sqlx::query("SELECT model_id FROM model_favorites ORDER BY created_at DESC")
-        .fetch_all(pool)
+        .fetch_all(&db.pool)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -222,6 +217,48 @@ pub async fn get_favorite_models<R: Runtime>(
 
     Ok(models)
 }
+
+#[tauri::command]
+pub async fn get_favorite_models<R: Runtime>(
+    app: AppHandle<R>,
+    _state: State<'_, ModelManagerState>,
+) -> Result<Vec<String>, String> {
+    let db_state = app.state::<DbState>();
+    export_favorite_models(&db_state).await
+}
+
+pub async fn import_favorite_models(
+    connection: &mut sqlx::SqliteConnection,
+    models: &[String],
+) -> Result<(), String> {
+    if models.is_empty() {
+        return Ok(());
+    }
+    let base_time = crate::vcp_modules::infra::utils::now_millis();
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<&str> = models
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && seen.insert(*s))
+        .collect();
+
+    let total = deduped.len();
+    for (idx, model_id) in deduped.iter().enumerate() {
+        let assigned_time = base_time + ((total - idx) as i64) * 1000;
+        sqlx::query(
+            "INSERT INTO model_favorites (model_id, created_at) VALUES (?, ?)
+             ON CONFLICT(model_id) DO UPDATE SET created_at = excluded.created_at",
+        )
+        .bind(model_id)
+        .bind(assigned_time)
+        .execute(&mut *connection)
+        .await
+        .map_err(|e| format!("导入模型收藏失败 {model_id}: {e}"))?;
+    }
+    Ok(())
+}
+
+pub use import_favorite_models as import_model_favorites;
 
 #[tauri::command]
 pub async fn toggle_favorite_model<R: Runtime>(
@@ -550,5 +587,34 @@ mod cache_tests {
         }
         sqlx::query("DROP TABLE settings").execute(&pool).await.unwrap();
         assert!(read_cached_models(&pool).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_import_favorite_models_preserves_order() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query("CREATE TABLE model_favorites (model_id TEXT PRIMARY KEY, created_at BIGINT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let models = vec![
+            "gemini-2.5-flash".to_string(),
+            "claude-3-7-sonnet".to_string(),
+            "deepseek-reasoner".to_string(),
+        ];
+
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            import_favorite_models(&mut conn, &models).await.unwrap();
+        }
+
+        let db = DbState::new(pool, std::path::PathBuf::new());
+        let exported = export_favorite_models(&db).await.unwrap();
+        assert_eq!(exported, models);
     }
 }

@@ -376,7 +376,11 @@ pub enum ConfigSaveResult {
 pub struct ConfigBackupImportResult {
     pub result: ConfigSaveResult,
     pub missing_groups: bool,
+    pub missing_agents: bool,
 }
+
+#[allow(dead_code)]
+pub type SettingsImportRequest = ConfigUpdate;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config-export", derive(ts_rs::TS))]

@@ -4,6 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useDataReload } from "../composables/useDataReload";
 import { useNotificationStore } from "./notification";
+import { useOverlayStore } from "./overlay";
+import { useAssistantStore } from "./assistant";
+import { useSettingsStore } from "./settings";
+import { buildSettingsUpdate } from "../config/fields";
 import { isAndroid, isIOS } from "../utils/platform";
 import type { BatteryStatusDto } from "../types/native";
 
@@ -358,6 +362,85 @@ const emptySummary = (): SyncSummary => ({
   failedTopicIds: [],
 });
 
+export async function checkAndPromptPendingConfigRestore(): Promise<boolean> {
+  const raw = localStorage.getItem('vcp_staged_entity_backup');
+  if (!raw) return false;
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    localStorage.removeItem('vcp_staged_entity_backup');
+    return false;
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    localStorage.removeItem('vcp_staged_entity_backup');
+    return false;
+  }
+
+  const now = Date.now();
+  if (
+    typeof parsed.timestamp !== 'number' ||
+    !Number.isFinite(parsed.timestamp) ||
+    now - parsed.timestamp > 7 * 24 * 60 * 60 * 1000 ||
+    now - parsed.timestamp < 0
+  ) {
+    localStorage.removeItem('vcp_staged_entity_backup');
+    return false;
+  }
+
+  if (parsed.version !== 2) {
+    return false;
+  }
+
+  const assistantStore = useAssistantStore();
+  const totalEntities = assistantStore.agents.length + assistantStore.groups.length;
+  if (totalEntities === 0) {
+    return false;
+  }
+
+  const confirmed = await useOverlayStore().showConfirm({
+    title: '发现待生效的实体配置',
+    message: '检测到您之前导入了智能体与群组的本地偏好（提示词、温度、音色、运行模式等），是否立即应用到刚同步的数据？',
+  });
+
+  if (confirmed) {
+    const settingsStore = useSettingsStore();
+    if (!settingsStore.snapshot) {
+      try {
+        await settingsStore.fetchSettings();
+      } catch (e) {
+        console.warn('[SyncSession] Failed to fetch settings before applying staged backup:', e);
+      }
+    }
+    const request = settingsStore.snapshot
+      ? buildSettingsUpdate(settingsStore.snapshot, {})
+      : { patches: [] };
+
+    await settingsStore.importBackup(
+      request,
+      parsed.groupPreferences ?? {},
+      parsed.agentPreferences ?? {},
+    );
+    localStorage.removeItem('vcp_staged_entity_backup');
+    try {
+      await assistantStore.fetchAgentsAndGroups();
+    } catch {
+      // ignore
+    }
+    useNotificationStore().addNotification({
+      type: 'success',
+      title: '配置已恢复',
+      message: '已成功应用智能体与群组的本地偏好',
+      toastOnly: true,
+    });
+    return true;
+  }
+
+  return false;
+}
+
 export const useSyncSessionStore = defineStore("syncSession", () => {
   // --- 视图状态 ---
   const isOpen = ref(false);
@@ -463,6 +546,11 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         try {
           await useDataReload().performFullReload();
           needsReload.value = false;
+          try {
+            await checkAndPromptPendingConfigRestore();
+          } catch (restoreError) {
+            console.warn('[SyncSession] checkAndPromptPendingConfigRestore failed:', restoreError);
+          }
         } catch (error) {
           console.error("[SyncSession] Failed to reload synchronized data:", error);
           useNotificationStore().addNotification({
@@ -1100,5 +1188,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     startSync,
     retrySync,
     switchTab,
+    checkAndPromptPendingConfigRestore,
   };
 });

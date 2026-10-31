@@ -6,6 +6,7 @@ import { useNotificationStore } from "./notification";
 import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, ConfigBackupImportResult, Settings } from "../config/generated/config";
 import { buildSettingsUpdate, cloneConfig, type SettingsFieldValues } from "../config/fields";
 import type { GroupLocalSettingsPatch } from '../types/assistant';
+import type { AgentLocalSettingsPatch, StandaloneDataImport } from '../../features/settings/types';
 export type { ChatEndpointMode } from "../config/generated/config";
 export type AppSettings = Settings;
 
@@ -66,20 +67,32 @@ export const useSettingsStore = defineStore("settings", () => {
   });
 
   function submitSettingsChange(command: 'update_settings', request: ConfigUpdate): Promise<ConfigSaveResult>;
-  function submitSettingsChange(command: 'import_settings_backup', request: ConfigUpdate, groupPreferences: Record<string, GroupLocalSettingsPatch>): Promise<ConfigBackupImportResult>;
+  function submitSettingsChange(
+    command: 'import_settings_backup',
+    request: ConfigUpdate,
+    groupPreferences?: Record<string, GroupLocalSettingsPatch>,
+    agentPreferences?: Record<string, AgentLocalSettingsPatch>,
+    standaloneData?: StandaloneDataImport,
+  ): Promise<ConfigBackupImportResult>;
   function submitSettingsChange(
     command: 'update_settings' | 'import_settings_backup',
     request: ConfigUpdate,
     groupPreferences?: Record<string, GroupLocalSettingsPatch>,
+    agentPreferences?: Record<string, AgentLocalSettingsPatch>,
+    standaloneData?: StandaloneDataImport,
   ): Promise<ConfigSaveResult | ConfigBackupImportResult> {
     const captured = cloneConfig(request);
     const capturedGroups = groupPreferences === undefined ? undefined : cloneConfig(groupPreferences);
+    const capturedAgents = agentPreferences === undefined ? undefined : cloneConfig(agentPreferences);
+    const capturedStandalone = standaloneData === undefined ? undefined : cloneConfig(standaloneData);
     return enqueueOperation(async () => {
       error.value = null;
       try {
         const response = await invoke<ConfigSaveResult | ConfigBackupImportResult>(command, {
           request: captured,
           ...(capturedGroups === undefined ? {} : { groupPreferences: capturedGroups }),
+          ...(capturedAgents === undefined ? {} : { agentPreferences: capturedAgents }),
+          ...(capturedStandalone === undefined ? {} : { standaloneData: capturedStandalone }),
         });
         const result = 'result' in response ? response.result : response;
         if (result.status === "saved" || result.status === "conflict") acceptSnapshot(result.snapshot);
@@ -102,8 +115,12 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   const updateSettings = (request: ConfigUpdate) => submitSettingsChange('update_settings', request);
-  const importBackup = (request: ConfigUpdate, groupPreferences: Record<string, GroupLocalSettingsPatch>) =>
-    submitSettingsChange('import_settings_backup', request, groupPreferences);
+  const importBackup = (
+    request: ConfigUpdate,
+    groupPreferences: Record<string, GroupLocalSettingsPatch> = {},
+    agentPreferences?: Record<string, AgentLocalSettingsPatch>,
+    standaloneData?: StandaloneDataImport,
+  ) => submitSettingsChange('import_settings_backup', request, groupPreferences, agentPreferences, standaloneData);
 
   const updateFields = (changes: Partial<SettingsFieldValues>): Promise<ConfigSaveResult> => {
     if (!snapshot.value) return Promise.reject(new Error("设置尚未加载"));

@@ -9,3 +9,6 @@ import './sidebar-gestures';
 import './theme-longpress';
 import './plus-longpress';
 import './diary-longpress';
+import './config-backup-workflow';
+
+export { configBackupWorkflowGuide } from './config-backup-workflow';

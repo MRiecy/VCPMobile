@@ -1,8 +1,12 @@
 // AgentService: 处理智能体(Agent)配置的核心模块 (Facade 层)
 // 职责: 作为应用层 Facade，协调数据库存储与业务逻辑，完全面向 SQLite 存储。
 
-use crate::vcp_modules::agent_types::{AgentConfig, AgentListItem};
+use crate::vcp_modules::agent_types::{
+    AgentConfig, AgentListItem, AgentLocalPreferences, AgentLocalSettingsPatch,
+};
 use crate::vcp_modules::db_manager::DbState;
+use sqlx::SqliteConnection;
+use std::collections::BTreeMap;
 use crate::vcp_modules::persistence::agent_repository;
 use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::group::group_types::GroupListItem;
@@ -752,6 +756,146 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     })
 }
 
+/// 导出非删除智能体的本机专属配置（移动端提示词、温度开关、音色）。
+pub async fn export_agent_local_settings(
+    db: &DbState,
+) -> Result<BTreeMap<String, AgentLocalPreferences>, String> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT agent_id, mobile_system_prompt, use_temperature, voice_config
+         FROM agents
+         WHERE owner_type = 'agent' AND deleted_at IS NULL
+         ORDER BY agent_id ASC",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?;
+
+    let mut preferences = BTreeMap::new();
+    for row in rows {
+        let agent_id: String = row.try_get("agent_id").map_err(|e| e.to_string())?;
+        let mobile_system_prompt: String = row
+            .try_get("mobile_system_prompt")
+            .unwrap_or_default();
+        let use_temperature = match row.try_get::<i64, _>("use_temperature") {
+            Ok(val) => val != 0,
+            Err(_) => false,
+        };
+        let voice_raw: String = row.try_get("voice_config").unwrap_or_default();
+        let voice = agent_repository::decode_voice_config(&voice_raw);
+
+        preferences.insert(
+            agent_id,
+            AgentLocalPreferences {
+                mobile_system_prompt,
+                use_temperature,
+                voice,
+            },
+        );
+    }
+    Ok(preferences)
+}
+
+#[tauri::command]
+pub async fn export_agent_preferences(
+    app_handle: AppHandle,
+) -> Result<BTreeMap<String, AgentLocalPreferences>, String> {
+    let db = app_handle.state::<DbState>();
+    export_agent_local_settings(&db).await
+}
+
+pub fn parse_agent_local_settings_backup(
+    value: &serde_json::Value,
+) -> Result<BTreeMap<String, AgentLocalSettingsPatch>, String> {
+    let mut preferences = BTreeMap::new();
+    let Some(source) = value.as_object() else {
+        return Ok(preferences);
+    };
+    for (agent_id, val) in source {
+        if agent_id.trim().is_empty() {
+            continue;
+        }
+        let patch = AgentLocalSettingsPatch::parse(val)?;
+        if !patch.is_empty() {
+            preferences.insert(agent_id.clone(), patch);
+        }
+    }
+    Ok(preferences)
+}
+
+/// 调用者持有 settings 导入事务；本函数不提交。
+/// 缺失字段保留原值；仅恢复本机已有存活 Agent。
+/// 返回是否有尚未同步的智能体 (missing_agents: bool)，墓碑静默跳过。
+pub async fn import_agent_local_settings(
+    connection: &mut SqliteConnection,
+    preferences: &BTreeMap<String, AgentLocalSettingsPatch>,
+) -> Result<bool, String> {
+    let mut missing_agents = false;
+
+    for (agent_id, patch) in preferences {
+        if agent_id.trim().is_empty() || patch.is_empty() {
+            continue;
+        }
+
+        use sqlx::Row;
+        let row = sqlx::query(
+            "SELECT deleted_at, mobile_system_prompt, use_temperature, voice_config
+             FROM agents WHERE owner_type = 'agent' AND agent_id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| error.to_string())?;
+
+        let row = match row {
+            None => {
+                missing_agents = true;
+                continue;
+            }
+            Some(r) => r,
+        };
+
+        let deleted_at: Option<i64> = row.try_get("deleted_at").map_err(|e| e.to_string())?;
+        if deleted_at.is_some() {
+            continue;
+        }
+
+        let current = AgentLocalPreferences {
+            mobile_system_prompt: row
+                .try_get("mobile_system_prompt")
+                .unwrap_or_default(),
+            use_temperature: match row.try_get::<i64, _>("use_temperature") {
+                Ok(val) => val != 0,
+                Err(_) => false,
+            },
+            voice: {
+                let raw: String = row.try_get("voice_config").unwrap_or_default();
+                agent_repository::decode_voice_config(&raw)
+            },
+        };
+
+        let restored = patch.apply(&current)?;
+        let voice_json = serde_json::to_string(&restored.voice).map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "UPDATE agents SET
+                mobile_system_prompt = ?,
+                use_temperature = ?,
+                voice_config = ?
+             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
+        )
+        .bind(&restored.mobile_system_prompt)
+        .bind(if restored.use_temperature { 1i64 } else { 0i64 })
+        .bind(&voice_json)
+        .bind(agent_id)
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(missing_agents)
+}
+
 #[cfg(test)]
 mod cache_generation_tests {
     use super::*;
@@ -838,5 +982,157 @@ mod cache_generation_tests {
             .execute(&pool).await.expect("change shared mode");
         let snapshot = build_assistants_snapshot(&pool).await.expect("snapshot after remote edit");
         assert_eq!(snapshot.groups.iter().find(|group| group.id == "g1").expect("g1").mode, GroupChatMode::Jev);
+    }
+
+    #[tokio::test]
+    async fn test_import_agent_local_settings_preserves_hash_and_updated_at() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE agents (
+                owner_type TEXT NOT NULL CHECK (owner_type = 'agent'),
+                agent_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                system_prompt TEXT NOT NULL DEFAULT '',
+                mobile_system_prompt TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL,
+                temperature REAL NOT NULL DEFAULT 1,
+                context_token_limit INTEGER NOT NULL DEFAULT 0,
+                max_output_tokens INTEGER NOT NULL DEFAULT 0,
+                stream_output INTEGER NOT NULL DEFAULT 1,
+                use_temperature INTEGER NOT NULL DEFAULT 0,
+                voice_config TEXT NOT NULL DEFAULT '{}',
+                config_hash TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                updated_at BIGINT NOT NULL,
+                deleted_at BIGINT,
+                PRIMARY KEY (owner_type, agent_id)
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let original_hash = "fixed_hash_12345";
+        let original_content_hash = "fixed_content_67890";
+        let original_updated_at: i64 = 1700000000000;
+
+        sqlx::query(
+            "INSERT INTO agents (owner_type, agent_id, name, model, mobile_system_prompt, use_temperature, voice_config, config_hash, content_hash, updated_at, deleted_at)
+             VALUES ('agent', 'a1', 'Nova', 'gpt', '旧提示词', 0, '{\"enabled\":false}', ?, ?, ?, NULL);"
+        )
+        .bind(original_hash)
+        .bind(original_content_hash)
+        .bind(original_updated_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut patch_map = serde_json::Map::new();
+        patch_map.insert("mobileSystemPrompt".into(), serde_json::json!("全新移动端提示词"));
+        patch_map.insert("useTemperature".into(), serde_json::json!(true));
+        patch_map.insert("voice".into(), serde_json::json!({
+            "enabled": true,
+            "mode": "builtin",
+            "voice": "Mia",
+            "stream": true,
+            "cloneSampleId": ""
+        }));
+
+        let mut prefs = BTreeMap::new();
+        prefs.insert("a1".to_string(), AgentLocalSettingsPatch(patch_map));
+
+        let mut tx = pool.begin().await.unwrap();
+        let missing = import_agent_local_settings(&mut *tx, &prefs).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert!(!missing, "已有实体不应标记为 missing");
+
+        // 校验数据库更新结果
+        use sqlx::Row;
+        let row = sqlx::query("SELECT mobile_system_prompt, use_temperature, voice_config, config_hash, content_hash, updated_at FROM agents WHERE agent_id = 'a1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(row.get::<String, _>("mobile_system_prompt"), "全新移动端提示词");
+        assert_eq!(row.get::<i64, _>("use_temperature"), 1);
+        assert_eq!(row.get::<String, _>("config_hash"), original_hash, "【铁律】config_hash 严禁修改");
+        assert_eq!(row.get::<String, _>("content_hash"), original_content_hash, "【铁律】content_hash 严禁修改");
+        assert_eq!(row.get::<i64, _>("updated_at"), original_updated_at, "【铁律】updated_at 严禁修改");
+    }
+
+    #[tokio::test]
+    async fn test_import_agent_local_settings_handles_missing_and_tombstones() {
+        use sqlx::sqlite::SqlitePoolOptions;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE agents (
+                owner_type TEXT NOT NULL CHECK (owner_type = 'agent'),
+                agent_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                system_prompt TEXT NOT NULL DEFAULT '',
+                mobile_system_prompt TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL,
+                temperature REAL NOT NULL DEFAULT 1,
+                context_token_limit INTEGER NOT NULL DEFAULT 0,
+                max_output_tokens INTEGER NOT NULL DEFAULT 0,
+                stream_output INTEGER NOT NULL DEFAULT 1,
+                use_temperature INTEGER NOT NULL DEFAULT 0,
+                voice_config TEXT NOT NULL DEFAULT '{}',
+                config_hash TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                updated_at BIGINT NOT NULL,
+                deleted_at BIGINT,
+                PRIMARY KEY (owner_type, agent_id)
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // 插入 1 个墓碑 agent
+        sqlx::query(
+            "INSERT INTO agents (owner_type, agent_id, name, model, mobile_system_prompt, use_temperature, voice_config, updated_at, deleted_at)
+             VALUES ('agent', 'tombstone_1', 'Dead', 'gpt', '墓碑旧词', 0, '{}', 1000, 2000);"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut prefs = BTreeMap::new();
+        // 1. 空机缺失的 agent
+        let mut patch1 = serde_json::Map::new();
+        patch1.insert("mobileSystemPrompt".into(), serde_json::json!("未同步"));
+        prefs.insert("missing_agent_1".to_string(), AgentLocalSettingsPatch(patch1));
+
+        // 2. 墓碑 agent
+        let mut patch2 = serde_json::Map::new();
+        patch2.insert("mobileSystemPrompt".into(), serde_json::json!("试图修改墓碑"));
+        prefs.insert("tombstone_1".to_string(), AgentLocalSettingsPatch(patch2));
+
+        let mut tx = pool.begin().await.unwrap();
+        let missing = import_agent_local_settings(&mut *tx, &prefs).await.unwrap();
+        tx.commit().await.unwrap();
+
+        // 验证 missing 标志
+        assert!(missing, "发现本地缺失的 agent，必须返回 missing = true");
+
+        // 验证墓碑未被篡改
+        let tomb_prompt: String = sqlx::query_scalar("SELECT mobile_system_prompt FROM agents WHERE agent_id = 'tombstone_1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tomb_prompt, "墓碑旧词", "墓碑实体绝不应被修改");
     }
 }

@@ -59,7 +59,7 @@ export type ConfigUpdate = { patches: Array<DomainPatch>, };
 
 export type ConfigSaveResult = { "status": "saved", snapshot: ConfigSnapshot, } | { "status": "rejected", issues: Array<FieldIssue>, } | { "status": "conflict", snapshot: ConfigSnapshot, conflicts: Array<FieldIssue>, };
 
-export type ConfigBackupImportResult = { result: ConfigSaveResult, missingGroups: boolean, };
+export type ConfigBackupImportResult = { result: ConfigSaveResult, missingGroups: boolean, missingAgents: boolean, };
 
 export type FieldKind = "string" | "boolean" | "integer" | "stringArray";
 

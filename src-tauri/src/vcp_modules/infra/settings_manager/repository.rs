@@ -54,9 +54,37 @@ struct DomainRecord {
     value: Value,
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct BackupImportPayload {
+    pub group_preferences: BTreeMap<String, GroupLocalSettingsPatch>,
+    pub agent_preferences: BTreeMap<String, crate::vcp_modules::agent::agent_types::AgentLocalSettingsPatch>,
+    pub model_favorites: Vec<String>,
+    pub tarven_rules: Vec<crate::vcp_modules::chat::context_injection::TarvenRule>,
+}
+
+impl BackupImportPayload {
+    pub fn is_empty(&self) -> bool {
+        self.group_preferences.is_empty()
+            && self.agent_preferences.is_empty()
+            && self.model_favorites.is_empty()
+            && self.tarven_rules.is_empty()
+    }
+}
+
+impl From<BTreeMap<String, GroupLocalSettingsPatch>> for BackupImportPayload {
+    fn from(group_preferences: BTreeMap<String, GroupLocalSettingsPatch>) -> Self {
+        Self {
+            group_preferences,
+            agent_preferences: BTreeMap::new(),
+            model_favorites: Vec::new(),
+            tarven_rules: Vec::new(),
+        }
+    }
+}
+
 enum ConfigMutation {
     Update(ConfigUpdate),
-    Import(ConfigUpdate, BTreeMap<String, GroupLocalSettingsPatch>),
+    Import(ConfigUpdate, BackupImportPayload),
 }
 
 impl Default for SettingsState {
@@ -144,17 +172,18 @@ impl SettingsState {
             .map(|response| response.result)
     }
 
-    pub(crate) async fn import_backup<F>(
+    pub(crate) async fn import_backup<F, P>(
         &self,
         db: &DbState,
         request: ConfigUpdate,
-        group_preferences: BTreeMap<String, GroupLocalSettingsPatch>,
+        payload: P,
         on_committed: F,
     ) -> Result<ConfigBackupImportResult, String>
     where
+        P: Into<BackupImportPayload> + Send + 'static,
         F: FnOnce(Arc<Settings>, Arc<ConfigSnapshot>) + Send + 'static,
     {
-        self.mutate(db, ConfigMutation::Import(request, group_preferences), on_committed)
+        self.mutate(db, ConfigMutation::Import(request, payload.into()), on_committed)
             .await
     }
 
@@ -193,14 +222,14 @@ impl SettingsState {
         let mut records = read_records(&mut transaction).await?;
         let normalized = normalize_records(&mut transaction, &mut records).await?;
         let current = Arc::new(project_records(&records)?);
-        let (prepared, group_preferences) = match request {
+        let (prepared, import_payload) = match request {
             ConfigMutation::Update(request) => (
                 prepare_update(&records, &current.snapshot, request)?,
-                BTreeMap::new(),
+                BackupImportPayload::default(),
             ),
-            ConfigMutation::Import(request, preferences) => (
+            ConfigMutation::Import(request, payload) => (
                 prepare_update(&records, &current.snapshot, request)?,
-                preferences,
+                payload,
             ),
         };
         let writes = match prepared {
@@ -214,6 +243,7 @@ impl SettingsState {
                 return Ok(ConfigBackupImportResult {
                     result: ConfigSaveResult::Rejected { issues },
                     missing_groups: false,
+                    missing_agents: false,
                 });
             }
             PreparedUpdate::Conflict(conflicts) => {
@@ -229,11 +259,12 @@ impl SettingsState {
                         conflicts,
                     },
                     missing_groups: false,
+                    missing_agents: false,
                 });
             }
             PreparedUpdate::Ready(writes) => writes,
         };
-        if writes.is_empty() && group_preferences.is_empty() {
+        if writes.is_empty() && import_payload.is_empty() {
             transaction.commit().await?;
             *self.inner.cache.write().await = Some(current.clone());
             drop(guard);
@@ -245,26 +276,57 @@ impl SettingsState {
                     snapshot: current.snapshot.as_ref().clone(),
                 },
                 missing_groups: false,
+                missing_agents: false,
             });
         }
 
-        // Group-local preferences and configuration domains share this commit.
-        // Neither a conflict nor an invalid domain patch may partially restore groups.
-        let missing_groups = if !group_preferences.is_empty() {
+        // 1. Domains: write config_domains
+        let mut next_records = records;
+        for write in writes {
+            persist_record(&mut transaction, write.domain, &write.record).await?;
+            next_records.insert(write.domain, write.record);
+        }
+
+        // 2. Group local settings
+        let missing_groups = if !import_payload.group_preferences.is_empty() {
             crate::vcp_modules::group::group_service::import_group_local_settings(
                 &mut transaction,
-                &group_preferences,
+                &import_payload.group_preferences,
             )
             .await?
         } else {
             false
         };
 
-        let mut next_records = records;
-        for write in writes {
-            persist_record(&mut transaction, write.domain, &write.record).await?;
-            next_records.insert(write.domain, write.record);
+        // 3. Agent local settings
+        let missing_agents = if !import_payload.agent_preferences.is_empty() {
+            crate::vcp_modules::agent::agent_service::import_agent_local_settings(
+                &mut transaction,
+                &import_payload.agent_preferences,
+            )
+            .await?
+        } else {
+            false
+        };
+
+        // 4. Model favorites
+        if !import_payload.model_favorites.is_empty() {
+            crate::vcp_modules::infra::model_manager::import_model_favorites(
+                &mut transaction,
+                &import_payload.model_favorites,
+            )
+            .await?;
         }
+
+        // 5. Tarven rules
+        if !import_payload.tarven_rules.is_empty() {
+            crate::vcp_modules::chat::context_injection::import_tarven_rules(
+                &mut transaction,
+                &import_payload.tarven_rules,
+            )
+            .await?;
+        }
+
         // Projection is fallible; finish it before committing so an internal
         // schema error cannot leave committed data without a publishable state.
         let next = Arc::new(project_records(&next_records)?);
@@ -279,6 +341,7 @@ impl SettingsState {
                 snapshot: next.snapshot.as_ref().clone(),
             },
             missing_groups,
+            missing_agents,
         })
     }
 }

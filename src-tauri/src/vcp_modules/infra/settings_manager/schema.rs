@@ -85,8 +85,7 @@ fn collect_fields(
         domain,
         path: prefix.into(),
         kind,
-        backup: !matches!(domain, ConfigDomain::Navigation)
-            && !(domain == ConfigDomain::Sync && matches!(prefix, "logLevel" | "prerenderEnabled")),
+        backup: !(domain == ConfigDomain::Sync && matches!(prefix, "logLevel" | "prerenderEnabled")),
         secret: matches!(
             (domain, prefix),
             (ConfigDomain::Server, "apiKey" | "adminPassword" | "fileKey")

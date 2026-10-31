@@ -38,7 +38,7 @@ impl Default for TarvenRule {
 }
 
 impl TarvenRule {
-    fn defaults_for_id(id: &str) -> Self {
+    pub(crate) fn defaults_for_id(id: &str) -> Self {
         let mut rule = Self { id: id.into(), ..Self::default() };
         let preset = match id {
             "system_meta_injection" => Some(("系统元数据注入", true,
@@ -722,6 +722,97 @@ pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String>
     Ok(())
 }
 
+pub async fn import_tarven_rules(
+    connection: &mut sqlx::SqliteConnection,
+    rules: &[TarvenRule],
+) -> Result<(), String> {
+    for rule in rules {
+        if rule.id.trim().is_empty() {
+            continue;
+        }
+        let is_preset = rule.sort_order == -100
+            || rule.id == "system_meta_injection"
+            || rule.id == "time_anchoring_v2";
+
+        if is_preset {
+            let is_enabled_int = if rule.is_enabled { 1i64 } else { 0i64 };
+            let now = chrono::Local::now().timestamp_millis();
+
+            // 预置规则：仅更新 is_enabled 与 updated_at，绝不覆盖 content / name / meta
+            let affected = sqlx::query(
+                "UPDATE tarven_rules SET is_enabled = ?, updated_at = ? WHERE id = ?"
+            )
+            .bind(is_enabled_int)
+            .bind(now)
+            .bind(&rule.id)
+            .execute(&mut *connection)
+            .await
+            .map_err(|e| format!("更新预置规则状态失败 {}: {}", rule.id, e))?
+            .rows_affected();
+
+            if affected == 0 {
+                // 空库容错：从内置代码取权威默认定义，并应用备份中的 is_enabled 开关
+                let preset = TarvenRule::defaults_for_id(&rule.id);
+                sqlx::query(
+                    "INSERT INTO tarven_rules (id, name, rule_type, is_enabled, content, scope, wrap, sort_order, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, 'global', 0, -100, ?, ?)"
+                )
+                .bind(&preset.id)
+                .bind(&preset.name)
+                .bind(&preset.rule_type)
+                .bind(is_enabled_int)
+                .bind(&preset.content)
+                .bind(now)
+                .bind(now)
+                .execute(&mut *connection)
+                .await
+                .map_err(|e| format!("初始化预置规则失败 {}: {}", preset.id, e))?;
+            }
+        } else {
+            // 用户自定义规则：先归一化校验，再执行全字段 UPSERT
+            let mut normalized = rule.clone();
+            normalized.normalize();
+            let now = chrono::Local::now().timestamp_millis();
+            let is_enabled_int = if normalized.is_enabled { 1i64 } else { 0i64 };
+            let wrap_int = if normalized.wrap { 1i64 } else { 0i64 };
+
+            sqlx::query(
+                "INSERT INTO tarven_rules (id, name, rule_type, is_enabled, content, scope, wrap, role, depth, position, sort_order, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    rule_type = excluded.rule_type,
+                    is_enabled = excluded.is_enabled,
+                    content = excluded.content,
+                    scope = excluded.scope,
+                    wrap = excluded.wrap,
+                    role = excluded.role,
+                    depth = excluded.depth,
+                    position = excluded.position,
+                    sort_order = excluded.sort_order,
+                    updated_at = excluded.updated_at"
+            )
+            .bind(&normalized.id)
+            .bind(&normalized.name)
+            .bind(&normalized.rule_type)
+            .bind(is_enabled_int)
+            .bind(&normalized.content)
+            .bind(&normalized.scope)
+            .bind(wrap_int)
+            .bind(&normalized.role)
+            .bind(normalized.depth)
+            .bind(&normalized.position)
+            .bind(normalized.sort_order)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *connection)
+            .await
+            .map_err(|e| format!("写入自定义规则失败 {}: {}", normalized.id, e))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod default_recovery_tests {
     use super::*;
@@ -811,5 +902,110 @@ mod default_recovery_tests {
         let mut deep = TarvenRule { depth: Some(100), ..rule };
         deep.normalize();
         assert_eq!(deep.depth, Some(100));
+    }
+
+    #[tokio::test]
+    async fn import_tarven_rules_protects_preset_content_and_upserts_custom_rules() {
+        let db = database().await;
+        sync_system_preset_rules(&db.pool).await.unwrap();
+        let hacked_preset = TarvenRule {
+            id: "system_meta_injection".into(),
+            name: "Tampered".into(),
+            rule_type: "system_suffix".into(),
+            is_enabled: false,
+            content: "HACKED MALICIOUS PROMPT".into(),
+            scope: "global".into(),
+            wrap: false,
+            role: None,
+            depth: None,
+            position: None,
+            sort_order: -100,
+        };
+
+        let custom_rule = TarvenRule {
+            id: "custom_rule_1".into(),
+            name: "硬汉侦探".into(),
+            rule_type: "system_suffix".into(),
+            is_enabled: true,
+            content: "第一人称叙事".into(),
+            scope: "global".into(),
+            wrap: true,
+            role: Some("user".into()),
+            depth: Some(0),
+            position: Some("append".into()),
+            sort_order: 10,
+        };
+
+        {
+            let mut conn = db.pool.acquire().await.unwrap();
+            import_tarven_rules(&mut conn, &[hacked_preset, custom_rule]).await.unwrap();
+        }
+
+        // 验证预置规则：is_enabled 被更新为 false，但 content 和 name 保持官方内置定义！
+        let (name, is_enabled, content): (String, i64, String) = sqlx::query_as(
+            "SELECT name, is_enabled, content FROM tarven_rules WHERE id = 'system_meta_injection'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(is_enabled, 0, "预置规则的 is_enabled 应该被更新为 false");
+        assert_eq!(name, "系统元数据注入", "预置规则的 name 严禁被篡改");
+        assert_ne!(content, "HACKED MALICIOUS PROMPT", "预置规则的 content 严禁被覆盖");
+        assert!(content.contains("当前系统时间"), "预置规则内容保留内置默认");
+
+        // 验证自定义规则：成功插入
+        let (custom_name, custom_content): (String, String) = sqlx::query_as(
+            "SELECT name, content FROM tarven_rules WHERE id = 'custom_rule_1'"
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(custom_name, "硬汉侦探");
+        assert_eq!(custom_content, "第一人称叙事");
+    }
+
+    #[tokio::test]
+    async fn import_tarven_rules_fallback_to_defaults_on_empty_db() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let preset_backup = TarvenRule {
+            id: "system_meta_injection".into(),
+            name: "Ignored".into(),
+            rule_type: "system_meta_injection".into(),
+            is_enabled: false,
+            content: "Ignored Content".into(),
+            scope: "global".into(),
+            wrap: false,
+            role: None,
+            depth: None,
+            position: None,
+            sort_order: -100,
+        };
+
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            import_tarven_rules(&mut conn, &[preset_backup]).await.unwrap();
+        }
+
+        let (name, is_enabled, content): (String, i64, String) = sqlx::query_as(
+            "SELECT name, is_enabled, content FROM tarven_rules WHERE id = 'system_meta_injection'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(is_enabled, 0, "空库初始化时使用备份的 is_enabled 开关");
+        assert_eq!(name, "系统元数据注入", "空库初始化回退 defaults_for_id 官方名称");
+        assert!(content.contains("当前系统时间"), "空库初始化回退 defaults_for_id 官方内容");
     }
 }

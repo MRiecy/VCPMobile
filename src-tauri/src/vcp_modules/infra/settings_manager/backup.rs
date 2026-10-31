@@ -1,9 +1,14 @@
 use super::schema;
 use super::{read_config_snapshot, ConfigDomain, ConfigSnapshot, SettingsState};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Manager, Runtime, State};
 use std::collections::BTreeMap;
+use crate::vcp_modules::agent::{
+    agent_service,
+    agent_types::AgentLocalSettingsPatch,
+};
+use crate::vcp_modules::chat::context_injection::TarvenRule;
 use crate::vcp_modules::group::{
     group_service,
     group_types::{GroupLocalSettings, GroupLocalSettingsPatch},
@@ -12,13 +17,41 @@ use tokio::io::AsyncReadExt;
 
 const MAX_CONFIG_BACKUP_BYTES: u64 = 1024 * 1024;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StandaloneBackupData {
+    #[serde(default)]
+    pub model_favorites: Vec<String>,
+    #[serde(default)]
+    pub tarven_rules: Vec<TarvenRule>,
+}
+
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedConfigBackup {
-    domains: Map<String, Value>,
-    preferences: Map<String, Value>,
-    group_preferences: BTreeMap<String, GroupLocalSettingsPatch>,
-    exported_at: String,
+    pub domains: Map<String, Value>,
+    pub preferences: Map<String, Value>,
+    pub agent_preferences: BTreeMap<String, AgentLocalSettingsPatch>,
+    pub group_preferences: BTreeMap<String, GroupLocalSettingsPatch>,
+    pub standalone_data: StandaloneBackupData,
+    pub exported_at: String,
+}
+
+pub fn parse_standalone_data_backup(
+    value: &Value,
+) -> Result<(Vec<String>, Vec<TarvenRule>), String> {
+    let Some(obj) = value.as_object() else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let model_favorites: Vec<String> = match obj.get("modelFavorites") {
+        Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let tarven_rules: Vec<TarvenRule> = match obj.get("tarvenRules") {
+        Some(v) => serde_json::from_value(v.clone()).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok((model_favorites, tarven_rules))
 }
 
 // Preferences keep their frontend owners. Preserve supplied values for their
@@ -31,6 +64,9 @@ fn parse_backup_preferences(raw: Option<&Value>) -> Result<Map<String, Value>, S
     let Some(source) = raw.as_object() else {
         preferences.insert("theme".into(), Value::Null);
         preferences.insert("chat".into(), Value::Null);
+        preferences.insert("topic".into(), Value::Null);
+        preferences.insert("diary".into(), Value::Null);
+        preferences.insert("client".into(), Value::Null);
         return Ok(preferences);
     };
     for (group, fields) in [
@@ -39,6 +75,9 @@ fn parse_backup_preferences(raw: Option<&Value>) -> Result<Map<String, Value>, S
             "presentationMode", "smoothStreamingEnabled",
             "messageHapticsEnabled", "collapseToolsWhileStreaming",
         ][..]),
+        ("topic", &["sortMode", "pinnedTopicKeys"][..]),
+        ("diary", &["hiddenFolders", "folderOrder", "collapsedCategories"][..]),
+        ("client", &["autoCheckUpdate"][..]),
     ] {
         let Some(value) = source.get(group) else { continue; };
         if let Some(object) = value.as_object() {
@@ -97,7 +136,9 @@ fn parse_v1_backup(raw: &Value) -> Result<ParsedConfigBackup, String> {
         domains,
         // v1 never owned UI preferences; even unexpected preferences are ignored.
         preferences: Map::new(),
+        agent_preferences: BTreeMap::new(),
         group_preferences: BTreeMap::new(),
+        standalone_data: StandaloneBackupData::default(),
         exported_at: raw["exportedAt"].as_str().unwrap_or_default().to_string(),
     })
 }
@@ -121,11 +162,20 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
         ("domains", serde_json::json!(super::Settings::default())),
         ("settings", serde_json::json!({})),
         // Only the shape belongs here; defaults remain with the frontend owner.
-        ("preferences", serde_json::json!({"theme":{},"chat":{}})),
+        ("preferences", serde_json::json!({"theme":{},"chat":{},"topic":{},"diary":{},"client":{}})),
     ] {
         if let Some(value) = source.get(key) {
             raw.insert(key.into(), schema::parse_config_json(value.get(), &shape));
         }
+    }
+    if let Some(value) = source.get("agentPreferences") {
+        let agents = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
+        let shape = serde_json::json!(crate::vcp_modules::agent::agent_types::AgentLocalPreferences::default());
+        raw.insert("agentPreferences".into(), match agents {
+            Ok(agents) => Value::Object(agents.into_iter().map(|(id, value)|
+                (id, schema::parse_config_json(value.get(), &shape))).collect()),
+            Err(_) => Value::Null,
+        });
     }
     if let Some(value) = source.get("groupPreferences") {
         let groups = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
@@ -135,6 +185,11 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
                 (id, schema::parse_config_json(value.get(), &shape))).collect()),
             Err(_) => Value::Null,
         });
+    }
+    if let Some(value) = source.get("standaloneData") {
+        if let Ok(parsed) = serde_json::from_str::<Value>(value.get()) {
+            raw.insert("standaloneData".into(), parsed);
+        }
     }
     let raw = Value::Object(raw);
     if raw["app"] != "vcp-mobile" || raw["kind"] != "vcp-mobile-settings-backup" {
@@ -168,9 +223,23 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     Ok(ParsedConfigBackup {
         domains,
         preferences: parse_backup_preferences(raw.get("preferences"))?,
+        agent_preferences: match raw.get("agentPreferences") {
+            Some(value) => agent_service::parse_agent_local_settings_backup(value)?,
+            None => BTreeMap::new(),
+        },
         group_preferences: match raw.get("groupPreferences") {
             Some(value) => group_service::parse_group_local_settings_backup(value)?,
             None => BTreeMap::new(),
+        },
+        standalone_data: match raw.get("standaloneData") {
+            Some(value) => {
+                let (model_favorites, tarven_rules) = parse_standalone_data_backup(value)?;
+                StandaloneBackupData {
+                    model_favorites,
+                    tarven_rules,
+                }
+            }
+            None => StandaloneBackupData::default(),
         },
         exported_at: raw["exportedAt"].as_str().unwrap_or_default().to_string(),
     })
@@ -299,7 +368,11 @@ mod tests {
         let mut snapshot = snapshot();
         snapshot.data.server.api_key = "kept-plaintext".into();
         let domains = backup_domains(&snapshot).unwrap();
-        assert!(!domains.contains_key("navigation"));
+        assert!(domains.contains_key("navigation"));
+        assert_eq!(
+            domains["navigation"],
+            serde_json::json!({"agentOrder": [], "groupOrder": []})
+        );
         assert!(domains["sync"].get("logLevel").is_none());
         assert!(domains["sync"].get("prerenderEnabled").is_none());
         assert_eq!(domains["server"]["apiKey"], "kept-plaintext");
@@ -416,7 +489,10 @@ mod tests {
             "asr":{"language":"en"}
         }));
         assert_eq!(parsed.domains["sync"], json!({"token":"keep-token"}));
-        assert!(!parsed.domains.contains_key("navigation"));
+        assert_eq!(
+            parsed.domains["navigation"],
+            serde_json::json!({"agentOrder": ["not-imported"]})
+        );
         assert!(!parsed.domains.contains_key("unknown-domain"));
         let invalid_domain = parse_backup_bytes(&backup(json!({"server":false}))).unwrap();
         assert_eq!(invalid_domain.domains["server"], schema::domain_defaults(ConfigDomain::Server));
@@ -475,6 +551,7 @@ mod tests {
             Value::Object(parsed.domains),
             json!({
                 "identity":{"userName":schema::domain_defaults(ConfigDomain::Identity)["userName"]},
+                "navigation":{"agentOrder":["not-imported"]},
                 "server":{"apiKey":""}, "distributed":{"enabled":false},
                 "voice":{"asr":{"stream":false},"tts":{"cloneSampleId":""}},
             })
@@ -504,7 +581,10 @@ mod tests {
                 "domains":{}, "preferences":preferences,
             })).unwrap();
             let parsed = parse_backup_bytes(&bytes).unwrap();
-            assert_eq!(Value::Object(parsed.preferences), json!({"theme":null,"chat":null}));
+            assert_eq!(
+                Value::Object(parsed.preferences),
+                json!({"theme":null,"chat":null,"topic":null,"diary":null,"client":null})
+            );
         }
     }
 
@@ -533,5 +613,92 @@ mod tests {
             Value::Object(parsed.preferences),
             json!({"theme":{"mode":"system"},"chat":{"messageHapticsEnabled":false}})
         );
+    }
+
+    #[test]
+    fn v2_full_backup_parses_all_standalone_and_preferences_data() {
+        let v2_data = json!({
+            "app": "vcp-mobile",
+            "kind": "vcp-mobile-settings-backup",
+            "version": 2,
+            "exportedAt": "2026-10-31T12:00:00Z",
+            "domains": {
+                "navigation": {
+                    "agentOrder": ["agent-1", "agent-2"],
+                    "groupOrder": ["group-1"]
+                }
+            },
+            "preferences": {
+                "theme": { "mode": "dark", "themeKey": "cyberpunk" },
+                "chat": { "presentationMode": "bubble", "smoothStreamingEnabled": true },
+                "topic": { "sortMode": "updated", "pinnedTopicKeys": ["t-1"] },
+                "diary": { "hiddenFolders": ["secret"], "folderOrder": ["f-1"], "collapsedCategories": [] },
+                "client": { "autoCheckUpdate": true }
+            },
+            "agentPreferences": {
+                "agent-1": {
+                    "mobileSystemPrompt": "移动端专用提示词",
+                    "useTemperature": true,
+                    "voice": {
+                        "enabled": true,
+                        "mode": "builtin",
+                        "voice": "Mia",
+                        "stream": true,
+                        "cloneSampleId": ""
+                    }
+                }
+            },
+            "groupPreferences": {
+                "group-1": {
+                    "chatMode": "sequential",
+                    "enableContextMessageWindow": true,
+                    "contextMessageWindowSize": 50
+                }
+            },
+            "standaloneData": {
+                "modelFavorites": ["gemini-2.5-flash", "claude-3-7-sonnet"],
+                "tarvenRules": [
+                    {
+                        "id": "system_meta_injection",
+                        "name": "系统元数据注入",
+                        "ruleType": "system_meta_injection",
+                        "isEnabled": false,
+                        "content": "包含当前系统时间",
+                        "scope": "global",
+                        "wrap": false,
+                        "sortOrder": -100
+                    }
+                ]
+            }
+        });
+
+        let bytes = serde_json::to_vec(&v2_data).unwrap();
+        let parsed = parse_backup_bytes(&bytes).unwrap();
+
+        // 1. Domains: navigation exported and parsed
+        assert_eq!(parsed.domains["navigation"]["agentOrder"], json!(["agent-1", "agent-2"]));
+        assert_eq!(parsed.domains["navigation"]["groupOrder"], json!(["group-1"]));
+
+        // 2. Preferences
+        assert_eq!(parsed.preferences["theme"]["themeKey"], "cyberpunk");
+        assert_eq!(parsed.preferences["topic"]["sortMode"], "updated");
+        assert_eq!(parsed.preferences["topic"]["pinnedTopicKeys"], json!(["t-1"]));
+        assert_eq!(parsed.preferences["diary"]["hiddenFolders"], json!(["secret"]));
+        assert_eq!(parsed.preferences["client"]["autoCheckUpdate"], true);
+
+        // 3. Agent preferences
+        assert!(parsed.agent_preferences.contains_key("agent-1"));
+        let agent_patch = &parsed.agent_preferences["agent-1"];
+        assert_eq!(agent_patch.0["mobileSystemPrompt"], "移动端专用提示词");
+        assert_eq!(agent_patch.0["useTemperature"], true);
+
+        // 4. Group preferences
+        assert!(parsed.group_preferences.contains_key("group-1"));
+
+        // 5. Standalone data
+        assert_eq!(parsed.standalone_data.model_favorites, vec!["gemini-2.5-flash", "claude-3-7-sonnet"]);
+        assert_eq!(parsed.standalone_data.tarven_rules.len(), 1);
+        assert_eq!(parsed.standalone_data.tarven_rules[0].id, "system_meta_injection");
+        assert!(!parsed.standalone_data.tarven_rules[0].is_enabled);
     }
 }

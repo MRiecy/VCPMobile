@@ -5,10 +5,13 @@ import { isIOS } from "../../../core/utils/platform";
 import { cancelFileOperation } from "../../../core/utils/nativeFilePicker";
 import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
 import VcpConfirm from "../../../components/ui/VcpConfirm.vue";
+import { vGuide } from "../../guide/directives/vGuide";
 import {
   exportConfigBackup,
   captureBackupDomains,
   captureBackupGroupPreferences,
+  captureBackupAgentPreferences,
+  captureBackupStandaloneData,
   pickConfigBackup,
   configBackupScopes,
   type BackupImportResult,
@@ -41,10 +44,15 @@ const onExport = async () => {
     const saved = await props.commit();
     if (disposed || !props.active) return;
     if (!saved.ok) throw new Error(saved.error);
-    const [domains, groupPreferences] = await Promise.all([captureBackupDomains(), captureBackupGroupPreferences()]);
+    const [domains, groupPreferences, agentPreferences, standaloneData] = await Promise.all([
+      captureBackupDomains(),
+      captureBackupGroupPreferences().catch(() => ({})),
+      captureBackupAgentPreferences().catch(() => ({})),
+      captureBackupStandaloneData().catch(() => ({ modelFavorites: [], tarvenRules: [] })),
+    ]);
     if (disposed || !props.active) return;
     exportOperationId = `config_export_${crypto.randomUUID()}`;
-    const result = await exportConfigBackup(domains, exportOperationId, groupPreferences);
+    const result = await exportConfigBackup(domains, exportOperationId, groupPreferences, agentPreferences, standaloneData);
     if (disposed || !props.active) return;
     exportStatus.value = {
       type: "success",
@@ -155,10 +163,10 @@ const confirmImport = async () => {
 </script>
 
 <template>
-  <div class="space-y-5 px-1">
+  <div v-guide="'settings-config-backup-section'" class="space-y-5 px-1">
     <SettingsActionWithStatus
       title="导出配置"
-      description="备份身份、连接、语音、JEV、群聊设置、主题与聊天偏好"
+      description="备份身份、连接、语音、JEV、助手与群聊设置、主题与聊天偏好"
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"

@@ -23,7 +23,7 @@ macro_rules! app_command_handler {
         use crate::distributed;
         use crate::vcp_modules::agent_chat_application_service::handle_agent_chat_message;
         use crate::vcp_modules::agent_service::{
-            create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config,
+            create_agent, delete_agent, export_agent_preferences, get_agents, get_assistants_snapshot, read_agent_config,
             save_agent_config, update_agent_config,
         };
         use crate::vcp_modules::agentmgr::{
@@ -239,6 +239,7 @@ macro_rules! app_command_handler {
                 batch_get_avatars,
                 create_agent,
                 delete_agent,
+                export_agent_preferences,
                 get_agents,
                 get_assistants_snapshot,
                 get_avatar,
