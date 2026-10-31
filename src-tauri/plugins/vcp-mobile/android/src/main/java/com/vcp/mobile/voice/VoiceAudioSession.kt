@@ -3,18 +3,24 @@ package com.vcp.mobile.voice
 import android.app.Activity
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 internal data class VoiceOutputProfile(val generation: Long, val usage: Int, val legacySco: Boolean,
-    val headphones: AudioDeviceInfo? = null)
+    val headphones: AudioDeviceInfo? = null, val bluetoothSink: AudioDeviceInfo? = null) {
+    val verifiesOutput get() = headphones != null || bluetoothSink != null
+    fun acceptsOutput(actual: AudioDeviceInfo?) = if (bluetoothSink != null) bluetoothSink.id == actual?.id
+        else VoiceAudioRouting.sameMediaRoute(headphones, actual)
+}
 
-/** Audio routing survives microphone mute. Only call boundaries change communication/media mode. */
+/** Routing survives mute. Call boundaries and microphone changes can reconfigure live playback. */
 internal class VoiceAudioSession(private val activity: Activity) {
-    private data class Route(val generation: Long, val forCall: Boolean, val headphones: AudioDeviceInfo?, val routing: VoiceAudioRouting,
+    private data class Route(val generation: Long, val forCall: Boolean, val input: VoiceInputDevice?, val headphones: AudioDeviceInfo?, val routing: VoiceAudioRouting,
         val name: AtomicReference<String> = AtomicReference("unknown"))
     private val main = Handler(Looper.getMainLooper())
     private val route = AtomicReference<Route?>(null)
@@ -23,6 +29,8 @@ internal class VoiceAudioSession(private val activity: Activity) {
     private val outputs = LinkedHashSet<OutputLease>()
     private val endedCalls = LinkedHashSet<String>()
     private var call: String? = null
+    private var selectedInput: VoiceInputDevice? = null
+    private var mediaBeforeBluetooth: AudioDeviceInfo? = null
     private var callAudioActivated = false
     private var generation = 0L
     private var transitioning = false
@@ -50,11 +58,13 @@ internal class VoiceAudioSession(private val activity: Activity) {
         if (endedCalls.size > 32) endedCalls.remove(endedCalls.first())
         if (call != id) return
         call = null
+        selectedInput = null
+        mediaBeforeBluetooth = null
         callAudioActivated = false
         reconcile()
     }
 
-    inner class InputLease internal constructor(val callId: String, internal val changed: (String) -> Unit,
+    inner class InputLease internal constructor(val callId: String, val input: VoiceInputDevice?, internal val changed: (String) -> Unit,
         internal val interrupted: (String) -> Unit) : AutoCloseable {
         private val closed = AtomicBoolean(false)
         fun awaitReady(stopped: () -> Boolean): VoiceOutputProfile = awaitProfile { closed.get() || stopped() }
@@ -78,9 +88,14 @@ internal class VoiceAudioSession(private val activity: Activity) {
         }
     }
 
-    fun acquireInput(callId: String, changed: (String) -> Unit, interrupted: (String) -> Unit): InputLease {
+    fun acquireInput(callId: String, changed: (String) -> Unit, interrupted: (String) -> Unit, inputDeviceId: String? = null): InputLease {
         check(hasCall(callId)) { "cancelled:voice_call" }
-        val lease = InputLease(callId, changed, interrupted)
+        val input = inputDeviceId?.let { id ->
+            VoiceInputDevice.available(activity.getSystemService(AudioManager::class.java)).firstOrNull { it.id == id }
+                ?: throw IllegalStateException("voice_input_unavailable")
+        }
+        selectedInput = input
+        val lease = InputLease(callId, input, changed, interrupted)
         inputs.add(lease)
         callAudioActivated = true
         suspended = false
@@ -115,7 +130,8 @@ internal class VoiceAudioSession(private val activity: Activity) {
                 val communication = selected.forCall && selected.headphones == null
                 return VoiceOutputProfile(selected.generation,
                     if (communication) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA,
-                    communication && Build.VERSION.SDK_INT < 31 && selected.name.get() == "bluetooth", selected.headphones)
+                    communication && Build.VERSION.SDK_INT < 31 && selected.name.get() == "bluetooth", selected.headphones,
+                    selected.input?.bluetoothSink)
             }
         }
         throw InterruptedException("cancelled:voice_audio_route")
@@ -126,7 +142,7 @@ internal class VoiceAudioSession(private val activity: Activity) {
         val needed = (call != null && callAudioActivated) || inputs.isNotEmpty() || outputs.isNotEmpty()
         val forCall = call != null || inputs.isNotEmpty()
         val existing = physicalRoute
-        if (needed && !transitioning && existing?.forCall == forCall) return
+        if (needed && !transitioning && existing?.forCall == forCall && existing.input?.id == selectedInput?.id) return
         val request = ++generation
         if (!needed) {
             transitioning = false
@@ -139,26 +155,50 @@ internal class VoiceAudioSession(private val activity: Activity) {
         outputBarrier {
             onMain {
                 if (request != generation || destroyed || suspended) return@onMain
+                val input = selectedInput
+                if (input?.bluetoothSink != null && physicalRoute?.input?.bluetoothSink == null && mediaBeforeBluetooth == null) {
+                    try { mediaBeforeBluetooth = VoiceAudioRouting.mediaHeadphones(activity) }
+                    catch (_: Exception) { interrupt("audio_route_unavailable"); return@onMain }
+                }
                 physicalRoute?.routing?.close()
                 physicalRoute = null
-                try {
-                    val headphones = if (forCall) VoiceAudioRouting.mediaHeadphones(activity) else null
-                    lateinit var next: Route
-                    val hardware = VoiceAudioRouting(activity, changed = { name ->
-                        if (route.get() === next) {
-                            next.name.set(name)
-                            inputs.toList().forEach { it.changed(name) }
-                        }
-                    }, interrupted = ::interrupt, forCall = forCall, headphones = headphones)
-                    next = Route(request, forCall, headphones, hardware)
-                    physicalRoute = next
-                    route.set(next)
-                    hardware.open()
-                    transitioning = false
-                } catch (error: Throwable) {
-                    interrupt("audio_route_unavailable")
-                }
+                openRoute(request, forCall, input, SystemClock.elapsedRealtime() + 3_000)
             }
+        }
+    }
+
+    private fun openRoute(request: Long, forCall: Boolean, input: VoiceInputDevice?, deadline: Long) {
+        if (request != generation || destroyed || suspended) return
+        try {
+            val mediaCall = forCall && input?.bluetoothSink == null
+            val headphones = if (mediaCall) VoiceAudioRouting.mediaHeadphones(activity) else null
+            val previous = mediaBeforeBluetooth
+            if (mediaCall && previous != null && headphones == null) {
+                // SCO teardown and A2DP restoration are asynchronous. Keep the old track
+                // drained and MODE_NORMAL until media policy selects its real destination.
+                if (SystemClock.elapsedRealtime() < deadline) {
+                    main.postDelayed({ openRoute(request, forCall, input, deadline) }, 75)
+                    return
+                }
+                check(!VoiceAudioRouting.hasConnectedMediaHeadphones(activity, previous)) { "audio_route_unavailable" }
+            }
+            if (input?.bluetoothSink == null) mediaBeforeBluetooth = null
+            lateinit var next: Route
+            val hardware = VoiceAudioRouting(activity, changed = { name ->
+                if (route.get() === next) {
+                    next.name.set(name)
+                    inputs.toList().forEach { it.changed(name) }
+                }
+            }, interrupted = { reason -> if (route.get() === next) interrupt(reason) },
+                forCall = forCall, headphones = headphones, input = input)
+            next = Route(request, forCall, input, headphones, hardware)
+            physicalRoute = next
+            route.set(next)
+            hardware.open()
+            transitioning = false
+        } catch (_: Exception) {
+            mediaBeforeBluetooth = null
+            interrupt("audio_route_unavailable")
         }
     }
 

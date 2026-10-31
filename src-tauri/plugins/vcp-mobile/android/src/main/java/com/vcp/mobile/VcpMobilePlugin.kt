@@ -278,6 +278,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun endVoiceCall(invoke: Invoke) = voiceAudio.endVoiceCall(invoke)
 
     @Command
+    fun listVoiceInputDevices(invoke: Invoke) = voiceAudio.listVoiceInputDevices(invoke)
+
+    @Command
     fun startVoiceAudio(invoke: Invoke) = voiceAudio.startVoiceAudio(invoke)
 
     @Command

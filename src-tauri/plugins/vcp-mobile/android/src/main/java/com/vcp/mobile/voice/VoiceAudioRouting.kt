@@ -25,6 +25,7 @@ internal class VoiceAudioRouting(
     private val interrupted: (String) -> Unit,
     private val forCall: Boolean,
     private val headphones: AudioDeviceInfo?,
+    private val input: VoiceInputDevice?,
 ) : AutoCloseable {
     private val context = context.applicationContext
     private val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -79,6 +80,7 @@ internal class VoiceAudioRouting(
 
     fun open() {
         check(Looper.myLooper() == Looper.getMainLooper())
+        if (input != null) check(VoiceInputDevice.available(manager).any { it.id == input.id }) { "voice_input_unavailable" }
         check(manager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "audio_focus_unavailable" }
         focusGranted = true
         if (!forCall) {
@@ -100,12 +102,13 @@ internal class VoiceAudioRouting(
         manager.mode = AudioManager.MODE_IN_COMMUNICATION
         modeRequested = true
         if (Build.VERSION.SDK_INT >= 31) {
-            communicationRoute = Api31CommunicationRoute(context, manager, ::allowsCommunicationAccessory, ::reportRoute, ready::countDown)
+            communicationRoute = Api31CommunicationRoute(context, manager, input, ::allowsCommunicationAccessory,
+                ::reportRoute, ready::countDown) { interrupted("audio_route_changed") }
             communicationRoute?.open()
         } else {
             @Suppress("DEPRECATION")
             val hasSco = manager.getDevices(AudioManager.GET_DEVICES_ALL).any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-            if (hasSco && allowsCommunicationAccessory() && manager.isBluetoothScoAvailableOffCall) {
+            if ((input?.bluetoothSink != null || (hasSco && allowsCommunicationAccessory())) && manager.isBluetoothScoAvailableOffCall) {
                 val sticky = context.registerReceiver(scoReceiver, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
                 scoRegistered = true
                 scoRequested = true
@@ -138,7 +141,7 @@ internal class VoiceAudioRouting(
 
     // A connected headset can be deselected in the system media picker.
     // Keep that choice; only use a communication-only accessory if it has no media route.
-    private fun allowsCommunicationAccessory() = manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).none(::isMediaHeadphones)
+    private fun allowsCommunicationAccessory() = input == null && manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).none(::isMediaHeadphones)
 
     private fun legacyAccessory() = if (allowsCommunicationAccessory())
         manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull(::isExternal) else null
@@ -156,7 +159,8 @@ internal class VoiceAudioRouting(
 
     private fun reconcileDevices() {
         if (closed.get()) return
-        if (!sameMediaRoute(headphones, mediaHeadphones(context))) {
+        if ((input != null && VoiceInputDevice.available(manager).none { it.id == input.id }) ||
+            (input?.bluetoothSink == null && !sameMediaRoute(headphones, mediaHeadphones(context)))) {
             interrupted("audio_route_changed")
             return
         }
@@ -207,17 +211,22 @@ internal class VoiceAudioRouting(
     private class Api31CommunicationRoute(
         private val context: Context,
         private val manager: AudioManager,
+        private val input: VoiceInputDevice?,
         private val allowsAccessory: () -> Boolean,
         private val report: (String, String) -> Unit,
         private val ready: () -> Unit,
+        private val lost: () -> Unit,
     ) : CommunicationRoute {
         private var selectedId: Int? = null
         private var closed = false
         private var registered = false
-        private val listener = AudioManager.OnCommunicationDeviceChangedListener { device ->
+        private var confirmed = false
+        private val listener = AudioManager.OnCommunicationDeviceChangedListener {
             if (!closed) {
+                val device = manager.communicationDevice
                 report(device?.id?.toString() ?: "none", routeName(device))
-                if (device?.id == selectedId) ready()
+                if (selectedId != null && device?.id == selectedId) { confirmed = true; ready() }
+                else if (input?.bluetoothSink != null && confirmed) lost()
             }
         }
 
@@ -233,9 +242,12 @@ internal class VoiceAudioRouting(
             val current = manager.communicationDevice
             val accessory = if (allowsAccessory()) current?.takeIf { isExternal(it) && available.any { candidate -> candidate.id == it.id } }
                 ?: available.firstOrNull(::isExternal) else null
-            val selected = accessory
+            val selected = input?.bluetoothSink?.let { target ->
+                available.firstOrNull { it.id == target.id } ?: throw IllegalStateException("voice_input_unavailable")
+            } ?: accessory
                 ?: available.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                ?: available.firstOrNull()
+                ?: available.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                ?: available.firstOrNull()?.takeIf { input == null }
                 ?: throw IllegalStateException("communication_device_unavailable")
             if (selected.id != selectedId) {
                 selectedId = selected.id
@@ -243,7 +255,7 @@ internal class VoiceAudioRouting(
             }
             val actual = manager.communicationDevice
             report(actual?.id?.toString() ?: "none", routeName(actual))
-            if (actual?.id == selectedId) ready()
+            if (actual?.id == selectedId) { confirmed = true; ready() }
         }
 
         override fun close() {
@@ -255,6 +267,10 @@ internal class VoiceAudioRouting(
     }
 
     companion object {
+        fun hasConnectedMediaHeadphones(context: Context, previous: AudioDeviceInfo): Boolean =
+            context.getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                .any { isMediaHeadphones(it) && routeName(it) == routeName(previous) }
+
         fun mediaHeadphones(context: Context): AudioDeviceInfo? {
             val audio = context.getSystemService(AudioManager::class.java)
             if (Build.VERSION.SDK_INT >= 33) {

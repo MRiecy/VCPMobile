@@ -36,7 +36,7 @@ import java.util.concurrent.Semaphore
 import java.io.File
 
 @InvokeArg
-class StartVoiceAudioArgs { var sessionId: String = ""; var callId: String = ""; var documentId: String = "" }
+class StartVoiceAudioArgs { var sessionId: String = ""; var callId: String = ""; var documentId: String = ""; var inputDeviceId: String? = null }
 @InvokeArg
 class VoiceDocumentArgs { var documentId: String = "" }
 @InvokeArg
@@ -66,13 +66,14 @@ internal class NativeVoiceAudio(
         fun reject(reason: String) { if (settled.compareAndSet(false, true)) invoke.deliverError(reason) }
     }
     private data class SegmentPosition(val epoch: Long = 1, val sampleIndex: Long = 0)
-    private class Session(val id: String, val callId: String, val invoke: Invoke) {
+    private class Session(val id: String, val callId: String, val inputDeviceId: String?, val invoke: Invoke) {
         val reply = Reply(invoke)
         val stopped = AtomicBoolean(false)
         val started = AtomicBoolean(false)
         val eventBackpressure = AtomicBoolean(false)
         val epoch = AtomicLong(1)
         val route = AtomicReference("unknown")
+        val actualInput = AtomicReference<AudioDeviceInfo?>(null)
         val segments = VoiceSegmentStore(1)
         val segmentReplies = ConcurrentHashMap.newKeySet<Reply>()
         val segmentsReleased = AtomicBoolean(false)
@@ -167,6 +168,21 @@ internal class NativeVoiceAudio(
         }
     }
 
+    fun listVoiceInputDevices(invoke: Invoke) = onMain {
+        try {
+            val audio = activity.getSystemService(AudioManager::class.java)
+            val devices = VoiceInputDevice.available(audio)
+            val actual = current.get()?.takeIf { isCurrent(it) && it.started.get() }?.actualInput?.get()
+            val active = devices.firstOrNull { it.matches(audio, actual) }
+            invoke.deliverResult(JSObject().apply {
+                put("devices", org.json.JSONArray(devices.map { device -> JSObject().apply {
+                    put("id", device.id); put("label", device.label); put("kind", device.kind)
+                } }))
+                put("activeId", active?.id ?: org.json.JSONObject.NULL)
+            })
+        } catch (_: Exception) { invoke.deliverError("voice_input_devices_unavailable") }
+    }
+
     fun startVoiceAudio(invoke: Invoke) = onMain {
         val args = try { invoke.parseArgs(StartVoiceAudioArgs::class.java) }
         catch (error: Exception) { invoke.deliverError("invalid_voice_request:${error.message}"); return@onMain }
@@ -181,7 +197,7 @@ internal class NativeVoiceAudio(
         if (!eventsReady()) { invoke.deliverError("voice_events_unavailable"); return@onMain }
         if (current.get() != null || permissionWaiter != null) { invoke.deliverError("voice_session_busy"); return@onMain }
         if (retainedCaptures.size >= 16) { invoke.deliverError("voice_segment_sessions_busy"); return@onMain }
-        val session = Session(args.sessionId, args.callId, invoke)
+        val session = Session(args.sessionId, args.callId, args.inputDeviceId, invoke)
         current.set(session)
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             permissionWaiter = session
@@ -310,15 +326,15 @@ internal class NativeVoiceAudio(
         }
     }
 
-    private fun createRecorder(session: Session, profile: VoiceOutputProfile): AudioRecord {
-        val rates = if (profile.legacySco) intArrayOf(8_000, 16_000) else intArrayOf(48_000, 16_000, 44_100)
-        val source = if (profile.headphones != null) MediaRecorder.AudioSource.MIC else MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    private fun createRecorder(session: Session, legacySco: Boolean): AudioRecord {
+        val rates = if (legacySco) intArrayOf(8_000, 16_000) else intArrayOf(48_000, 16_000, 44_100)
         for (rate in rates) {
             if (!isCurrent(session)) throw InterruptedException("cancelled")
             val minimum = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (minimum <= 0 || minimum > 256 * 1024) continue
             val recorder = try {
-                AudioRecord.Builder().setAudioSource(source)
+                // Keep speech preprocessing consistent when the media output changes.
+                AudioRecord.Builder().setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
                     .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_IN_MONO).build())
                     .setBufferSizeInBytes(maxOf(minimum * 2, rate / 20 * 2)).build()
@@ -349,7 +365,8 @@ internal class NativeVoiceAudio(
                 check(eventsReady()) { "voice_events_unavailable" }
                 audioSession.acquireInput(session.callId, changed = { route ->
                     if (isCurrent(session)) { session.route.set(route); resetAudioEpoch(session) }
-                }, interrupted = { reason -> onMain { if (isCurrent(session)) finish(session, "stopped", reason) } })
+                }, interrupted = { reason -> onMain { if (isCurrent(session)) finish(session, "stopped", reason) } },
+                    inputDeviceId = session.inputDeviceId)
                     .also { routing -> session.routing = routing }
             }
             main.post(openRoute)
@@ -359,24 +376,30 @@ internal class NativeVoiceAudio(
             catch (error: Throwable) { throw IllegalStateException("voice_model_unavailable", error) }
             detector = vad
             if (!isCurrent(session)) return
-            val input = createRecorder(session, profile)
+            val input = createRecorder(session, profile.legacySco)
             recorder = input
-            if (profile.headphones != null) {
-                val mic = activity.getSystemService(AudioManager::class.java).getDevices(AudioManager.GET_DEVICES_INPUTS)
-                    .firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
-                check(mic != null && input.setPreferredDevice(mic)) { "audio_route_unavailable" }
-            }
+            val audio = activity.getSystemService(AudioManager::class.java)
+            val selected = routing.input
+            val splitCapture = selected == null && profile.headphones != null
+            val preferred = selected?.source ?: if (splitCapture) {
+                audio.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_MIC }
+                    ?: throw IllegalStateException("audio_route_unavailable")
+            } else null
+            if (preferred != null) check(input.setPreferredDevice(preferred)) { "audio_route_unavailable" }
+            fun accepts(actual: AudioDeviceInfo?) = selected?.matches(audio, actual)
+                ?: (!splitCapture || actual?.type == AudioDeviceInfo.TYPE_BUILTIN_MIC)
             routing.bindRecordingSession(input.audioSessionId)
             val aecState = attachEffects(input.audioSessionId, effects)
             val lastDevice = AtomicReference<Int?>(null)
             routeListener = AudioRouting.OnRoutingChangedListener { source ->
                 if (isCurrent(session)) {
                     val device = source.routedDevice
-                    if (profile.headphones != null && device != null && device.type != AudioDeviceInfo.TYPE_BUILTIN_MIC) {
-                        finish(session, "stopped", "audio_route_changed")
+                    session.actualInput.set(device)
+                    if (device != null && !accepts(device)) {
+                        if (session.started.get()) finish(session, "stopped", "audio_route_changed")
                         return@OnRoutingChangedListener
                     }
-                    if (lastDevice.getAndSet(device?.id) != device?.id) resetAudioEpoch(session)
+                    if (lastDevice.getAndSet(device?.id) != device?.id && session.started.get()) resetAudioEpoch(session)
                 }
             }
             input.addOnRoutingChangedListener(routeListener, main)
@@ -392,7 +415,8 @@ internal class NativeVoiceAudio(
             val meter = VoiceAudioMeter()
             val samples = ShortArray(maxOf(160, input.sampleRate / 100))
             var lastData = android.os.SystemClock.elapsedRealtime()
-            var verifyInput = profile.headphones != null
+            val inputRouteDeadline = lastData + 5_000
+            var verifyInput = true
             while (isCurrent(session) && !Thread.currentThread().isInterrupted) {
                 if (epoch != session.epoch.get()) {
                     epoch = session.epoch.get()
@@ -404,7 +428,7 @@ internal class NativeVoiceAudio(
                     // Drop PCM buffered under the old route before the new epoch begins.
                     input.stop()
                     input.startRecording()
-                    verifyInput = profile.headphones != null
+                    verifyInput = true
                     lastData = android.os.SystemClock.elapsedRealtime()
                 }
                 val outputAtRead = voiceOutput.snapshot()
@@ -417,7 +441,14 @@ internal class NativeVoiceAudio(
                 }
                 lastData = android.os.SystemClock.elapsedRealtime()
                 if (verifyInput) {
-                    check(input.routedDevice?.type == AudioDeviceInfo.TYPE_BUILTIN_MIC) { "audio_route_changed" }
+                    val actual = input.routedDevice
+                    if (!accepts(actual)) {
+                        // Route requests are asynchronous. Drop all samples from the previous
+                        // device until the first matching read, before VAD, ASR or start acknowledgement.
+                        if (!session.started.get() && lastData < inputRouteDeadline) continue
+                        throw IllegalStateException("audio_route_changed")
+                    }
+                    session.actualInput.set(actual)
                     verifyInput = false
                 }
                 if (session.started.compareAndSet(false, true)) onMain {

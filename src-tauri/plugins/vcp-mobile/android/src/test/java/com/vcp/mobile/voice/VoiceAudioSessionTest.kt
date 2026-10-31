@@ -33,6 +33,96 @@ class VoiceAudioSessionTest {
     }
     @After fun tearDown() { session.destroy(); unmockkAll() }
 
+    private fun port(number: Int, portType: Int, deviceAddress: String = ""): AudioDeviceInfo = mockk {
+        every { id } returns number
+        every { type } returns portType
+        every { address } returns deviceAddress
+        every { productName } returns "device-$number"
+    }
+
+    @Test @Config(sdk = [33]) fun selectedBluetoothMicReconfiguresLiveOutputAndRequiresItsMatchingSource() {
+        unmockkConstructor(VoiceAudioRouting::class)
+        val audio = activity.getSystemService(AudioManager::class.java)
+        val mic = port(2, AudioDeviceInfo.TYPE_BUILTIN_MIC)
+        val media = port(10, AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        val a = port(11, AudioDeviceInfo.TYPE_BLUETOOTH_SCO, "AA")
+        val b = port(12, AudioDeviceInfo.TYPE_BLUETOOTH_SCO, "BB")
+        val inputA = port(21, AudioDeviceInfo.TYPE_BLUETOOTH_SCO, "AA")
+        val inputB = port(22, AudioDeviceInfo.TYPE_BLUETOOTH_SCO, "BB")
+        shadowOf(audio).setInputDevices(listOf(mic, inputA, inputB))
+        shadowOf(audio).setOutputDevices(listOf(media, a, b))
+        shadowOf(audio).setAvailableCommunicationDevices(listOf(a, b))
+        val attributes = AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
+        shadowOf(audio).setAudioDevicesForAttributes(attributes, ImmutableList.of(media))
+        session.beginCall("switch")
+        val initial = session.acquireInput("switch", {}, {})
+        val output = session.acquireOutput {}
+        val original = output.awaitReady { false }
+        initial.close()
+        var quiet: (() -> Unit)? = null
+        session.setOutputBarrier { quiet = it }
+        val selected = session.acquireInput("switch", {}, {}, "bluetooth:12")
+        assertNotNull(quiet)
+        assertFalse(output.isCurrent(original))
+        quiet!!.invoke()
+        val communication = output.awaitReady { false }
+        assertEquals(AudioAttributes.USAGE_VOICE_COMMUNICATION, communication.usage)
+        assertEquals(b.id, communication.bluetoothSink?.id)
+        assertTrue(communication.acceptsOutput(b))
+        assertFalse(communication.acceptsOutput(a))
+        assertTrue(selected.input!!.matches(audio, inputB))
+        assertFalse(selected.input.matches(audio, inputA))
+        assertFalse(selected.input.matches(audio, mic))
+        selected.close()
+        session.setOutputBarrier { it() }
+        val speaker = port(1, AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        shadowOf(audio).setAudioDevicesForAttributes(attributes, ImmutableList.of(speaker))
+        val builtin = session.acquireInput("switch", {}, {}, "builtin")
+        assertTrue(builtin.input!!.matches(audio, mic))
+        assertEquals(AudioManager.MODE_NORMAL, audio.mode)
+        assertFalse(output.isCurrent(communication))
+        shadowOf(audio).setAudioDevicesForAttributes(attributes, ImmutableList.of(media))
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(100))
+        assertEquals(AudioAttributes.USAGE_MEDIA, output.awaitReady { false }.usage)
+        assertEquals(AudioManager.MODE_NORMAL, audio.mode)
+        assertFalse(runCatching { session.acquireInput("switch", {}, {}, "bluetooth:99") }.isSuccess)
+    }
+
+    @Test fun legacyScoOffersOnlyOneAddressableHeadset() {
+        val audio = activity.getSystemService(AudioManager::class.java)
+        val a = port(1, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        val b = port(2, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        val input = port(3, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        shadowOf(audio).setIsBluetoothScoAvailableOffCall(true)
+        shadowOf(audio).setInputDevices(listOf(input))
+        shadowOf(audio).setOutputDevices(listOf(a, b))
+        assertTrue(VoiceInputDevice.available(audio).none { it.kind == "bluetooth" })
+        shadowOf(audio).setOutputDevices(listOf(a))
+        val choice = VoiceInputDevice.available(audio).single()
+        assertTrue(choice.matches(audio, input))
+        shadowOf(audio).setOutputDevices(listOf(b))
+        assertFalse(choice.matches(audio, input))
+    }
+
+    @Test @Config(sdk = [33]) fun explicitPhoneMicDoesNotAcquireACommunicationOnlyBluetoothAccessory() {
+        unmockkConstructor(VoiceAudioRouting::class)
+        val audio = activity.getSystemService(AudioManager::class.java)
+        val mic = port(2, AudioDeviceInfo.TYPE_BUILTIN_MIC)
+        val sco = port(4, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        val speaker = port(5, AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        shadowOf(audio).setInputDevices(listOf(mic))
+        shadowOf(audio).setAvailableCommunicationDevices(listOf(sco, speaker))
+        shadowOf(audio).setAudioDevicesForAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build(), ImmutableList.of(speaker))
+        session.beginCall("phone")
+        var route = ""
+        val input = session.acquireInput("phone", { route = it }, {}, "builtin")
+        assertEquals(AudioAttributes.USAGE_VOICE_COMMUNICATION, input.awaitReady { false }.usage)
+        assertEquals("speaker", route)
+        assertTrue(input.input!!.matches(audio, mic))
+    }
+
     @Test @Config(sdk = [33]) fun bluetoothMediaCallUsesTheSelectedHeadphonesAcrossMicMute() {
         unmockkConstructor(VoiceAudioRouting::class)
         val audio = activity.getSystemService(AudioManager::class.java)

@@ -241,7 +241,7 @@ internal class VoiceStreamPlayback(
         private val routeListener = AudioRouting.OnRoutingChangedListener { source ->
             if (track.get() === source && (source as AudioTrack).playState == AudioTrack.PLAYSTATE_PLAYING) {
                 val actual = source.routedDevice
-                if (actual != null && !VoiceAudioRouting.sameMediaRoute(profile.headphones, actual)) lease.routeChanged(profile)
+                if (actual != null && !profile.acceptsOutput(actual)) lease.routeChanged(profile)
             }
         }
         private var written = 0L
@@ -251,7 +251,7 @@ internal class VoiceStreamPlayback(
         private var wraps = 0L
         private var progress = SystemClock.elapsedRealtime()
         private var started = false
-        private var verifyHeadphones = profile.headphones != null
+        private var verifyOutput = profile.verifiesOutput
         private var reportedPlaying = false
         private var primingConfigured = false
         private var startThreshold = 0
@@ -278,7 +278,7 @@ internal class VoiceStreamPlayback(
                 check(normalBufferFrames > 0) { "voice_playback_buffer_unavailable" }
                 track.set(player)
                 published = true
-                if (profile.headphones != null) player.addOnRoutingChangedListener(routeListener, null)
+                if (profile.verifiesOutput) player.addOnRoutingChangedListener(routeListener, null)
                 if (stopped.get()) throw InterruptedException("cancelled:voice_playback")
             } catch (error: Throwable) {
                 if (published) close() else runCatching { player.release() }
@@ -358,12 +358,12 @@ internal class VoiceStreamPlayback(
             if (head != lastHead) {
                 lastHead = head; progress = SystemClock.elapsedRealtime()
                 if (started && !stopped.get()) {
-                    if (verifyHeadphones) {
-                        if (!VoiceAudioRouting.sameMediaRoute(profile.headphones, player.routedDevice)) {
+                    if (verifyOutput) {
+                        if (!profile.acceptsOutput(player.routedDevice)) {
                             lease.routeChanged(profile)
                             throw IllegalStateException("audio_route_changed")
                         }
-                        verifyHeadphones = false
+                        verifyOutput = false
                     }
                     if (restoreBuffer) {
                         check(player.setBufferSizeInFrames(normalBufferFrames) > 0) { "voice_playback_buffer_restore_failed" }
@@ -416,7 +416,7 @@ internal class VoiceStreamPlayback(
         }
         override fun close() {
             if (!track.compareAndSet(player, null)) return
-            if (profile.headphones != null) player.removeOnRoutingChangedListener(routeListener)
+            if (profile.verifiesOutput) player.removeOnRoutingChangedListener(routeListener)
             release(player)
         }
     }
