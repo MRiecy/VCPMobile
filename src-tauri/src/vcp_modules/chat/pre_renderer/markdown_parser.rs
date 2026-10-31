@@ -1513,7 +1513,9 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
                         last = idx + c.len_utf8();
                     }
                 }
-                if last < value.len() {
+                if last == 0 && !value.is_empty() {
+                    result.push(InlineNode::text(value));
+                } else if last < value.len() {
                     result.push(InlineNode::text(value[last..].to_string()));
                 }
             }
@@ -1560,16 +1562,23 @@ fn merge_quote_nodes_at_depth(inlines: Vec<InlineNode>, depth: usize) -> Vec<Inl
     let mut result = Vec::new();
     let mut i = 0;
     let len = inlines.len();
+    // 只检查当前层可配对的 Text，不能借用格式子节点内部的闭合符。
+    let mut has_cjk_close = inlines
+        .iter()
+        .any(|node| matches!(node, InlineNode::Text { value } if value.ends_with('”')));
+    let mut has_ascii_close = inlines
+        .iter()
+        .any(|node| matches!(node, InlineNode::Text { value } if value.ends_with('"')));
 
     while i < len {
         let mut start_idx = None;
         let mut open_char = None;
 
         if let InlineNode::Text { value } = &inlines[i] {
-            if value.starts_with('“') {
+            if has_cjk_close && value.starts_with('“') {
                 start_idx = Some(i);
                 open_char = Some('“');
-            } else if value.starts_with('"') {
+            } else if has_ascii_close && value.starts_with('"') {
                 start_idx = Some(i);
                 open_char = Some('"');
             }
@@ -1647,6 +1656,14 @@ fn merge_quote_nodes_at_depth(inlines: Vec<InlineNode>, depth: usize) -> Vec<Inl
                 i = e_idx + 1;
                 continue;
             }
+
+            // 前面的配对可能已消费预检发现的最后一个闭合符。一次失败证明
+            // 剩余后缀不再有同类闭合符，避免后续每个左引号重复扫描后缀。
+            if op_c == '“' {
+                has_cjk_close = false;
+            } else {
+                has_ascii_close = false;
+            }
         }
 
         let mut node = inlines[i].clone();
@@ -1678,15 +1695,35 @@ fn merge_quote_nodes_at_depth(inlines: Vec<InlineNode>, depth: usize) -> Vec<Inl
     result
 }
 
+fn inline_quotes_need_processing(inlines: &[InlineNode]) -> bool {
+    inlines.iter().any(|node| match node {
+        InlineNode::Text { value } => {
+            // split_text_by_quotes 原本会移除空 Text，门控也须保留该行为。
+            value.is_empty() || value.contains(['“', '”', '"'])
+        }
+        InlineNode::Strong { children, .. }
+        | InlineNode::Emphasis { children, .. }
+        | InlineNode::Link { children, .. }
+        | InlineNode::Strikethrough { children, .. }
+        | InlineNode::VcpCustom {
+            children: Some(children),
+            ..
+        } => inline_quotes_need_processing(children),
+        _ => false,
+    })
+}
+
+fn apply_inline_quote_merging(children: &mut Vec<InlineNode>) {
+    if inline_quotes_need_processing(children) {
+        let split = split_text_by_quotes(std::mem::take(children));
+        *children = merge_quote_nodes(split);
+    }
+}
+
 fn apply_quote_merging(node: &mut MarkdownNode) {
     match node {
-        MarkdownNode::Paragraph { children, .. } => {
-            let split = split_text_by_quotes(children.clone());
-            *children = merge_quote_nodes(split);
-        }
-        MarkdownNode::Heading { children, .. } => {
-            let split = split_text_by_quotes(children.clone());
-            *children = merge_quote_nodes(split);
+        MarkdownNode::Paragraph { children, .. } | MarkdownNode::Heading { children, .. } => {
+            apply_inline_quote_merging(children);
         }
         MarkdownNode::Blockquote { children, .. } => {
             for child in children {
@@ -1702,13 +1739,11 @@ fn apply_quote_merging(node: &mut MarkdownNode) {
         }
         MarkdownNode::Table { header, rows, .. } => {
             for cell in header {
-                let split = split_text_by_quotes(cell.clone());
-                *cell = merge_quote_nodes(split);
+                apply_inline_quote_merging(cell);
             }
             for row in rows {
                 for cell in row {
-                    let split = split_text_by_quotes(cell.clone());
-                    *cell = merge_quote_nodes(split);
+                    apply_inline_quote_merging(cell);
                 }
             }
         }
@@ -1850,6 +1885,126 @@ x' \\ y'
         } else {
             panic!("Expected Paragraph");
         }
+    }
+
+    #[test]
+    fn quote_merging_preserves_long_unclosed_cjk_tail() {
+        let count = 21_845;
+        let nodes = parse_markdown_to_ast_streaming(&"“".repeat(count));
+        let [MarkdownNode::Paragraph { children, .. }] = nodes.as_slice() else {
+            panic!("expected a literal paragraph");
+        };
+        assert_eq!(children.len(), count);
+        assert!(children
+            .iter()
+            .all(|node| matches!(node, InlineNode::Text { value } if value == "“")));
+    }
+
+    fn expected_quote(open: &str, children: Vec<InlineNode>, close: &str) -> InlineNode {
+        let mut quoted = vec![InlineNode::text(open.to_string())];
+        quoted.extend(children);
+        quoted.push(InlineNode::text(close.to_string()));
+        InlineNode::vcp_custom("quote".to_string(), None, Some(quoted))
+    }
+
+    #[test]
+    fn quote_merging_keeps_mixed_pairs_after_consuming_cjk_closer() {
+        let mut children = vec![InlineNode::text("“closed”““\"ascii\"“\"".into())];
+        apply_inline_quote_merging(&mut children);
+        assert_eq!(
+            children,
+            vec![
+                expected_quote("“", vec![InlineNode::text("closed".into())], "”"),
+                InlineNode::text("“".into()),
+                InlineNode::text("“".into()),
+                expected_quote("\"", vec![InlineNode::text("ascii".into())], "\""),
+                InlineNode::text("“".into()),
+                InlineNode::text("\"".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn quote_merging_keeps_nested_quotes_across_inline_nodes() {
+        let bold = InlineNode::strong(vec![InlineNode::text("bold".into())]);
+        let mut children = vec![
+            InlineNode::text("“before ".into()),
+            bold.clone(),
+            InlineNode::text(" \"inner\" after”".into()),
+        ];
+        apply_inline_quote_merging(&mut children);
+        assert_eq!(
+            children,
+            vec![expected_quote(
+                "“",
+                vec![
+                    InlineNode::text("before ".into()),
+                    bold,
+                    InlineNode::text(" ".into()),
+                    expected_quote("\"", vec![InlineNode::text("inner".into())], "\""),
+                    InlineNode::text(" after".into()),
+                ],
+                "”",
+            )]
+        );
+    }
+
+    #[test]
+    fn quote_merging_keeps_closer_scope_in_nested_inline_containers() {
+        fn nested(child: InlineNode) -> InlineNode {
+            InlineNode::strong(vec![InlineNode::link(
+                "https://example.com".into(),
+                None,
+                vec![InlineNode::vcp_custom(
+                    "highlight".into(),
+                    None,
+                    Some(vec![child]),
+                )],
+            )])
+        }
+
+        let mut children = vec![
+            InlineNode::text("“outside".into()),
+            nested(InlineNode::text("“inside”".into())),
+            InlineNode::text("“tail".into()),
+        ];
+        apply_inline_quote_merging(&mut children);
+        assert_eq!(
+            children,
+            vec![
+                InlineNode::text("“".into()),
+                InlineNode::text("outside".into()),
+                nested(expected_quote(
+                    "“",
+                    vec![InlineNode::text("inside".into())],
+                    "”",
+                )),
+                InlineNode::text("“".into()),
+                InlineNode::text("tail".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn quote_merging_preserves_opaque_content_and_empty_text_behavior() {
+        let opaque = vec![
+            InlineNode::text("plain".into()),
+            InlineNode::code("\"code\"".into()),
+            InlineNode::inline_math("“formula”".into(), true),
+            InlineNode::raw_html_inline("<i>“html”</i>".into()),
+            InlineNode::vcp_custom("alert".into(), Some("“value”".into()), None),
+        ];
+        let mut unchanged = opaque.clone();
+        apply_inline_quote_merging(&mut unchanged);
+        assert_eq!(unchanged, opaque);
+
+        let mut with_empty = opaque.clone();
+        with_empty.push(InlineNode::text(String::new()));
+        with_empty.push(InlineNode::strong(vec![InlineNode::text(String::new())]));
+        apply_inline_quote_merging(&mut with_empty);
+        let mut expected = opaque;
+        expected.push(InlineNode::strong(Vec::new()));
+        assert_eq!(with_empty, expected);
     }
 
     #[test]

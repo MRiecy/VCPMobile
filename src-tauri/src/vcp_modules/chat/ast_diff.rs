@@ -163,7 +163,6 @@ fn diff_markdown_nodes_inner(
 
     // 1. 对比公共部分
     for i in 0..common_len {
-        let node_id = format!("{}{}", prefix, i);
         let old_node = &old_list[i];
         let new_node = &new_list[i];
 
@@ -171,6 +170,7 @@ fn diff_markdown_nodes_inner(
             continue; // Hash 命中，相同，直接跳过
         }
 
+        let node_id = format!("{}{}", prefix, i);
         diff_single_markdown_node(old_node, new_node, &node_id, mutations, highlighter);
     }
 
@@ -532,7 +532,6 @@ pub fn diff_inline_nodes(
 
     // 1. 对比公共部分
     for i in 0..common_len {
-        let node_id = format!("{}{}", prefix, i);
         let old_node = &old_list[i];
         let new_node = &new_list[i];
 
@@ -540,6 +539,7 @@ pub fn diff_inline_nodes(
             continue; // Hash 相同，直接跳过
         }
 
+        let node_id = format!("{}{}", prefix, i);
         diff_single_inline_node(old_node, new_node, &node_id, mutations);
     }
 

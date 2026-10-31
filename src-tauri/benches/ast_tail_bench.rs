@@ -16,8 +16,9 @@
 //! - `stream_frame_protocol`：协议块封印直通（TOOL_REQUEST tail）
 //! - `stream_frame_markdown`：通用 markdown tail —— 当前仍是非增量路径，曲线随
 //!   tier 爬坡为预期，不设红线，仅用于量化"还剩多少未增量化的尾巴"
-//! - `stream_worst_frame_fence_close`：闭合围栏那一帧（触发 tail 全量重解析），
-//!   尾部延迟指标，标准为不超过稳态帧的 ~10×
+//! - `stream_worst_frame_fence_close/full_event`：闭合围栏、完成态高亮及完整
+//!   StreamEvent JSON（含 stable_append）；不含原生 IPC 传输与前端 DOM，
+//!   与旧版只序列化 TailFrame 的结果不可直接比较，也不以 host 耗时判定移动端掉帧。
 //! - `stream_full_code_fence`：0→tier 全流累计（原 tail_end_to_end_aurora），
 //!   校验 累计 ≈ 帧数 × 稳态单帧
 //! - `tail_syntect_highlight`：全量 Syntect 高亮基线（对照用）
@@ -36,6 +37,7 @@ mod vcp_modules;
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, TailFrame};
 use crate::vcp_modules::chat::content_parser::parse_content;
 use crate::vcp_modules::pre_renderer::code_highlighter::{highlight_code_block, CodeBlockShell};
+use crate::vcp_modules::vcp_client::StreamEvent;
 use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
 
 /// 40KB HTML 文档（827 行）：html 代码围栏内容、Syntect 高亮基线素材。
@@ -202,30 +204,105 @@ fn bench_stream_frame_html_container(c: &mut Criterion) {
     );
 }
 
-/// 最坏帧 · 闭合围栏那一帧：触发 tail 全量重解析，是 UI 掉帧的真正来源。
-/// 每轮 setup 都要完整重喂一遍 buffer，故只取三档代表 tier 并压缩采样数。
+const FENCE_CLOSE_CHUNK: &str = "\n```\n";
+
+/// 模拟闭合前的内容已经成功交付；take_tail_frame 不更新 pushed_len 等交付游标，
+/// 若仅消费 TailFrame，测量的下一条 delta 会错误地携带整份预填充原文。
+fn prefill_delivered_code_fence(pre: &str) -> AuroraBuffer {
+    let mut buf = AuroraBuffer::new();
+    buf.append_chunk(pre);
+    let _ = buf.process_queue();
+    let (_, commit) = buf.prepare_snapshot_update();
+    buf.commit_delivery(commit);
+    buf
+}
+
+/// 使用生产 DTO 和交付游标，序列化完整闭合事件；真实 Channel 传输不在 host 基准中。
+fn close_and_serialize_code_fence(buf: &mut AuroraBuffer) -> String {
+    buf.append_chunk(black_box(FENCE_CLOSE_CHUNK));
+    let _ = buf.process_queue();
+    let (update, commit) = buf
+        .prepare_delta_update()
+        .expect("closing a prefilled fence produces an Aurora delta");
+    let event = StreamEvent::aurora("bench-fence-close".to_string(), update, None);
+    let serialized = serde_json::to_string(&event).expect("serialize complete fence-close event");
+    buf.commit_delivery(commit);
+    serialized
+}
+
+/// 计时外核实实际序列化载荷，防止漏测 stable_append 或重复统计已交付正文。
+/// 字节统计为此 fixture 的观测值，不设通用 HTML 膨胀比或耗时门禁。
+fn verify_and_report_fence_close_payload(pre: &str, tier: usize, fixture_bytes: usize) {
+    let mut buf = prefill_delivered_code_fence(pre);
+    let serialized = close_and_serialize_code_fence(&mut buf);
+    let wire: serde_json::Value =
+        serde_json::from_str(&serialized).expect("parse serialized fence-close event");
+    assert_eq!(wire["type"], "aurora");
+    let update = &wire["aurora"];
+    assert_eq!(update["kind"], "delta");
+    assert_eq!(update["chunk"], FENCE_CLOSE_CHUNK);
+    assert!(update.get("content").is_none());
+    assert!(update.get("stableBlocks").is_none());
+    // find_matching_fence_end 的结束位置不消费围栏行末的换行；本 fixture
+    // 因此留下一个新的 Markdown tail，而非 Clear。核实内容与空 AST，确保
+    // 大代码块已经沉淀、没有继续夹在新 tail 中，也不为基准断言改变生产定界。
+    assert_eq!(update["tailOp"]["op"], "replace");
+    assert_eq!(update["tailOp"]["content"], "\n");
+    assert_eq!(update["tailOp"]["mode"], "ast");
+    assert_eq!(update["tailOp"]["blockType"], "markdown");
+    assert_eq!(update["tailFrame"]["reset"], true);
+    assert!(update["tailFrame"]["snapshot"]
+        .as_array()
+        .expect("fence handoff carries a tail AST snapshot")
+        .is_empty());
+    let stable_append = &update["stableAppend"];
+    assert_eq!(stable_append["baseCount"], 0);
+    let blocks = stable_append["blocks"]
+        .as_array()
+        .expect("serialized delta contains stableAppend.blocks");
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0]["type"], "html-preview");
+    let code = blocks[0]["content"]
+        .as_str()
+        .expect("stable HTML preview contains source");
+    let highlighted_html = blocks[0]["highlighted_content"]
+        .as_str()
+        .expect("stable HTML preview contains completed highlighting");
+    assert!(!code.is_empty());
+    assert!(!highlighted_html.is_empty());
+    assert!(buf.prepare_delta_update().is_none());
+
+    let stable_append_json_bytes = serde_json::to_vec(stable_append)
+        .expect("serialize stable append for payload accounting")
+        .len();
+    eprintln!(
+        "fence_close_payload tier_bytes={tier} fixture_bytes={fixture_bytes} \
+         prefill_bytes={} code_bytes={} highlighted_html_bytes={} \
+         stable_append_json_bytes={stable_append_json_bytes} event_json_bytes={}",
+        pre.len(),
+        code.len(),
+        highlighted_html.len(),
+        serialized.len(),
+    );
+}
+
+/// 闭合围栏的后端最坏帧：整块高亮、prepare_delta_update、完整 StreamEvent JSON
+/// 与成功交付提交。每轮预填充及实际载荷核验不计时；不据 host 数值推导 Android UI 帧时。
 fn bench_worst_frame_fence_close(c: &mut Criterion) {
     let mut group = c.benchmark_group("stream_worst_frame_fence_close");
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(2));
 
     for &tier in [4096usize, 16384, 40960].iter() {
-        group.bench_with_input(BenchmarkId::from_parameter(tier), &tier, |b, &tier| {
-            let pre = as_open_code_fence(truncate_on_char_boundary(GENESIS_HTML, tier));
+        let fixture = truncate_on_char_boundary(GENESIS_HTML, tier);
+        let pre = as_open_code_fence(fixture);
+        verify_and_report_fence_close_payload(&pre, tier, fixture.len());
+        // 新 ID 隔离旧的 tail-only Criterion baseline，避免把测量范围扩大误报为回归。
+        group.bench_with_input(BenchmarkId::new("full_event", tier), &pre, |b, pre| {
             b.iter_batched(
-                || {
-                    let mut buf = AuroraBuffer::new();
-                    buf.append_chunk(&pre);
-                    let _ = buf.process_queue();
-                    let _ = buf.take_tail_frame();
-                    buf
-                },
+                || prefill_delivered_code_fence(pre),
                 |mut buf| {
-                    buf.append_chunk(black_box("\n```\n"));
-                    let _ = buf.process_queue();
-                    if let Some(f) = buf.take_tail_frame() {
-                        black_box(serialize_frame(&f));
-                    }
+                    black_box(close_and_serialize_code_fence(&mut buf));
                     buf
                 },
                 BatchSize::PerIteration,
