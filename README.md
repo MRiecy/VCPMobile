@@ -6,7 +6,7 @@
   <sub>VCPChat 的移动端进化形态 —— 对话、同步、渲染与设备能力，全部下沉至原生边界之内</sub></p>
 
   <p>
-    <a href="https://github.com/MRiecy/VCPMobile/releases"><img src="https://img.shields.io/badge/version-1.1.6-8b5cf6" alt="version"></a>
+    <a href="https://github.com/MRiecy/VCPMobile/releases"><img src="https://img.shields.io/badge/version-1.1.7-8b5cf6" alt="version"></a>
     <a href="https://github.com/MRiecy/VCPMobile/actions/workflows/ci.yml"><img src="https://github.com/MRiecy/VCPMobile/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
     <img src="https://img.shields.io/badge/platform-Android%20arm64--v8a-2dd4bf?logo=android&logoColor=white" alt="platform">
     <img src="https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-475569" alt="license">
