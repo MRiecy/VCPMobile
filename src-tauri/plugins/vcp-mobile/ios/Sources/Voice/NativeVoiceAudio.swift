@@ -36,7 +36,12 @@ private struct VoiceCaptureStopReceipt: Encodable {
     let sampleIndex: UInt64
 }
 
-private struct VoiceStartArgs: Decodable { let sessionId: String; let callId: String; let documentId: String }
+private struct VoiceStartArgs: Decodable {
+    let sessionId: String
+    let callId: String
+    let documentId: String
+    let inputDeviceId: String?
+}
 private struct VoiceDocumentArgs: Decodable { let documentId: String }
 private struct VoiceSessionArgs: Decodable { let sessionId: String }
 private struct VoiceCallArgs: Decodable { let callId: String }
@@ -59,6 +64,7 @@ private final class VoiceWebViewLifetime {
 final class NativeVoiceAudio {
     private final class Run {
         let sessionId: String
+        let inputDeviceId: String?
         let epoch: UInt64
         let deliverySlots = DispatchSemaphore(value: 128) // 4.096 seconds of 32 ms analysis frames.
         let cancelled = Atomic<Bool>(false)
@@ -81,8 +87,9 @@ final class NativeVoiceAudio {
         var ttsPlaybackMarker: UInt64 = 0
         var playbackIdentities: [UInt64: String] = [:]
         var observations: [NSObjectProtocol] = []
-        init(sessionId: String, epoch: UInt64, invoke: Invoke, fileQueue: DispatchQueue) {
+        init(sessionId: String, inputDeviceId: String?, epoch: UInt64, invoke: Invoke, fileQueue: DispatchQueue) {
             self.sessionId = sessionId
+            self.inputDeviceId = inputDeviceId
             self.epoch = epoch
             startInvoke = invoke
             segmentFiles = VoiceSegmentFiles(queue: fileQueue)
@@ -182,6 +189,7 @@ final class NativeVoiceAudio {
                 guard validIdentity(args.callId) else { invoke.reject("invalid_voice_call_id"); return }
                 guard !disposed, !closedCalls.contains(args.callId) else { invoke.reject("cancelled:voice_call"); return }
                 guard callId == nil || callId == args.callId else { invoke.reject("voice_call_busy"); return }
+                if callId == nil { NativeAudioSessionCoordinator.shared.forgetCallMediaOutput() }
                 callId = args.callId // logical reservation only: no mic or engine access
                 invoke.resolve()
             }
@@ -210,6 +218,7 @@ final class NativeVoiceAudio {
             if closedCalls.count > 32 { closedCalls.removeFirst() }
         }
         callId = nil
+        NativeAudioSessionCoordinator.shared.forgetCallMediaOutput()
         // Rust separately stops the playback belonging to this call. An
         // independent output owner keeps its queued PCM across graph demotion.
         reconcileRenderer()
@@ -218,8 +227,8 @@ final class NativeVoiceAudio {
     private func reconcileRenderer() {
         // A logical call exit must not destroy audio that is finishing its fade.
         // The terminal output status rechecks the latest owners after it stops.
-        guard playback?.isStopping != true else { return }
-        if callId != nil, renderer.isVoice, active != nil || renderer.route == .communication { return }
+        guard playback?.isStopping != true, !renderer.awaitingInputRoute else { return }
+        if callId != nil, renderer.isVoice, active != nil || renderer.route.usesVoiceProcessing { return }
         if playback?.ownsPlayback == true {
             do { try renderer.ensure(voice: false) }
             catch {
@@ -245,6 +254,15 @@ final class NativeVoiceAudio {
         }, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
+    func listInputs(_ invoke: Invoke) {
+        DispatchQueue.main.async { [self] in
+            guard !disposed, callId != nil else { invoke.reject("voice_call_not_active"); return }
+            let session = NativeAudioSessionCoordinator.shared
+            let capturing = active?.tapped == true && renderer.engine?.isRunning == true && renderer.route.matches(session.session)
+            invoke.resolve(session.inputInventory(capturing: capturing))
+        }
+    }
+
     func start(_ invoke: Invoke) {
         do {
             let args = try invoke.parseArgs(VoiceStartArgs.self)
@@ -268,7 +286,8 @@ final class NativeVoiceAudio {
                 }
                 guard eventsReady?() == true else { invoke.reject("voice_events_unavailable"); return }
                 NativeVoiceAudio.nextEpoch += 1
-                let run = Run(sessionId: args.sessionId, epoch: NativeVoiceAudio.nextEpoch, invoke: invoke, fileQueue: fileWorker)
+                let run = Run(sessionId: args.sessionId, inputDeviceId: args.inputDeviceId, epoch: NativeVoiceAudio.nextEpoch,
+                              invoke: invoke, fileQueue: fileWorker)
                 active = run
                 installLifetimeObservers(run)
                 AVAudioApplication.requestRecordPermission { [weak self, weak run] allowed in
@@ -312,11 +331,16 @@ final class NativeVoiceAudio {
     private func prepare(_ run: Run) {
         dispatchPrecondition(condition: .onQueue(.main))
         do {
-            try renderer.ensure(voice: true)
+            let ready = try renderer.ensure(voice: true, inputDeviceId: run.inputDeviceId) { [weak self, weak run] error in
+                guard let self, let run, self.active === run else { return }
+                if let error { self.captureSetupFailed(error) }
+                else { self.prepare(run) }
+            }
+            guard ready else { return }
             guard let engine = renderer.engine else { throw voiceAudioFailure("audio_engine_not_running") }
             run.engine = engine
             let session = NativeAudioSessionCoordinator.shared.session
-            run.aecState = (renderer.route == .communication || session.isEchoCancelledInputEnabled) ? "enabled" : "unavailable"
+            run.aecState = (renderer.route.usesVoiceProcessing || session.isEchoCancelledInputEnabled) ? "enabled" : "unavailable"
             let format = engine.inputNode.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else {
                 throw voiceAudioFailure("microphone_format_unavailable")
@@ -358,10 +382,14 @@ final class NativeVoiceAudio {
                 }
             }
         } catch {
-            let reason = voiceAudioReason(error, fallback: "audio_start_failed")
-            finish(reason: reason, error: true)
-            if renderer.engine == nil { playback?.cancelCurrent(reason: reason, immediately: true) }
+            captureSetupFailed(error)
         }
+    }
+
+    private func captureSetupFailed(_ error: Error) {
+        let reason = voiceAudioReason(error, fallback: "audio_start_failed")
+        finish(reason: reason, error: true)
+        if renderer.engine == nil { playback?.cancelCurrent(reason: reason, immediately: true) }
     }
 
     private func startEngine(_ run: Run, pipe: VoiceAudioPipe) {
@@ -373,6 +401,8 @@ final class NativeVoiceAudio {
         }
         guard renderer.route.matches(NativeAudioSessionCoordinator.shared.session) else {
             pipe.stop()
+            playback?.cancelCurrent(reason: "audio_route_changed", immediately: true)
+            renderer.destroy()
             finish(reason: "audio_route_changed", error: true)
             return
         }
@@ -446,7 +476,10 @@ final class NativeVoiceAudio {
         run.observations.removeAll()
         run.engine = nil
         // This graph has no VP hardware mute. Release its input when the tap closes.
-        if case .headphones = renderer.route { reconcileRenderer() }
+        if renderer.awaitingInputRoute {
+            playback?.cancelCurrent(reason: reason, immediately: true)
+            renderer.destroy()
+        } else if case .headphones = renderer.route { reconcileRenderer() }
         let pipe = run.pipe
         worker.async { [self, pipe, run] in
             let completed: (UInt64, String?) -> Void = { [self, run] sampleIndex, sealFailure in
@@ -561,12 +594,14 @@ final class NativeVoiceAudio {
                 do {
                     let playback = try ensurePlayback()
                     guard playback.canStart(args.playbackId) else { invoke.reject("cancelled:voice_playback"); return }
-                    if let engine = renderer.engine, !engine.isRunning {
-                        throw voiceAudioFailure("audio_engine_not_running")
+                    if !renderer.awaitingInputRoute {
+                        if let engine = renderer.engine, !engine.isRunning {
+                            throw voiceAudioFailure("audio_engine_not_running")
+                        }
+                        // A reserved but never authorized call is still output-only.
+                        try renderer.ensure(voice: renderer.isVoice, inputDeviceId: renderer.inputDeviceId)
+                        playback.bind(renderer.speechPlayer)
                     }
-                    // A reserved but never authorized call is still output-only.
-                    try renderer.ensure(voice: renderer.isVoice)
-                    playback.bind(renderer.speechPlayer)
                     playback.start(id: args.playbackId, startupFrames: args.startupFrames, invoke: invoke)
                 } catch {
                     let reason = voiceAudioReason(error, fallback: "voice_playback_failed")
@@ -581,7 +616,7 @@ final class NativeVoiceAudio {
         do {
             let args = try invoke.parseArgs(VoicePlaybackAppendArgs.self)
             DispatchQueue.main.async { [self] in
-                guard let playback = playback, renderer.engine?.isRunning == true else { invoke.reject("cancelled:voice_playback"); return }
+                guard let playback = playback, renderer.acceptsPlayback else { invoke.reject("cancelled:voice_playback"); return }
                 playback.append(id: args.playbackId, pcmBase64: args.pcmBase64, messageId: args.messageId, invoke: invoke)
             }
         } catch { invoke.reject("invalid_voice_playback_args") }
@@ -592,7 +627,7 @@ final class NativeVoiceAudio {
             let args = try invoke.parseArgs(VoicePlaybackArgs.self)
             DispatchQueue.main.async { [self] in
                 guard let playback = playback else { invoke.reject("cancelled:voice_playback"); return }
-                guard renderer.engine?.isRunning == true else {
+                guard renderer.acceptsPlayback else {
                     playback.cancelCurrent(reason: "audio_engine_not_running", immediately: true)
                     invoke.reject("audio_engine_not_running"); return
                 }
@@ -605,7 +640,7 @@ final class NativeVoiceAudio {
         do {
             let args = try invoke.parseArgs(VoicePlaybackArgs.self)
             DispatchQueue.main.async { [self] in
-                guard let playback = playback, renderer.engine?.isRunning == true else {
+                guard let playback = playback, renderer.acceptsPlayback else {
                     invoke.reject("cancelled:voice_playback"); return
                 }
                 playback.endSegment(id: args.playbackId, invoke: invoke)
@@ -743,6 +778,7 @@ extension VcpMobilePlugin {
     @objc public func invalidateVoiceDocument(_ invoke: Invoke) { voice.invalidateDocument(invoke) }
     @objc public func beginVoiceCall(_ invoke: Invoke) { voice.beginCall(invoke) }
     @objc public func endVoiceCall(_ invoke: Invoke) { voice.endCall(invoke) }
+    @objc public func listVoiceInputDevices(_ invoke: Invoke) { voice.listInputs(invoke) }
     @objc public func startVoiceAudio(_ invoke: Invoke) { voice.start(invoke) }
     @objc public func stopVoiceAudio(_ invoke: Invoke) { voice.stop(invoke) }
     @objc public func exportVoiceSegment(_ invoke: Invoke) { voice.exportSegment(invoke) }
