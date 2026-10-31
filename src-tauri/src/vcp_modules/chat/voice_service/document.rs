@@ -17,14 +17,19 @@ struct Documents {
 pub struct VoiceDocumentState(Mutex<Documents>);
 
 fn parse_document(document_id: &str) -> Result<u64, String> {
-    document_id.parse::<u64>().ok().filter(|id| *id != 0)
+    document_id
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id != 0)
         .ok_or_else(|| "语音页面标识无效。".into())
 }
 
 impl VoiceDocumentState {
     pub(super) fn allocate(&self) -> Result<String, String> {
         let mut documents = self.0.lock().map_err(|error| error.to_string())?;
-        documents.issued = documents.issued.checked_add(1)
+        documents.issued = documents
+            .issued
+            .checked_add(1)
             .ok_or("语音页面标识已耗尽，请重新启动应用。")?;
         Ok(documents.issued.to_string())
     }
@@ -87,7 +92,10 @@ pub fn allocate_voice_document(app: AppHandle) -> Result<String, String> {
 /// Keep identity adoption usable independently of any native cleanup result.
 /// Playback cleanup runs under its own existing stop barrier; a failure remains
 /// retryable through connect_tts_document instead of blocking capture recovery.
-pub(super) fn adopt_document<R: Runtime>(app: &AppHandle<R>, document_id: &str) -> Result<(), String> {
+pub(super) fn adopt_document<R: Runtime>(
+    app: &AppHandle<R>,
+    document_id: &str,
+) -> Result<(), String> {
     let mut previous_playback = None;
     app.state::<VoiceDocumentState>().adopt(document_id, || {
         previous_playback = super::tts::adopt_document(app, document_id)?;
@@ -97,7 +105,10 @@ pub(super) fn adopt_document<R: Runtime>(app: &AppHandle<R>, document_id: &str) 
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = super::tts::stop_tts(app, id).await {
-                log::warn!("[VoiceDocument] Previous playback cleanup failed: {}", error.chars().take(160).collect::<String>());
+                log::warn!(
+                    "[VoiceDocument] Previous playback cleanup failed: {}",
+                    error.chars().take(160).collect::<String>()
+                );
             }
         });
     }
@@ -115,7 +126,8 @@ pub async fn connect_voice_document(app: AppHandle, document_id: String) -> Resu
     // repeated connects retry any retained capture without reviving old tickets.
     capture?;
     native?;
-    app.state::<VoiceDocumentState>().with_current(&document_id, || Ok(()))
+    app.state::<VoiceDocumentState>()
+        .with_current(&document_id, || Ok(()))
 }
 
 #[cfg(test)]
@@ -133,10 +145,14 @@ mod tests {
         let unused = state.allocate().unwrap();
         assert!(state.with_current(&current, || Ok(())).is_ok());
         assert!(state.with_current(&unused, || Ok(())).is_err());
-        assert!(state.adopt(&old, || panic!("stale adoption must not touch resources")).is_err());
-        assert!(state.with_current(&old, || -> Result<(), String> {
-            panic!("unpolled old command must be rejected")
-        }).is_err());
+        assert!(state
+            .adopt(&old, || panic!("stale adoption must not touch resources"))
+            .is_err());
+        assert!(state
+            .with_current(&old, || -> Result<(), String> {
+                panic!("unpolled old command must be rejected")
+            })
+            .is_err());
     }
 
     #[test]
@@ -161,10 +177,15 @@ mod tests {
         let document = state.allocate().unwrap();
         let retired = AtomicUsize::new(0);
         for expected in [true, false, false] {
-            assert_eq!(state.adopt(&document, || {
-                retired.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            }).unwrap(), expected);
+            assert_eq!(
+                state
+                    .adopt(&document, || {
+                        retired.fetch_add(1, Ordering::Relaxed);
+                        Ok(())
+                    })
+                    .unwrap(),
+                expected
+            );
         }
         assert_eq!(retired.load(Ordering::Relaxed), 1);
         assert!(state.adopt("0", || Ok(())).is_err());

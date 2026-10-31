@@ -167,11 +167,13 @@ mod tests {
     fn native_document_loss_is_delivered_without_an_audio_session() {
         let event: NativeEvent = serde_json::from_value(serde_json::json!({
             "event": "voiceDocument", "payload": { "documentId": "42" },
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(matches!(event, NativeEvent::VoiceDocument { document_id } if document_id == "42"));
         assert!(serde_json::from_value::<NativeEvent>(serde_json::json!({
             "event": "voiceDocument", "payload": {},
-        })).is_err());
+        }))
+        .is_err());
     }
 
     #[test]
@@ -179,14 +181,16 @@ mod tests {
         let event: NativeEvent = serde_json::from_value(serde_json::json!({
             "event": "voicePlayback",
             "payload": { "playbackId": "current-output", "kind": "started" },
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(matches!(event, NativeEvent::VoicePlayback(
             NativeVoicePlaybackEvent::Started { playback_id }
         ) if playback_id == "current-output"));
         assert!(serde_json::from_value::<NativeEvent>(serde_json::json!({
             "event": "voicePlayback",
             "payload": { "kind": "started" },
-        })).is_err());
+        }))
+        .is_err());
     }
 
     #[test]

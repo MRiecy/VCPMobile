@@ -1,18 +1,15 @@
 use super::schema;
 use super::{read_config_snapshot, ConfigDomain, ConfigSnapshot, SettingsState};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use tauri::{AppHandle, Manager, Runtime, State};
-use std::collections::BTreeMap;
-use crate::vcp_modules::agent::{
-    agent_service,
-    agent_types::AgentLocalSettingsPatch,
-};
+use crate::vcp_modules::agent::{agent_service, agent_types::AgentLocalSettingsPatch};
 use crate::vcp_modules::chat::context_injection::TarvenRule;
 use crate::vcp_modules::group::{
     group_service,
     group_types::{GroupLocalSettings, GroupLocalSettingsPatch},
 };
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::io::AsyncReadExt;
 
 const MAX_CONFIG_BACKUP_BYTES: u64 = 1024 * 1024;
@@ -71,17 +68,28 @@ fn parse_backup_preferences(raw: Option<&Value>) -> Result<Map<String, Value>, S
     };
     for (group, fields) in [
         ("theme", &["themeKey", "mode"][..]),
-        ("chat", &[
-            "presentationMode", "smoothStreamingEnabled",
-            "messageHapticsEnabled", "collapseToolsWhileStreaming",
-        ][..]),
+        (
+            "chat",
+            &[
+                "presentationMode",
+                "smoothStreamingEnabled",
+                "messageHapticsEnabled",
+                "collapseToolsWhileStreaming",
+            ][..],
+        ),
         ("topic", &["sortMode", "pinnedTopicKeys"][..]),
-        ("diary", &["hiddenFolders", "folderOrder", "collapsedCategories"][..]),
+        (
+            "diary",
+            &["hiddenFolders", "folderOrder", "collapsedCategories"][..],
+        ),
         ("client", &["autoCheckUpdate"][..]),
     ] {
-        let Some(value) = source.get(group) else { continue; };
+        let Some(value) = source.get(group) else {
+            continue;
+        };
         if let Some(object) = value.as_object() {
-            let filtered: Map<String, Value> = fields.iter()
+            let filtered: Map<String, Value> = fields
+                .iter()
                 .filter_map(|key| object.get(*key).map(|value| ((*key).into(), value.clone())))
                 .collect();
             if !filtered.is_empty() {
@@ -97,7 +105,10 @@ fn parse_backup_preferences(raw: Option<&Value>) -> Result<Map<String, Value>, S
 fn parse_domain_fields(domain: ConfigDomain, raw: &Value) -> Result<Value, String> {
     let normalized = schema::normalize_domain_patch(domain, raw);
     let mut parsed = Value::Object(Map::new());
-    for field in schema::domain_fields(domain).into_iter().filter(|field| field.backup) {
+    for field in schema::domain_fields(domain)
+        .into_iter()
+        .filter(|field| field.backup)
+    {
         if let Some(value) = schema::value_at_path(&normalized, &field.path) {
             schema::set_value_at_path(&mut parsed, &field.path, value.clone())?;
         }
@@ -154,37 +165,61 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     let mut raw = Map::new();
     for key in ["app", "kind", "version", "exportedAt"] {
         if let Some(value) = source.get(key) {
-            raw.insert(key.into(), serde_json::from_str(value.get())
-                .map_err(|_| format!("备份字段 {key} 类型不正确"))?);
+            raw.insert(
+                key.into(),
+                serde_json::from_str(value.get())
+                    .map_err(|_| format!("备份字段 {key} 类型不正确"))?,
+            );
         }
     }
     for (key, shape) in [
         ("domains", serde_json::json!(super::Settings::default())),
         ("settings", serde_json::json!({})),
         // Only the shape belongs here; defaults remain with the frontend owner.
-        ("preferences", serde_json::json!({"theme":{},"chat":{},"topic":{},"diary":{},"client":{}})),
+        (
+            "preferences",
+            serde_json::json!({"theme":{},"chat":{},"topic":{},"diary":{},"client":{}}),
+        ),
     ] {
         if let Some(value) = source.get(key) {
             raw.insert(key.into(), schema::parse_config_json(value.get(), &shape));
         }
     }
     if let Some(value) = source.get("agentPreferences") {
-        let agents = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
-        let shape = serde_json::json!(crate::vcp_modules::agent::agent_types::AgentLocalPreferences::default());
-        raw.insert("agentPreferences".into(), match agents {
-            Ok(agents) => Value::Object(agents.into_iter().map(|(id, value)|
-                (id, schema::parse_config_json(value.get(), &shape))).collect()),
-            Err(_) => Value::Null,
-        });
+        let agents =
+            serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
+        let shape = serde_json::json!(
+            crate::vcp_modules::agent::agent_types::AgentLocalPreferences::default()
+        );
+        raw.insert(
+            "agentPreferences".into(),
+            match agents {
+                Ok(agents) => Value::Object(
+                    agents
+                        .into_iter()
+                        .map(|(id, value)| (id, schema::parse_config_json(value.get(), &shape)))
+                        .collect(),
+                ),
+                Err(_) => Value::Null,
+            },
+        );
     }
     if let Some(value) = source.get("groupPreferences") {
-        let groups = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
+        let groups =
+            serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
         let shape = serde_json::json!(GroupLocalSettings::default());
-        raw.insert("groupPreferences".into(), match groups {
-            Ok(groups) => Value::Object(groups.into_iter().map(|(id, value)|
-                (id, schema::parse_config_json(value.get(), &shape))).collect()),
-            Err(_) => Value::Null,
-        });
+        raw.insert(
+            "groupPreferences".into(),
+            match groups {
+                Ok(groups) => Value::Object(
+                    groups
+                        .into_iter()
+                        .map(|(id, value)| (id, schema::parse_config_json(value.get(), &shape)))
+                        .collect(),
+                ),
+                Err(_) => Value::Null,
+            },
+        );
     }
     if let Some(value) = source.get("standaloneData") {
         if let Ok(parsed) = serde_json::from_str::<Value>(value.get()) {
@@ -214,7 +249,9 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
         let Some(domain) = ConfigDomain::ALL
             .into_iter()
             .find(|domain| domain.as_str() == name)
-        else { continue; };
+        else {
+            continue;
+        };
         let parsed = parse_domain_fields(domain, raw_domain)?;
         if parsed.as_object().is_some_and(|object| !object.is_empty()) {
             domains.insert(name.clone(), parsed);
@@ -305,7 +342,10 @@ fn backup_domains(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, Strin
 pub async fn export_group_preferences<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<BTreeMap<String, GroupLocalSettings>, String> {
-    group_service::export_group_local_settings(&app.state::<crate::vcp_modules::db_manager::DbState>()).await
+    group_service::export_group_local_settings(
+        &app.state::<crate::vcp_modules::db_manager::DbState>(),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -355,11 +395,15 @@ mod tests {
         let bytes = serde_json::to_vec(&json!({
             "app":"vcp-mobile", "kind":"vcp-mobile-settings-backup", "version":2,
             "domains":{}, "groupPreferences":patches,
-        })).unwrap();
+        }))
+        .unwrap();
         let parsed = parse_backup_bytes(&bytes).unwrap();
         let mut normalized = patches;
         normalized["group-a"]["chatMode"] = json!("sequential");
-        assert_eq!(serde_json::to_value(parsed.group_preferences).unwrap(), normalized);
+        assert_eq!(
+            serde_json::to_value(parsed.group_preferences).unwrap(),
+            normalized
+        );
         assert!(parsed.domains.is_empty());
     }
 
@@ -399,29 +443,47 @@ mod tests {
             "preferences":{"chat":{"messageHapticsEnabled":1e400,"smoothStreamingEnabled":false}},
             "groupPreferences":{"g":{"chatMode":"jev","modeSettings":{"jev":{"maxSpeakersPerRound":1e400,"continueThreshold":0.7,"memberStyles":{"a":"keep","b":1e400}}}}}
         }"#).unwrap();
-        assert_eq!(parsed.domains["jev"], json!({"timeoutMs":Settings::default().jev.timeout_ms,"maxRetries":0}));
-        assert_eq!(parsed.domains["voice"], json!({"tts":{"stream":false,"voice":"Mia"}}));
-        assert_eq!(parsed.preferences["chat"], json!({"messageHapticsEnabled":null,"smoothStreamingEnabled":false}));
+        assert_eq!(
+            parsed.domains["jev"],
+            json!({"timeoutMs":Settings::default().jev.timeout_ms,"maxRetries":0})
+        );
+        assert_eq!(
+            parsed.domains["voice"],
+            json!({"tts":{"stream":false,"voice":"Mia"}})
+        );
+        assert_eq!(
+            parsed.preferences["chat"],
+            json!({"messageHapticsEnabled":null,"smoothStreamingEnabled":false})
+        );
         let groups = serde_json::to_value(parsed.group_preferences).unwrap();
         assert_eq!(groups["g"]["chatMode"], "jev");
         let defaults = GroupLocalSettings::default();
-        assert_eq!(groups["g"]["modeSettings"]["jev"], json!({
-            "maxSpeakersPerRound":defaults.mode_settings.jev.max_speakers_per_round,
-            "continueThreshold":0.7,"memberStyles":{"a":"keep","b":""}
-        }));
+        assert_eq!(
+            groups["g"]["modeSettings"]["jev"],
+            json!({
+                "maxSpeakersPerRound":defaults.mode_settings.jev.max_speakers_per_round,
+                "continueThreshold":0.7,"memberStyles":{"a":"keep","b":""}
+            })
+        );
         assert!(!parsed.domains.contains_key("server"));
     }
 
     #[test]
     fn overflow_in_v1_configuration_does_not_reset_valid_present_values() {
-        let parsed = parse_backup_bytes(br#"{
+        let parsed = parse_backup_bytes(
+            br#"{
             "app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":1,
             "settings":{"voiceVadEndSilenceMs":1e400,"voiceTtsStream":false,"vcpApiKey":"keep"}
-        }"#).unwrap();
-        assert_eq!(parsed.domains["voice"], json!({
-            "vad":{"endSilenceMs":Settings::default().voice.vad.end_silence_ms},
-            "tts":{"stream":false}
-        }));
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.domains["voice"],
+            json!({
+                "vad":{"endSilenceMs":Settings::default().voice.vad.end_silence_ms},
+                "tts":{"stream":false}
+            })
+        );
         assert_eq!(parsed.domains["server"], json!({"apiKey":"keep"}));
         assert!(!parsed.domains.contains_key("identity"));
     }
@@ -432,7 +494,9 @@ mod tests {
             r#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":1e400,"domains":{}}"#,
             r#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":{},"exportedAt":1e400}"#,
             r#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":{"voice":{"tts":broken}}}"#,
-        ] { assert!(parse_backup_bytes(raw.as_bytes()).is_err()); }
+        ] {
+            assert!(parse_backup_bytes(raw.as_bytes()).is_err());
+        }
         let parsed = parse_backup_bytes(br#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":{},"unknownMetadata":1e400}"#).unwrap();
         assert!(parsed.domains.is_empty());
         assert!(parsed.exported_at.is_empty());
@@ -440,20 +504,45 @@ mod tests {
 
     #[test]
     fn voice_mode_import_defaults_only_when_the_field_is_present_and_invalid() {
-        for mode in [json!("unknown-mode"), json!(""), Value::Null, json!(false), json!(42), json!({})] {
-            let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode,"stream":false}}}))).unwrap();
-            assert_eq!(parsed.domains["voice"], json!({"tts":{"mode":"builtin","stream":false}}));
-            let legacy = parse_backup_bytes(&v1_backup(json!({"voiceTtsMode":mode,"voiceTtsStream":false}))).unwrap();
-            assert_eq!(legacy.domains["voice"], json!({"tts":{"mode":"builtin","stream":false}}));
+        for mode in [
+            json!("unknown-mode"),
+            json!(""),
+            Value::Null,
+            json!(false),
+            json!(42),
+            json!({}),
+        ] {
+            let parsed = parse_backup_bytes(&backup(
+                json!({"voice":{"tts":{"mode":mode,"stream":false}}}),
+            ))
+            .unwrap();
+            assert_eq!(
+                parsed.domains["voice"],
+                json!({"tts":{"mode":"builtin","stream":false}})
+            );
+            let legacy = parse_backup_bytes(&v1_backup(
+                json!({"voiceTtsMode":mode,"voiceTtsStream":false}),
+            ))
+            .unwrap();
+            assert_eq!(
+                legacy.domains["voice"],
+                json!({"tts":{"mode":"builtin","stream":false}})
+            );
         }
         for mode in ["builtin", "clone"] {
-            let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode}}}))).unwrap();
+            let parsed =
+                parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode}}}))).unwrap();
             assert_eq!(parsed.domains["voice"]["tts"]["mode"], mode);
         }
-        let partial = parse_backup_bytes(&backup(json!({"voice":{"tts":{"stream":false}}}))).unwrap();
+        let partial =
+            parse_backup_bytes(&backup(json!({"voice":{"tts":{"stream":false}}}))).unwrap();
         assert_eq!(partial.domains["voice"], json!({"tts":{"stream":false}}));
-        let legacy_partial = parse_backup_bytes(&v1_backup(json!({"voiceTtsStream":false}))).unwrap();
-        assert_eq!(legacy_partial.domains["voice"], json!({"tts":{"stream":false}}));
+        let legacy_partial =
+            parse_backup_bytes(&v1_backup(json!({"voiceTtsStream":false}))).unwrap();
+        assert_eq!(
+            legacy_partial.domains["voice"],
+            json!({"tts":{"stream":false}})
+        );
     }
 
     #[test]
@@ -465,15 +554,24 @@ mod tests {
                 "vad":{"endSilenceMs":"private-token"}
             },
             "server":{"url":"https://saved.example","apiKey":42}
-        }))).unwrap();
+        })))
+        .unwrap();
         let voice = schema::domain_defaults(ConfigDomain::Voice);
-        assert_eq!(parsed.domains["voice"], json!({
-            "asr":{"inputEncoding":voice["asr"]["inputEncoding"],"language":"en"},
-            "tts":{"voice":voice["tts"]["voice"],"stream":false},
-            "vad":{"endSilenceMs":voice["vad"]["endSilenceMs"]}
-        }));
-        assert_eq!(parsed.domains["server"], json!({"url":"https://saved.example","apiKey":""}));
-        assert!(!serde_json::to_string(&parsed).unwrap().contains("private-token"));
+        assert_eq!(
+            parsed.domains["voice"],
+            json!({
+                "asr":{"inputEncoding":voice["asr"]["inputEncoding"],"language":"en"},
+                "tts":{"voice":voice["tts"]["voice"],"stream":false},
+                "vad":{"endSilenceMs":voice["vad"]["endSilenceMs"]}
+            })
+        );
+        assert_eq!(
+            parsed.domains["server"],
+            json!({"url":"https://saved.example","apiKey":""})
+        );
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("private-token"));
     }
 
     #[test]
@@ -483,11 +581,15 @@ mod tests {
             "voice":{"unknown-field":true,"tts":null,"asr":{"language":"en"}},
             "navigation":{"agentOrder":["not-imported"]},
             "sync":{"logLevel":"DEBUG","token":"keep-token"}
-        }))).unwrap();
-        assert_eq!(parsed.domains["voice"], json!({
-            "tts":schema::domain_defaults(ConfigDomain::Voice)["tts"],
-            "asr":{"language":"en"}
-        }));
+        })))
+        .unwrap();
+        assert_eq!(
+            parsed.domains["voice"],
+            json!({
+                "tts":schema::domain_defaults(ConfigDomain::Voice)["tts"],
+                "asr":{"language":"en"}
+            })
+        );
         assert_eq!(parsed.domains["sync"], json!({"token":"keep-token"}));
         assert_eq!(
             parsed.domains["navigation"],
@@ -495,15 +597,17 @@ mod tests {
         );
         assert!(!parsed.domains.contains_key("unknown-domain"));
         let invalid_domain = parse_backup_bytes(&backup(json!({"server":false}))).unwrap();
-        assert_eq!(invalid_domain.domains["server"], schema::domain_defaults(ConfigDomain::Server));
+        assert_eq!(
+            invalid_domain.domains["server"],
+            schema::domain_defaults(ConfigDomain::Server)
+        );
     }
 
     #[test]
     fn partial_rule_import_preserves_explicit_empty_and_custom_rules() {
         for rules in ["", "  \n ", "自定义风格规则"] {
             let parsed =
-                parse_backup_bytes(&backup(json!({"voice":{"guidance":{"rules":rules}}})))
-                    .unwrap();
+                parse_backup_bytes(&backup(json!({"voice":{"guidance":{"rules":rules}}}))).unwrap();
             assert_eq!(parsed.domains["voice"], json!({"guidance":{"rules":rules}}));
         }
     }
@@ -564,11 +668,20 @@ mod tests {
             "chatEndpointMode":"private-token", "vcpApiKey":"retained-key",
             "distributedEnabled":"private-token", "voiceLanguage":"private-token",
             "voiceTtsVoice":"Mia", "enableVcpToolInjection":true,
-        }))).unwrap();
-        assert_eq!(parsed.domains["server"], json!({"endpointMode":"standard","apiKey":"retained-key"}));
+        })))
+        .unwrap();
+        assert_eq!(
+            parsed.domains["server"],
+            json!({"endpointMode":"standard","apiKey":"retained-key"})
+        );
         assert_eq!(parsed.domains["distributed"], json!({"enabled":false}));
-        assert_eq!(parsed.domains["voice"], json!({"asr":{"language":"auto"},"tts":{"voice":"Mia"}}));
-        assert!(!serde_json::to_string(&parsed).unwrap().contains("private-token"));
+        assert_eq!(
+            parsed.domains["voice"],
+            json!({"asr":{"language":"auto"},"tts":{"voice":"Mia"}})
+        );
+        assert!(!serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("private-token"));
     }
 
     #[test]
@@ -579,7 +692,8 @@ mod tests {
             let bytes = serde_json::to_vec(&json!({
                 "app":"vcp-mobile", "kind":"vcp-mobile-settings-backup", "version":2,
                 "domains":{}, "preferences":preferences,
-            })).unwrap();
+            }))
+            .unwrap();
             let parsed = parse_backup_bytes(&bytes).unwrap();
             assert_eq!(
                 Value::Object(parsed.preferences),
@@ -597,11 +711,15 @@ mod tests {
                 "chat":{"messageHapticsEnabled":"invalid","unknownField":true},
                 "unknownGroup":{"anything":true}
             }
-        })).unwrap();
+        }))
+        .unwrap();
         let parsed = parse_backup_bytes(&bytes).unwrap();
-        assert_eq!(Value::Object(parsed.preferences), json!({
-            "theme":null,"chat":{"messageHapticsEnabled":"invalid"}
-        }));
+        assert_eq!(
+            Value::Object(parsed.preferences),
+            json!({
+                "theme":null,"chat":{"messageHapticsEnabled":"invalid"}
+            })
+        );
     }
 
     #[test]
@@ -676,14 +794,26 @@ mod tests {
         let parsed = parse_backup_bytes(&bytes).unwrap();
 
         // 1. Domains: navigation exported and parsed
-        assert_eq!(parsed.domains["navigation"]["agentOrder"], json!(["agent-1", "agent-2"]));
-        assert_eq!(parsed.domains["navigation"]["groupOrder"], json!(["group-1"]));
+        assert_eq!(
+            parsed.domains["navigation"]["agentOrder"],
+            json!(["agent-1", "agent-2"])
+        );
+        assert_eq!(
+            parsed.domains["navigation"]["groupOrder"],
+            json!(["group-1"])
+        );
 
         // 2. Preferences
         assert_eq!(parsed.preferences["theme"]["themeKey"], "cyberpunk");
         assert_eq!(parsed.preferences["topic"]["sortMode"], "updated");
-        assert_eq!(parsed.preferences["topic"]["pinnedTopicKeys"], json!(["t-1"]));
-        assert_eq!(parsed.preferences["diary"]["hiddenFolders"], json!(["secret"]));
+        assert_eq!(
+            parsed.preferences["topic"]["pinnedTopicKeys"],
+            json!(["t-1"])
+        );
+        assert_eq!(
+            parsed.preferences["diary"]["hiddenFolders"],
+            json!(["secret"])
+        );
         assert_eq!(parsed.preferences["client"]["autoCheckUpdate"], true);
 
         // 3. Agent preferences
@@ -696,9 +826,15 @@ mod tests {
         assert!(parsed.group_preferences.contains_key("group-1"));
 
         // 5. Standalone data
-        assert_eq!(parsed.standalone_data.model_favorites, vec!["gemini-2.5-flash", "claude-3-7-sonnet"]);
+        assert_eq!(
+            parsed.standalone_data.model_favorites,
+            vec!["gemini-2.5-flash", "claude-3-7-sonnet"]
+        );
         assert_eq!(parsed.standalone_data.tarven_rules.len(), 1);
-        assert_eq!(parsed.standalone_data.tarven_rules[0].id, "system_meta_injection");
+        assert_eq!(
+            parsed.standalone_data.tarven_rules[0].id,
+            "system_meta_injection"
+        );
         assert!(!parsed.standalone_data.tarven_rules[0].is_enabled);
     }
 }

@@ -67,11 +67,15 @@ pub async fn import_settings_backup<R: Runtime>(
     standalone_data: Option<serde_json::Value>,
 ) -> Result<ConfigBackupImportResult, String> {
     let group_patches = match group_preferences {
-        Some(val) => crate::vcp_modules::group::group_service::parse_group_local_settings_backup(&val)?,
+        Some(val) => {
+            crate::vcp_modules::group::group_service::parse_group_local_settings_backup(&val)?
+        }
         None => std::collections::BTreeMap::new(),
     };
     let agent_patches = match agent_preferences {
-        Some(val) => crate::vcp_modules::agent::agent_service::parse_agent_local_settings_backup(&val)?,
+        Some(val) => {
+            crate::vcp_modules::agent::agent_service::parse_agent_local_settings_backup(&val)?
+        }
         None => std::collections::BTreeMap::new(),
     };
     let (model_favorites, tarven_rules) = match standalone_data {
@@ -94,13 +98,19 @@ pub async fn import_settings_backup<R: Runtime>(
             request,
             payload,
             move |old, snapshot| {
-                if let Some(groups) = app.try_state::<crate::vcp_modules::group::group_service::GroupManagerState>() {
+                if let Some(groups) =
+                    app.try_state::<crate::vcp_modules::group::group_service::GroupManagerState>()
+                {
                     groups.invalidate_cache();
                 }
-                if let Some(agents) = app.try_state::<crate::vcp_modules::agent::agent_service::AgentConfigState>() {
+                if let Some(agents) =
+                    app.try_state::<crate::vcp_modules::agent::agent_service::AgentConfigState>()
+                {
                     agents.invalidate_cache();
                 }
-                if let Some(turns) = app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+                if let Some(turns) =
+                    app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
+                {
                     for id in &group_ids {
                         turns.notify_group_changed(id);
                     }

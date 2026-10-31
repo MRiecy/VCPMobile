@@ -1,5 +1,5 @@
-use crate::vcp_modules::topic_types::Topic;
 use crate::vcp_modules::settings_manager::{VoiceTtsConfig, VoiceTtsMode, VOICE_TTS_VOICES};
+use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -34,8 +34,15 @@ impl AgentVoiceConfig {
     /// Stored data is repaired one typed field at a time. This is deliberately
     /// separate from IPC deserialization: strings and numbers are not coerced.
     pub(crate) fn from_stored(value: &serde_json::Value) -> Self {
-        fn field<T: serde::de::DeserializeOwned>(value: &serde_json::Value, key: &str, default: T) -> T {
-            value.get(key).and_then(|value| serde_json::from_value(value.clone()).ok()).unwrap_or(default)
+        fn field<T: serde::de::DeserializeOwned>(
+            value: &serde_json::Value,
+            key: &str,
+            default: T,
+        ) -> T {
+            value
+                .get(key)
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+                .unwrap_or(default)
         }
         let defaults = Self::default();
         let mut result = Self {
@@ -45,7 +52,9 @@ impl AgentVoiceConfig {
             clone_sample_id: field(value, "cloneSampleId", defaults.clone_sample_id.clone()),
             stream: field(value, "stream", defaults.stream),
         };
-        if !VOICE_TTS_VOICES.contains(&result.voice.as_str()) { result.voice = defaults.voice; }
+        if !VOICE_TTS_VOICES.contains(&result.voice.as_str()) {
+            result.voice = defaults.voice;
+        }
         result
     }
 }
@@ -102,11 +111,19 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            id: String::new(), name: default_agent_name(), system_prompt: String::new(),
-            mobile_system_prompt: String::new(), model: default_model(), temperature: default_temperature(),
-            context_token_limit: default_context_limit(), max_output_tokens: default_max_output(),
-            stream_output: true, use_temperature: false, voice: AgentVoiceConfig::default(),
-            avatar_calculated_color: None, topics: Vec::new(),
+            id: String::new(),
+            name: default_agent_name(),
+            system_prompt: String::new(),
+            mobile_system_prompt: String::new(),
+            model: default_model(),
+            temperature: default_temperature(),
+            context_token_limit: default_context_limit(),
+            max_output_tokens: default_max_output(),
+            stream_output: true,
+            use_temperature: false,
+            voice: AgentVoiceConfig::default(),
+            avatar_calculated_color: None,
+            topics: Vec::new(),
         }
     }
 }

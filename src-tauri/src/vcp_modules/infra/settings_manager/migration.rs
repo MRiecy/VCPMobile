@@ -38,18 +38,19 @@ pub(super) async fn ensure_migrated(db: &DbState) -> Result<(), String> {
         return Ok(());
     }
 
-    let legacy =
-        sqlx::query("SELECT value FROM settings WHERE key = 'global'")
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|error| format!("读取原有配置失败: {error}"))?;
+    let legacy = sqlx::query("SELECT value FROM settings WHERE key = 'global'")
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| format!("读取原有配置失败: {error}"))?;
     let now = crate::vcp_modules::infra::utils::now_millis();
     let raw = match legacy.as_ref().map(|row| row.try_get::<String, _>("value")) {
         Some(Ok(value)) => Some(value),
         Some(Err(sqlx::Error::ColumnDecode { .. })) | None => None,
         Some(Err(error)) => return Err(format!("读取原有配置失败: {error}")),
     };
-    let parsed = raw.as_deref().map(|raw| parse_config_json(raw, &serde_json::json!({})));
+    let parsed = raw
+        .as_deref()
+        .map(|raw| parse_config_json(raw, &serde_json::json!({})));
     let domains = match legacy.as_ref() {
         None => default_domains(),
         Some(_) => match parsed.as_ref().filter(|value| value.is_object()) {
@@ -185,7 +186,8 @@ mod tests {
         let domains = split_legacy(&json!({
             "voiceTtsMode":"unavailable-mode", "voiceTtsVoice":"Mia",
             "voiceTtsStream":false, "voiceApiKey":"retained-key",
-        })).unwrap();
+        }))
+        .unwrap();
         let voice = &domains[&ConfigDomain::Voice];
         assert_eq!(voice["tts"]["mode"], "builtin");
         assert_eq!(voice["tts"]["voice"], "Mia");
@@ -197,7 +199,10 @@ mod tests {
     fn legacy_log_levels_follow_current_values_and_defaults() {
         for old in [" debug ", "WARNING", "trace", " custom "] {
             let domains = split_legacy(&json!({"syncLogLevel":old})).unwrap();
-            assert_eq!(domains[&ConfigDomain::Sync]["logLevel"], domain_defaults(ConfigDomain::Sync)["logLevel"]);
+            assert_eq!(
+                domains[&ConfigDomain::Sync]["logLevel"],
+                domain_defaults(ConfigDomain::Sync)["logLevel"]
+            );
         }
         let valid = split_legacy(&json!({"syncLogLevel":"WARN"})).unwrap();
         assert_eq!(valid[&ConfigDomain::Sync]["logLevel"], "WARN");

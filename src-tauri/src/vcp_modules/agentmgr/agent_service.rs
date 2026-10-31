@@ -130,7 +130,9 @@ fn merge_top_level(base: &Value, incoming: &Value) -> Result<Value, String> {
         .as_object()
         .ok_or_else(|| "提交的配置必须是 JSON 对象".to_string())?;
     if let Some(agents) = incoming_obj.get("agents") {
-        let agents = agents.as_array().ok_or_else(|| "agents 必须是数组，已中止保存".to_string())?;
+        let agents = agents
+            .as_array()
+            .ok_or_else(|| "agents 必须是数组，已中止保存".to_string())?;
         validate_agents(agents)?;
     }
     for (key, value) in incoming_obj {
@@ -208,13 +210,19 @@ mod config_tests {
         for invalid in [Value::Null, json!(false), json!(0), json!(""), json!({})] {
             assert!(merge_top_level(&base, &json!({"agents":invalid})).is_err());
         }
-        assert!(merge_top_level(&base, &json!({"agents":[{"chineseName":"missing model"}]})).is_err());
+        assert!(
+            merge_top_level(&base, &json!({"agents":[{"chineseName":"missing model"}]})).is_err()
+        );
         let updated = merge_top_level(&base, &json!({"maxHistoryRounds":12})).unwrap();
         assert_eq!(updated["agents"], base["agents"]);
         assert_eq!(updated["extra"], "keep");
         assert_eq!(updated["maxHistoryRounds"], 12);
         let cleared = merge_top_level(&base, &json!({"agents":[]})).unwrap();
-        assert_eq!(cleared["agents"], json!([]), "an explicit empty list keeps its existing meaning");
+        assert_eq!(
+            cleared["agents"],
+            json!([]),
+            "an explicit empty list keeps its existing meaning"
+        );
         assert_eq!(cleared["extra"], "keep");
     }
 }

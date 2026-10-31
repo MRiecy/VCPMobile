@@ -251,7 +251,11 @@ async fn refresh_share_attachment_paths<R: tauri::Runtime>(
             super::file_manager::refresh_attachment_paths(app, attachment).await;
         }
     }
-    if let Some(attachments) = share.message.as_mut().and_then(|message| message.attachments.as_mut()) {
+    if let Some(attachments) = share
+        .message
+        .as_mut()
+        .and_then(|message| message.attachments.as_mut())
+    {
         for attachment in attachments {
             super::file_manager::refresh_attachment_paths(app, attachment).await;
         }
@@ -1488,9 +1492,11 @@ mod tests {
             })
         };
         // B must not even capture its native snapshot while A's read is pending.
-        assert!(tokio::time::timeout(Duration::from_millis(50), &mut read_b_done)
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut read_b_done)
+                .await
+                .is_err()
+        );
         release_a.send(()).unwrap();
         let first = first.await.unwrap();
         let second = second.await.unwrap();
@@ -1505,11 +1511,17 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!((repeated.delivery_id.as_str(), repeated.generation), ("B", 2));
+        assert_eq!(
+            (repeated.delivery_id.as_str(), repeated.generation),
+            ("B", 2)
+        );
         assert!(operations.is_empty());
         let mut connection = db.pool.acquire().await.unwrap();
         let persisted = load(&mut connection).await.unwrap().unwrap();
-        assert_eq!((persisted.delivery_id.as_str(), persisted.generation), ("B", 2));
+        assert_eq!(
+            (persisted.delivery_id.as_str(), persisted.generation),
+            ("B", 2)
+        );
     }
 
     #[tokio::test]
@@ -1539,7 +1551,10 @@ mod tests {
             .write(true)
             .open(root.join("delivery/lease.lock"))
             .unwrap();
-        assert!(matches!(try_lock_file(&contender), Err(std::fs::TryLockError::WouldBlock)));
+        assert!(matches!(
+            try_lock_file(&contender),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
         drop(owner);
         try_lock_file(&contender).unwrap();
         assert_eq!(slot(root).unwrap().unwrap().generation, first.generation);
@@ -1572,7 +1587,10 @@ mod tests {
                     let _guard = lock(&root).await.unwrap();
                     assert!(assert_current(&root, share.generation, "A").is_err());
                 }
-                assert!(!mark_android_share_failed(&root, share.generation, "A", "late copy failure").await);
+                assert!(
+                    !mark_android_share_failed(&root, share.generation, "A", "late copy failure")
+                        .await
+                );
                 drop(lease);
                 ack_started.send(()).unwrap();
                 wait_ack.await.unwrap();
@@ -1607,7 +1625,10 @@ mod tests {
         first.await.unwrap();
         let mut connection = db.pool.acquire().await.unwrap();
         let persisted = load(&mut connection).await.unwrap().unwrap();
-        assert_eq!((persisted.delivery_id.as_str(), persisted.state.as_str()), ("C", "receiving"));
+        assert_eq!(
+            (persisted.delivery_id.as_str(), persisted.state.as_str()),
+            ("C", "receiving")
+        );
     }
 
     #[tokio::test]
@@ -1834,7 +1855,11 @@ mod tests {
             observed_slot: None,
             owner_id: None,
         };
-        assert!(!acquisition_interrupted(root, &current, Some(&before_first_share)));
+        assert!(!acquisition_interrupted(
+            root,
+            &current,
+            Some(&before_first_share)
+        ));
         // A fresh observation of the same receiving slot can still detect a
         // crashed native provider, without requiring another lease or polling.
         let crashed = AndroidOwnerSnapshot {

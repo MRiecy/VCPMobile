@@ -221,7 +221,10 @@ fn managed_file(directory: GcDirectory, name: &str) -> Option<ManagedFile<'_>> {
     }
     // native_media writes <CAS>.<hyphenated UUID>.tmp beside the final JSON.
     if matches!(directory, GcDirectory::Multimodal) {
-        if let Some((hash, id)) = name.strip_suffix(".tmp").and_then(|stem| stem.split_once('.')) {
+        if let Some((hash, id)) = name
+            .strip_suffix(".tmp")
+            .and_then(|stem| stem.split_once('.'))
+        {
             if is_valid_cas_hash(hash) && id.len() == 36 && uuid::Uuid::parse_str(id).is_ok() {
                 return Some(ManagedFile::Temporary);
             }
@@ -667,8 +670,9 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        last_automatic_maintenance, load_attachment_gc_snapshot, record_automatic_maintenance,
-        scan_attachment_gc, consume_attachment_gc, DbState, GcRoots, GC_DIRECTORIES, ATTACHMENT_GC_KEY,
+        consume_attachment_gc, last_automatic_maintenance, load_attachment_gc_snapshot,
+        record_automatic_maintenance, scan_attachment_gc, DbState, GcRoots, ATTACHMENT_GC_KEY,
+        GC_DIRECTORIES,
     };
 
     #[test]
@@ -708,27 +712,52 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(domain, (9, "preserve raw value".into()));
-        let cache: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'cached_models'")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
+        let cache: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'cached_models'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         assert_eq!(cache, "preserve cache");
         let global: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE key = 'global'")
             .fetch_one(&db.pool)
             .await
             .unwrap();
         assert_eq!(global, 0);
-        for value in ["-1", "-9223372036854775808", "not-a-time", "9223372036854775808"] {
+        for value in [
+            "-1",
+            "-9223372036854775808",
+            "not-a-time",
+            "9223372036854775808",
+        ] {
             sqlx::query("UPDATE settings SET value=? WHERE key='last_automatic_maintenance'")
-                .bind(value).execute(&db.pool).await.unwrap();
-            assert!(last_automatic_maintenance(&db.pool).await.is_err(), "{value}");
-            let stored: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='last_automatic_maintenance'")
-                .fetch_one(&db.pool).await.unwrap();
-            assert_eq!(stored, value, "invalid completion evidence must not become a zero/default schedule");
+                .bind(value)
+                .execute(&db.pool)
+                .await
+                .unwrap();
+            assert!(
+                last_automatic_maintenance(&db.pool).await.is_err(),
+                "{value}"
+            );
+            let stored: String = sqlx::query_scalar(
+                "SELECT value FROM settings WHERE key='last_automatic_maintenance'",
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                stored, value,
+                "invalid completion evidence must not become a zero/default schedule"
+            );
         }
         sqlx::query("UPDATE settings SET value=? WHERE key='last_automatic_maintenance'")
-            .bind(i64::MAX.to_string()).execute(&db.pool).await.unwrap();
-        assert_eq!(last_automatic_maintenance(&db.pool).await.unwrap(), i64::MAX);
+            .bind(i64::MAX.to_string())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            last_automatic_maintenance(&db.pool).await.unwrap(),
+            i64::MAX
+        );
     }
 
     async fn create_live_set_tables(pool: &sqlx::SqlitePool) {
@@ -794,13 +823,20 @@ mod tests {
     async fn cold_gc_revalidates_the_durable_plan_and_retries_file_failures() {
         async fn read_plan(db: &DbState) -> (String, i64) {
             sqlx::query_as("SELECT value,updated_at FROM settings WHERE key=?")
-                .bind(ATTACHMENT_GC_KEY).fetch_one(&db.pool).await.unwrap()
+                .bind(ATTACHMENT_GC_KEY)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap()
         }
         let temp = tempfile::tempdir().unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(temp.path().join("gc.sqlite")).create_if_missing(true);
-        let connect = || sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect_with(options.clone());
+            .filename(temp.path().join("gc.sqlite"))
+            .create_if_missing(true);
+        let connect = || {
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.clone())
+        };
         let pool = connect().await.unwrap();
         create_live_set_tables(&pool).await;
         sqlx::raw_sql("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at BIGINT NOT NULL);
@@ -847,7 +883,11 @@ mod tests {
         let media_temp = format!("{from_message}.{}.tmp", uuid::Uuid::new_v4());
         let lookalike = format!("{from_message}.unmanaged.tmp");
         std::fs::write(roots.multimodal.join(&media_temp), b"unfinished").unwrap();
-        std::fs::write(roots.attachments.join(&media_temp), b"not a managed temp here").unwrap();
+        std::fs::write(
+            roots.attachments.join(&media_temp),
+            b"not a managed temp here",
+        )
+        .unwrap();
         std::fs::write(roots.multimodal.join(&lookalike), b"unknown file").unwrap();
         scan_attachment_gc(&db, &roots).await.unwrap();
         assert!(stale_temp.exists());
@@ -911,7 +951,10 @@ mod tests {
                 .fetch_all(&db.pool)
                 .await
                 .unwrap();
-        assert_eq!(remaining, [&from_message, &orphan, &indexed_later].map(String::as_str));
+        assert_eq!(
+            remaining,
+            [&from_message, &orphan, &indexed_later].map(String::as_str)
+        );
         let retry = read_plan(&db).await;
         assert!(retry.0.contains(".ingest-"));
         assert_eq!(retry.1, planned.1);
@@ -920,11 +963,17 @@ mod tests {
         let retried = consume_attachment_gc(&db, &roots).await.unwrap();
         assert_eq!((retried.reclaimed, retried.ghost_files), (1, 1));
         assert!(!roots.attachments.join(format!("{orphan}.bin")).exists());
-        assert!(!roots.thumbnails.join(format!("{orphan}_thumb.jpg")).exists());
+        assert!(!roots
+            .thumbnails
+            .join(format!("{orphan}_thumb.jpg"))
+            .exists());
         assert!(!roots.multimodal.join(format!("{orphan}.json")).exists());
         assert!(!extra_original.exists());
         let orphan_index: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE hash=?")
-            .bind(&orphan).fetch_one(&db.pool).await.unwrap();
+            .bind(&orphan)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
         assert_eq!(orphan_index, 0);
         assert_eq!(read_plan(&db).await, ("[]".into(), planned.1));
 
@@ -933,7 +982,11 @@ mod tests {
         std::fs::write(&outside, b"outside CAS").unwrap();
         let bad_plan = serde_json::json!([{"File":["Attachments", format!("../{outside_name}")]}]);
         sqlx::query("UPDATE settings SET value=? WHERE key=?")
-            .bind(bad_plan.to_string()).bind(ATTACHMENT_GC_KEY).execute(&db.pool).await.unwrap();
+            .bind(bad_plan.to_string())
+            .bind(ATTACHMENT_GC_KEY)
+            .execute(&db.pool)
+            .await
+            .unwrap();
         assert!(consume_attachment_gc(&db, &roots).await.is_err());
         assert!(outside.is_file());
         assert_eq!(read_plan(&db).await.0, bad_plan.to_string());

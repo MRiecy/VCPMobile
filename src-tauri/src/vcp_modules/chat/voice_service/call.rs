@@ -5,9 +5,11 @@ use super::{
     input, network, tts,
 };
 use crate::vcp_modules::{
-    chat::voice_submission::prepare_voice_submission, chat_manager::ChatMessage,
-    message_service::MessageWriteResultDto, topic_types::TopicKey,
+    chat::voice_submission::prepare_voice_submission,
+    chat_manager::ChatMessage,
+    message_service::MessageWriteResultDto,
     settings_manager::{read_config, SettingsState},
+    topic_types::TopicKey,
     vcp_client::ActiveGroupTurns,
 };
 use serde::Serialize;
@@ -170,7 +172,10 @@ impl CallInner {
         if !self.snapshot.active || !input.has_offer(&offer.offer_id) {
             return false;
         }
-        self.pending = Some(Pending { offer_id: offer.offer_id.clone(), reply: reply.clone() });
+        self.pending = Some(Pending {
+            offer_id: offer.offer_id.clone(),
+            reply: reply.clone(),
+        });
         self.snapshot.input_state = "submitting";
         self.snapshot.partial = offer.text.clone();
         self.snapshot.error = None;
@@ -180,7 +185,11 @@ impl CallInner {
 
     fn submission_failed(&mut self, input: &CallInput, reply: &Arc<Reply>, error: String) -> bool {
         reply.cancel.cancel();
-        if !self.pending.as_ref().is_some_and(|pending| Arc::ptr_eq(&pending.reply, reply)) {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(&pending.reply, reply))
+        {
             return false;
         }
         if let Some(pending) = self.pending.take() {
@@ -194,9 +203,10 @@ impl CallInner {
     }
 
     fn admit(&mut self, input: &CallInput, offer: &Offer, reply: &Arc<Reply>) -> bool {
-        let current = self.pending.as_ref().is_some_and(|pending| {
-            Arc::ptr_eq(&pending.reply, reply)
-        });
+        let current = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(&pending.reply, reply));
         if !current
             || !self.snapshot.active
             || reply.cancel.is_cancelled()
@@ -228,7 +238,11 @@ impl Call {
         if !inner.snapshot.active || self.input.cancel.is_cancelled() {
             return Err(network::CANCELLED.into());
         }
-        let vad = self.vad_config.get().copied().ok_or("语音通话仍在准备中。")?;
+        let vad = self
+            .vad_config
+            .get()
+            .copied()
+            .ok_or("语音通话仍在准备中。")?;
         Ok((vad, inner.snapshot.input_device_id.clone()))
     }
 }
@@ -342,7 +356,11 @@ fn retire_conversation<R: Runtime>(
         }
         registry.retired.push_back(call_id.into());
     }
-    Ok(registry.current.as_ref().filter(|call| call.id == call_id).cloned())
+    Ok(registry
+        .current
+        .as_ref()
+        .filter(|call| call.id == call_id)
+        .cloned())
 }
 
 #[tauri::command]
@@ -357,14 +375,20 @@ pub async fn begin_voice_conversation(
         // Reserve before the first await so hangup can revoke an initializing
         // call. Repeated begin/microphone intents keep the same VAD snapshot.
         tts::stop_bubble_narration(&app).await?;
-        current.vad_config.get_or_try_init(|| async {
-            let config = read_config(app.clone(), app.state::<SettingsState>()).await?.voice_vad_config();
-            config.validate()?;
-            Ok::<_, String>(config)
-        }).await?;
+        current
+            .vad_config
+            .get_or_try_init(|| async {
+                let config = read_config(app.clone(), app.state::<SettingsState>())
+                    .await?
+                    .voice_vad_config();
+                config.validate()?;
+                Ok::<_, String>(config)
+            })
+            .await?;
         validate_input(&app, &call_id)?;
         tauri_plugin_vcp_mobile::voice::begin_voice_call(app.clone(), call_id.clone()).await
-    }.await;
+    }
+    .await;
     if let Err(error) = result {
         let _ = end_voice_conversation(app.clone(), call_id.clone()).await;
         if let Some(call) = call(&app, &call_id) {
@@ -384,10 +408,24 @@ pub async fn begin_voice_conversation(
 }
 
 pub(super) fn is_active<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
-    let Some(state) = app.try_state::<VoiceCallState>() else { return Ok(false); };
-    let current = state.registry.lock().map_err(|e| e.to_string())?.current.clone();
-    current.map(|call| call.inner.lock().map(|inner| inner.snapshot.active).map_err(|e| e.to_string()))
-        .transpose().map(|active| active.unwrap_or(false))
+    let Some(state) = app.try_state::<VoiceCallState>() else {
+        return Ok(false);
+    };
+    let current = state
+        .registry
+        .lock()
+        .map_err(|e| e.to_string())?
+        .current
+        .clone();
+    current
+        .map(|call| {
+            call.inner
+                .lock()
+                .map(|inner| inner.snapshot.active)
+                .map_err(|e| e.to_string())
+        })
+        .transpose()
+        .map(|active| active.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -470,16 +508,24 @@ pub(super) fn validate_input<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result
     input_config(app, id).map(|_| ())
 }
 
-pub(super) fn input_config<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(VoiceVadConfig, Option<String>), String> {
+pub(super) fn input_config<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+) -> Result<(VoiceVadConfig, Option<String>), String> {
     let call = call(app, id).ok_or_else(|| "语音通话已结束。".to_string())?;
     call.input_config()
 }
 
 #[tauri::command]
 pub async fn voice_call_list_inputs(
-    app: AppHandle, call_id: String, document_id: String,
+    app: AppHandle,
+    call_id: String,
+    document_id: String,
 ) -> Result<tauri_plugin_vcp_mobile::voice::VoiceInputDevices, String> {
-    let validate = || app.state::<super::VoiceDocumentState>().with_current(&document_id, || validate_input(&app, &call_id));
+    let validate = || {
+        app.state::<super::VoiceDocumentState>()
+            .with_current(&document_id, || validate_input(&app, &call_id))
+    };
     validate()?;
     let devices = tauri_plugin_vcp_mobile::voice::list_voice_input_devices(app.clone()).await?;
     validate()?;
@@ -488,29 +534,51 @@ pub async fn voice_call_list_inputs(
 
 #[tauri::command]
 pub async fn voice_call_select_input(
-    app: AppHandle, call_id: String, document_id: String, input_device_id: Option<String>,
-    expected_session_id: Option<String>, expected_lifecycle_epoch: Option<u64>,
+    app: AppHandle,
+    call_id: String,
+    document_id: String,
+    input_device_id: Option<String>,
+    expected_session_id: Option<String>,
+    expected_lifecycle_epoch: Option<u64>,
 ) -> Result<(), String> {
     if let Some(id) = input_device_id.as_deref() {
-        let inputs = voice_call_list_inputs(app.clone(), call_id.clone(), document_id.clone()).await?;
-        if !inputs.devices.iter().chain(&inputs.route_options).any(|device| device.id == id) {
+        let inputs =
+            voice_call_list_inputs(app.clone(), call_id.clone(), document_id.clone()).await?;
+        if !inputs
+            .devices
+            .iter()
+            .chain(&inputs.route_options)
+            .any(|device| device.id == id)
+        {
             return Err("voice_input_device_unavailable".into());
         }
     }
     let current = call(&app, &call_id).ok_or_else(|| network::CANCELLED.to_string())?;
-    let switch = app.state::<super::VoiceDocumentState>().with_current(&document_id, || {
-        let mut inner = current.inner.lock().map_err(|error| error.to_string())?;
-        if !inner.snapshot.active { return Err(network::CANCELLED.into()); }
-        if inner.snapshot.input_session_id != expected_session_id ||
-            !matches!(inner.snapshot.mic_state, "listening" | "closed") {
-            return Err("voice_session_busy".into());
-        }
-        if inner.snapshot.input_device_id == input_device_id { return Ok(None); }
-        let switch = input::prepare_device_switch(&app, &call_id, expected_session_id.as_deref(), &document_id)?;
-        inner.snapshot.input_device_id = input_device_id;
-        publish(&app, &mut inner);
-        Ok(switch)
-    })?;
+    let switch = app
+        .state::<super::VoiceDocumentState>()
+        .with_current(&document_id, || {
+            let mut inner = current.inner.lock().map_err(|error| error.to_string())?;
+            if !inner.snapshot.active {
+                return Err(network::CANCELLED.into());
+            }
+            if inner.snapshot.input_session_id != expected_session_id
+                || !matches!(inner.snapshot.mic_state, "listening" | "closed")
+            {
+                return Err("voice_session_busy".into());
+            }
+            if inner.snapshot.input_device_id == input_device_id {
+                return Ok(None);
+            }
+            let switch = input::prepare_device_switch(
+                &app,
+                &call_id,
+                expected_session_id.as_deref(),
+                &document_id,
+            )?;
+            inner.snapshot.input_device_id = input_device_id;
+            publish(&app, &mut inner);
+            Ok(switch)
+        })?;
     if let Some(switch) = switch {
         input::finish_device_switch(app, switch, document_id, expected_lifecycle_epoch).await?;
     }
@@ -521,12 +589,23 @@ pub(super) fn input_work(app: &AppHandle, id: &str) -> Option<Arc<WorkLease>> {
     call(app, id)?.inner.lock().ok()?.work.clone()
 }
 
-pub(super) fn input_starting<R: Runtime>(app: &AppHandle<R>, id: &str, session: &str, cancelled: &CancellationToken) {
-    let Some(call) = call(app, id) else { return; };
-    let Ok(mut inner) = call.inner.lock() else { return; };
+pub(super) fn input_starting<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    session: &str,
+    cancelled: &CancellationToken,
+) {
+    let Some(call) = call(app, id) else {
+        return;
+    };
+    let Ok(mut inner) = call.inner.lock() else {
+        return;
+    };
     // Cancellation is checked while holding the projection lock, so a close
     // accepted before this publication cannot be overwritten by late readiness.
-    if !inner.snapshot.active || cancelled.is_cancelled() { return; }
+    if !inner.snapshot.active || cancelled.is_cancelled() {
+        return;
+    }
     inner.snapshot.input_session_id = Some(session.into());
     inner.snapshot.mic_state = "starting";
     inner.snapshot.mic_stop_reason = None;
@@ -534,10 +613,21 @@ pub(super) fn input_starting<R: Runtime>(app: &AppHandle<R>, id: &str, session: 
     publish(app, &mut inner);
 }
 
-pub(super) fn input_stop_failed<R: Runtime>(app: &AppHandle<R>, id: &str, session: &str, error: &str) {
-    let Some(call) = call(app, id) else { return; };
-    let Ok(mut inner) = call.inner.lock() else { return; };
-    if !inner.snapshot.active || inner.snapshot.input_session_id.as_deref() != Some(session) { return; }
+pub(super) fn input_stop_failed<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    session: &str,
+    error: &str,
+) {
+    let Some(call) = call(app, id) else {
+        return;
+    };
+    let Ok(mut inner) = call.inner.lock() else {
+        return;
+    };
+    if !inner.snapshot.active || inner.snapshot.input_session_id.as_deref() != Some(session) {
+        return;
+    }
     inner.snapshot.mic_state = "stopping";
     inner.snapshot.mic_stop_reason = Some(error.into());
     publish(app, &mut inner);
@@ -563,7 +653,10 @@ pub(super) fn input_status<R: Runtime>(
     match stage {
         "ready" | "local-only" => {
             if inner.snapshot.input_session_id.as_deref() != Some(session)
-                || inner.snapshot.mic_state != "starting" { return; }
+                || inner.snapshot.mic_state != "starting"
+            {
+                return;
+            }
             inner.snapshot.mic_stop_reason = None;
             inner.snapshot.input_state = "idle";
             inner.snapshot.notice = (stage == "local-only")
@@ -579,7 +672,9 @@ pub(super) fn input_status<R: Runtime>(
             inner.snapshot.mic_stop_reason = None;
         }
         "stopping" => {
-            if inner.snapshot.input_session_id.as_deref() != Some(session) { return; }
+            if inner.snapshot.input_session_id.as_deref() != Some(session) {
+                return;
+            }
             inner.snapshot.mic_state = "stopping";
         }
         "closed" => {
@@ -609,7 +704,13 @@ pub(super) fn input_status<R: Runtime>(
     publish(app, &mut inner);
 }
 
-pub(super) fn input_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, session: &str, reason: &str, failed: bool) {
+pub(super) fn input_stopped<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    session: &str,
+    reason: &str,
+    failed: bool,
+) {
     let Some(call) = call(app, id) else {
         return;
     };
@@ -662,7 +763,10 @@ pub(super) fn interrupt_reply(app: &AppHandle, id: &str) {
     tts::request_stop(app, &tts);
 }
 
-pub(super) fn begin_speech<R: Runtime>(app: &AppHandle<R>, input: &Arc<CallInput>) -> Result<Began, String> {
+pub(super) fn begin_speech<R: Runtime>(
+    app: &AppHandle<R>,
+    input: &Arc<CallInput>,
+) -> Result<Began, String> {
     let call = call(app, &input.id).ok_or_else(|| network::CANCELLED.to_string())?;
     let (began, stop, target) = {
         let mut inner = call.inner.lock().map_err(|error| error.to_string())?;
@@ -723,7 +827,9 @@ pub(super) fn offer(app: &AppHandle, offer: Offer) {
         let narration = match tts::prepare_narration(&app, &reply.cancel).await {
             Ok(prepared) => prepared,
             Err(error) => {
-                if !reply.cancel.is_cancelled() { submission_failed(&app, &call, &reply, error); }
+                if !reply.cancel.is_cancelled() {
+                    submission_failed(&app, &call, &reply, error);
+                }
                 return;
             }
         };
@@ -734,7 +840,9 @@ pub(super) fn offer(app: &AppHandle, offer: Offer) {
             &offer.text,
             reply.cancel.clone(),
             narration.policy.clone(),
-        ).await {
+        )
+        .await
+        {
             Ok(prepared) => prepared,
             Err(error) => {
                 submission_failed(&app, &call, &reply, error);
@@ -975,18 +1083,31 @@ mod tests {
         let target = TopicKey::new("agent", "a", "t");
 
         // This is the synchronous admission step used by the end command.
-        assert!(retire_conversation(app.handle(), "cancelled").unwrap().is_none());
+        assert!(retire_conversation(app.handle(), "cancelled")
+            .unwrap()
+            .is_none());
         let late = reserve_conversation(app.handle().clone(), "cancelled".into(), target.clone());
         assert!(matches!(late, Err(error) if error == network::CANCELLED));
 
-        let next = reserve_conversation(app.handle().clone(), "next".into(), target.clone()).unwrap();
+        let next =
+            reserve_conversation(app.handle().clone(), "next".into(), target.clone()).unwrap();
         assert!(next.active);
-        assert!(retire_conversation(app.handle(), "cancelled").unwrap().is_none());
+        assert!(retire_conversation(app.handle(), "cancelled")
+            .unwrap()
+            .is_none());
         let current = call(app.handle(), "next").unwrap();
         assert!(!current.input.cancel.is_cancelled());
         assert!(current.inner.lock().unwrap().snapshot.active);
         assert!(reserve_conversation(app.handle().clone(), "next".into(), target).is_ok());
-        assert_eq!(app.state::<VoiceCallState>().registry.lock().unwrap().retired.len(), 1);
+        assert_eq!(
+            app.state::<VoiceCallState>()
+                .registry
+                .lock()
+                .unwrap()
+                .retired
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -994,7 +1115,12 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(VoiceCallState::default());
         app.manage(super::super::VoiceServiceState::default());
-        reserve_conversation(app.handle().clone(), "call".into(), TopicKey::new("agent", "a", "t")).unwrap();
+        reserve_conversation(
+            app.handle().clone(),
+            "call".into(),
+            TopicKey::new("agent", "a", "t"),
+        )
+        .unwrap();
         let current = call(app.handle(), "call").unwrap();
         let snapshot = || current.inner.lock().unwrap().snapshot.clone();
         let capture = CancellationToken::new();
@@ -1007,11 +1133,20 @@ mod tests {
         input_status(app.handle(), "call", "old-input", "listening", None, None);
         assert_eq!(snapshot().mic_state, "stopping");
         input_stop_failed(app.handle(), "call", "old-input", "native_stop_failed");
-        assert_eq!(snapshot().mic_stop_reason.as_deref(), Some("native_stop_failed"));
+        assert_eq!(
+            snapshot().mic_stop_reason.as_deref(),
+            Some("native_stop_failed")
+        );
         assert_eq!(snapshot().input_session_id.as_deref(), Some("old-input"));
         assert!(snapshot().active);
         assert!(!current.input.cancel.is_cancelled());
-        input_stopped(app.handle(), "call", "old-input", "document_replaced", false);
+        input_stopped(
+            app.handle(),
+            "call",
+            "old-input",
+            "document_replaced",
+            false,
+        );
         assert_eq!(snapshot().mic_state, "closed");
         input_starting(app.handle(), "call", "new-input", &CancellationToken::new());
         input_status(app.handle(), "call", "new-input", "listening", None, None);
@@ -1048,11 +1183,16 @@ mod tests {
         let input = CallInput::new("call".into());
         let mut inner = inner();
         let parts: Vec<_> = (0..super::super::batch::MAX_BATCH_PARTS)
-            .map(|_| inner.begin_speech(&input).unwrap().0).collect();
+            .map(|_| inner.begin_speech(&input).unwrap().0)
+            .collect();
         let (last, preceding) = parts.split_last().unwrap();
         for part in preceding {
-            assert!(matches!(input.complete(&part.batch_id, part.sequence, "已识别".into()).unwrap(),
-                BatchCompletion::Pending));
+            assert!(matches!(
+                input
+                    .complete(&part.batch_id, part.sequence, "已识别".into())
+                    .unwrap(),
+                BatchCompletion::Pending
+            ));
         }
         let ready = offer(&input, last, "末句");
         let failed = reply("failed");
@@ -1100,8 +1240,14 @@ mod tests {
         app.manage(super::super::VoiceServiceState::default());
         app.manage(ActiveGroupTurns::default());
         let target = TopicKey::new("group", "g", "t");
-        let old = app.state::<ActiveGroupTurns>().try_acquire(target.clone()).unwrap();
-        let other = app.state::<ActiveGroupTurns>().try_acquire(TopicKey::new("group", "g", "other")).unwrap();
+        let old = app
+            .state::<ActiveGroupTurns>()
+            .try_acquire(target.clone())
+            .unwrap();
+        let other = app
+            .state::<ActiveGroupTurns>()
+            .try_acquire(TopicKey::new("group", "g", "other"))
+            .unwrap();
         reserve_conversation(app.handle().clone(), "call".into(), target).unwrap();
         let current = call(app.handle(), "call").unwrap();
         begin_speech(app.handle(), &current.input).unwrap();

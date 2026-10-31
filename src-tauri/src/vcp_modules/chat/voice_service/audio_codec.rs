@@ -106,9 +106,10 @@ pub(super) async fn decode(
         return Err(DecodeError::Corrupt("语音音频文件为空。".into()));
     }
     if bytes.len() > MAX_AUDIO_FILE_BYTES {
-        return Err(DecodeError::Resource(
-            format!("语音音频文件超过 {} MiB 上限。", MAX_AUDIO_FILE_BYTES / (1024 * 1024)),
-        ));
+        return Err(DecodeError::Resource(format!(
+            "语音音频文件超过 {} MiB 上限。",
+            MAX_AUDIO_FILE_BYTES / (1024 * 1024)
+        )));
     }
     let cancel = cancel.clone();
     tokio::task::spawn_blocking(move || decode_inner(bytes, &cancel))
@@ -119,15 +120,25 @@ pub(super) async fn decode(
 fn decode_inner(bytes: Bytes, cancel: &CancellationToken) -> Result<DecodedAudio, DecodeError> {
     let mut pcm_24k_mono = Vec::new();
     let mut collect = |packet: &[u8]| {
-        pcm_24k_mono.try_reserve(packet.len())
+        pcm_24k_mono
+            .try_reserve(packet.len())
             .map_err(|_| DecodeError::Resource("无法分配语音 PCM 缓冲。".into()))?;
         pcm_24k_mono.extend_from_slice(packet);
         Ok(())
     };
-    let format = decode_to(bytes, cancel, &mut PcmSink {
-        max_bytes: Some(MAX_PCM_BYTES), frames: 0, write: &mut collect,
-    })?;
-    Ok(DecodedAudio { format, pcm_24k_mono })
+    let format = decode_to(
+        bytes,
+        cancel,
+        &mut PcmSink {
+            max_bytes: Some(MAX_PCM_BYTES),
+            frames: 0,
+            write: &mut collect,
+        },
+    )?;
+    Ok(DecodedAudio {
+        format,
+        pcm_24k_mono,
+    })
 }
 
 /// Local references are bounded compressed files, not bounded TTS sentences.
@@ -147,28 +158,44 @@ pub(super) async fn decode_stream<C: PacketConsumer>(
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let worker = tokio::task::spawn_blocking(move || {
         let result = (|| {
-        let mut pending = Vec::with_capacity(PCM_PACKET_BYTES);
-        let mut emit = |mut pcm: &[u8]| {
-            while !pcm.is_empty() {
-                check_cancelled(&decoding)?;
-                let count = pcm.len().min(PCM_PACKET_BYTES - pending.len());
-                pending.extend_from_slice(&pcm[..count]);
-                pcm = &pcm[count..];
-                if pending.len() == PCM_PACKET_BYTES {
-                    sender.blocking_send(std::mem::replace(&mut pending, Vec::with_capacity(PCM_PACKET_BYTES)))
-                        .map_err(|_| DecodeError::Cancelled)?;
+            let mut pending = Vec::with_capacity(PCM_PACKET_BYTES);
+            let mut emit = |mut pcm: &[u8]| {
+                while !pcm.is_empty() {
+                    check_cancelled(&decoding)?;
+                    let count = pcm.len().min(PCM_PACKET_BYTES - pending.len());
+                    pending.extend_from_slice(&pcm[..count]);
+                    pcm = &pcm[count..];
+                    if pending.len() == PCM_PACKET_BYTES {
+                        sender
+                            .blocking_send(std::mem::replace(
+                                &mut pending,
+                                Vec::with_capacity(PCM_PACKET_BYTES),
+                            ))
+                            .map_err(|_| DecodeError::Cancelled)?;
+                    }
                 }
+                Ok(())
+            };
+            decode_to(
+                bytes,
+                &decoding,
+                &mut PcmSink {
+                    max_bytes: None,
+                    frames: 0,
+                    write: &mut emit,
+                },
+            )?;
+            check_cancelled(&decoding)?;
+            if !pending.is_empty() {
+                sender
+                    .blocking_send(pending)
+                    .map_err(|_| DecodeError::Cancelled)?;
             }
-            Ok(())
-        };
-        decode_to(bytes, &decoding, &mut PcmSink { max_bytes: None, frames: 0, write: &mut emit })?;
-        check_cancelled(&decoding)?;
-        if !pending.is_empty() {
-            sender.blocking_send(pending).map_err(|_| DecodeError::Cancelled)?;
-        }
-        Ok::<_, DecodeError>(())
+            Ok::<_, DecodeError>(())
         })();
-        if result.is_err() { decoding.cancel(); }
+        if result.is_err() {
+            decoding.cancel();
+        }
         result
     });
     let consumed = async {
@@ -178,13 +205,18 @@ pub(super) async fn decode_stream<C: PacketConsumer>(
                 _ = local.cancelled() => return Err(CANCELLED.to_string()),
                 packet = receiver.recv() => packet,
             };
-            let Some(packet) = packet else { return Ok(()); };
+            let Some(packet) = packet else {
+                return Ok(());
+            };
             consumer.append(packet, &local).await?;
         }
-    }.await;
+    }
+    .await;
     drop(receiver);
     local.cancel();
-    let decoded = worker.await.map_err(|error| format!("原声解码任务失败：{error}"))?;
+    let decoded = worker
+        .await
+        .map_err(|error| format!("原声解码任务失败：{error}"))?;
     match decoded {
         Err(DecodeError::Cancelled) => consumed.and(Err(CANCELLED.into())),
         Err(error) => Err(error.to_string()),
@@ -200,11 +232,16 @@ struct PcmSink<'a> {
 
 impl PcmSink<'_> {
     fn append_bytes(&mut self, pcm: &[u8]) -> Result<(), DecodeError> {
-        let frames = self.frames.checked_add(pcm.len() / 2).ok_or_else(pcm_limit)?;
+        let frames = self
+            .frames
+            .checked_add(pcm.len() / 2)
+            .ok_or_else(pcm_limit)?;
         if self.max_bytes.is_some_and(|limit| frames > limit / 2) {
             return Err(pcm_limit());
         }
-        for packet in pcm.chunks(PCM_PACKET_BYTES) { (self.write)(packet)?; }
+        for packet in pcm.chunks(PCM_PACKET_BYTES) {
+            (self.write)(packet)?;
+        }
         self.frames = frames;
         Ok(())
     }
@@ -225,7 +262,11 @@ impl PcmSink<'_> {
     }
 }
 
-fn decode_to(bytes: Bytes, cancel: &CancellationToken, output: &mut PcmSink<'_>) -> Result<ContainerFormat, DecodeError> {
+fn decode_to(
+    bytes: Bytes,
+    cancel: &CancellationToken,
+    output: &mut PcmSink<'_>,
+) -> Result<ContainerFormat, DecodeError> {
     check_cancelled(cancel)?;
     if bytes.starts_with(b"RIFF") {
         if let Some(range) = validate_wav(&bytes, cancel, output.max_bytes)? {
@@ -342,10 +383,17 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<(), DecodeError> {
 }
 
 fn pcm_limit() -> DecodeError {
-    DecodeError::Resource(format!("单句语音解码后的 PCM 超过 {} MiB 上限。", MAX_PCM_BYTES / (1024 * 1024)))
+    DecodeError::Resource(format!(
+        "单句语音解码后的 PCM 超过 {} MiB 上限。",
+        MAX_PCM_BYTES / (1024 * 1024)
+    ))
 }
 
-fn output_frames(input_frames: u64, source_rate: u32, max_bytes: Option<usize>) -> Result<usize, DecodeError> {
+fn output_frames(
+    input_frames: u64,
+    source_rate: u32,
+    max_bytes: Option<usize>,
+) -> Result<usize, DecodeError> {
     let frames = input_frames
         .checked_mul(u64::from(OUTPUT_RATE))
         .ok_or_else(pcm_limit)?
@@ -424,7 +472,12 @@ impl MonoNormalizer {
         })
     }
 
-    fn push(&mut self, mut samples: &[f32], cancel: &CancellationToken, output: &mut PcmSink<'_>) -> Result<(), DecodeError> {
+    fn push(
+        &mut self,
+        mut samples: &[f32],
+        cancel: &CancellationToken,
+        output: &mut PcmSink<'_>,
+    ) -> Result<(), DecodeError> {
         check_cancelled(cancel)?;
         self.source_frames = self
             .source_frames
@@ -450,7 +503,11 @@ impl MonoNormalizer {
         Ok(())
     }
 
-    fn finish(mut self, cancel: &CancellationToken, output: &mut PcmSink<'_>) -> Result<(), DecodeError> {
+    fn finish(
+        mut self,
+        cancel: &CancellationToken,
+        output: &mut PcmSink<'_>,
+    ) -> Result<(), DecodeError> {
         let target_frames = output_frames(self.source_frames, self.rate, output.max_bytes)?;
         if target_frames == 0 {
             return Err(DecodeError::Corrupt("语音服务返回了空音频。".into()));
@@ -587,7 +644,10 @@ fn read_u32(bytes: &[u8]) -> u32 {
 /// Wrap a completed PCM16/24k/mono response in a conventional 44-byte WAV header.
 pub(super) fn pcm_wav(pcm: &[u8]) -> Result<Vec<u8>, String> {
     if pcm.is_empty() || pcm.len() % 2 != 0 || pcm.len() > MAX_PCM_BYTES {
-        return Err(format!("待缓存的 PCM 音频为空、不完整或超过 {} MiB 上限。", MAX_PCM_BYTES / (1024 * 1024)));
+        return Err(format!(
+            "待缓存的 PCM 音频为空、不完整或超过 {} MiB 上限。",
+            MAX_PCM_BYTES / (1024 * 1024)
+        ));
     }
     let mut wav = Vec::new();
     wav.try_reserve_exact(44 + pcm.len())
@@ -757,7 +817,11 @@ mod tests {
     }
 
     impl PacketConsumer for CountingConsumer {
-        async fn append(&mut self, packet: Vec<u8>, cancel: &CancellationToken) -> Result<(), String> {
+        async fn append(
+            &mut self,
+            packet: Vec<u8>,
+            cancel: &CancellationToken,
+        ) -> Result<(), String> {
             check_cancelled(cancel).map_err(|error| error.to_string())?;
             assert!(!packet.is_empty() && packet.len().is_multiple_of(2));
             self.bytes += packet.len();
@@ -775,10 +839,14 @@ mod tests {
         // A valid 6.4 MB reference expands to 9.6 MB at native playback rate.
         let reference = Bytes::from(wav(16_000, 1, &vec![0; 16_000 * 2 * 200]));
         assert!(reference.len() < 7_000_000);
-        let decoded = decode(reference.clone(), &CancellationToken::new()).await.unwrap();
+        let decoded = decode(reference.clone(), &CancellationToken::new())
+            .await
+            .unwrap();
         assert_eq!(decoded.pcm_24k_mono.len(), 24_000 * 2 * 200);
         let mut consumer = CountingConsumer::default();
-        decode_stream(reference, &CancellationToken::new(), &mut consumer).await.unwrap();
+        decode_stream(reference, &CancellationToken::new(), &mut consumer)
+            .await
+            .unwrap();
         assert_eq!(consumer.bytes, 24_000 * 2 * 200);
         assert_eq!(consumer.largest_packet, PCM_PACKET_BYTES);
     }
@@ -787,14 +855,22 @@ mod tests {
     async fn long_real_mp3_exceeds_old_budget_in_complete_and_streaming_decode() {
         // The project encoder emits plain MPEG frames without a LAME/Xing tag.
         // Concatenating these independent frame sequences yields a long MP3.
-        let encoded = vcp_voice_mp3::encode_pcm16_mono(&sine(16_000, 160_000, 440.0, 1), || false).unwrap();
+        let encoded =
+            vcp_voice_mp3::encode_pcm16_mono(&sine(16_000, 160_000, 440.0, 1), || false).unwrap();
         let reference = Bytes::from(encoded.repeat(20));
         assert!(reference.len() < 7_000_000);
-        let decoded = decode(reference.clone(), &CancellationToken::new()).await.unwrap();
+        let decoded = decode(reference.clone(), &CancellationToken::new())
+            .await
+            .unwrap();
         assert!(decoded.pcm_24k_mono.len() > 8 * 1024 * 1024);
         let mut consumer = CountingConsumer::default();
-        decode_stream(reference, &CancellationToken::new(), &mut consumer).await.unwrap();
-        assert!(consumer.bytes > 24_000 * 2 * 200, "retain encoder padding rather than guessing it away");
+        decode_stream(reference, &CancellationToken::new(), &mut consumer)
+            .await
+            .unwrap();
+        assert!(
+            consumer.bytes > 24_000 * 2 * 200,
+            "retain encoder padding rather than guessing it away"
+        );
         assert!(consumer.bytes < 24_000 * 2 * 205);
         assert_eq!(consumer.bytes, decoded.pcm_24k_mono.len());
         assert_eq!(consumer.largest_packet, PCM_PACKET_BYTES);
@@ -804,7 +880,11 @@ mod tests {
     async fn streaming_and_complete_decode_share_exact_normalization() {
         struct Collected(Vec<u8>);
         impl PacketConsumer for Collected {
-            async fn append(&mut self, packet: Vec<u8>, _: &CancellationToken) -> Result<(), String> {
+            async fn append(
+                &mut self,
+                packet: Vec<u8>,
+                _: &CancellationToken,
+            ) -> Result<(), String> {
                 self.0.extend(packet);
                 Ok(())
             }
@@ -815,9 +895,13 @@ mod tests {
         }
         for rate in [16_000, 24_000, 44_100, 48_000] {
             let reference = Bytes::from(wav(rate, 2, &sine(rate, rate as usize / 5, 440.0, 2)));
-            let expected = decode(reference.clone(), &CancellationToken::new()).await.unwrap();
+            let expected = decode(reference.clone(), &CancellationToken::new())
+                .await
+                .unwrap();
             let mut collected = Collected(Vec::new());
-            decode_stream(reference, &CancellationToken::new(), &mut collected).await.unwrap();
+            decode_stream(reference, &CancellationToken::new(), &mut collected)
+                .await
+                .unwrap();
             assert_eq!(collected.0, expected.pcm_24k_mono, "{rate}");
         }
     }
@@ -826,8 +910,14 @@ mod tests {
     async fn cancelling_a_stalled_consumer_releases_and_joins_the_stream_decoder() {
         struct Stalled(Option<tokio::sync::oneshot::Sender<()>>);
         impl PacketConsumer for Stalled {
-            async fn append(&mut self, _: Vec<u8>, cancel: &CancellationToken) -> Result<(), String> {
-                if let Some(entered) = self.0.take() { let _ = entered.send(()); }
+            async fn append(
+                &mut self,
+                _: Vec<u8>,
+                cancel: &CancellationToken,
+            ) -> Result<(), String> {
+                if let Some(entered) = self.0.take() {
+                    let _ = entered.send(());
+                }
                 cancel.cancelled().await;
                 Err(CANCELLED.into())
             }
@@ -845,8 +935,10 @@ mod tests {
         });
         started.await.unwrap();
         cancel.cancel();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3), operation).await
-            .expect("cancellation must unblock the bounded decoder queue").unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), operation)
+            .await
+            .expect("cancellation must unblock the bounded decoder queue")
+            .unwrap();
         assert_eq!(result.unwrap_err(), CANCELLED);
     }
 
@@ -854,14 +946,23 @@ mod tests {
     fn incremental_normalization_checks_limit_and_cancellation() {
         let cancel = CancellationToken::new();
         let mut discard = |_: &[u8]| Ok(());
-        let mut output = PcmSink { max_bytes: Some(MAX_PCM_BYTES), frames: 0, write: &mut discard };
+        let mut output = PcmSink {
+            max_bytes: Some(MAX_PCM_BYTES),
+            frames: 0,
+            write: &mut discard,
+        };
         let mut normalizer = MonoNormalizer::new(24_000).unwrap();
         normalizer.source_frames = (MAX_PCM_BYTES / 2) as u64;
-        assert_eq!(normalizer.push(&[0.0], &cancel, &mut output).unwrap_err(), pcm_limit());
+        assert_eq!(
+            normalizer.push(&[0.0], &cancel, &mut output).unwrap_err(),
+            pcm_limit()
+        );
         let mut normalizer = MonoNormalizer::new(48_000).unwrap();
         cancel.cancel();
         assert_eq!(
-            normalizer.push(&[0.0; 1024], &cancel, &mut output).unwrap_err(),
+            normalizer
+                .push(&[0.0; 1024], &cancel, &mut output)
+                .unwrap_err(),
             DecodeError::Cancelled
         );
     }

@@ -107,7 +107,10 @@ impl<'de> Deserialize<'de> for JevFallbackPolicy {
 }
 
 fn local_field<T: DeserializeOwned>(value: &serde_json::Value, name: &str, default: T) -> T {
-    value.get(name).and_then(|field| serde_json::from_value(field.clone()).ok()).unwrap_or(default)
+    value
+        .get(name)
+        .and_then(|field| serde_json::from_value(field.clone()).ok())
+        .unwrap_or(default)
 }
 
 fn default_tag_match_mode() -> Option<String> {
@@ -156,8 +159,16 @@ impl<'de> Deserialize<'de> for GroupLocalSettings {
         let mut settings = Self {
             chat_mode: local_field(&value, "chatMode", defaults.chat_mode),
             mode_settings: local_field(&value, "modeSettings", defaults.mode_settings),
-            enable_context_message_window: local_field(&value, "enableContextMessageWindow", defaults.enable_context_message_window),
-            context_message_window_size: local_field(&value, "contextMessageWindowSize", defaults.context_message_window_size),
+            enable_context_message_window: local_field(
+                &value,
+                "enableContextMessageWindow",
+                defaults.enable_context_message_window,
+            ),
+            context_message_window_size: local_field(
+                &value,
+                "contextMessageWindowSize",
+                defaults.context_message_window_size,
+            ),
         };
         settings.normalize();
         Ok(settings)
@@ -178,7 +189,8 @@ impl GroupLocalSettingsPatch {
         };
         let mut merged = shape.clone();
         merge_local_settings_patch(&mut merged, &presence, &shape);
-        let settings: GroupLocalSettings = serde_json::from_value(merged).map_err(|error| error.to_string())?;
+        let settings: GroupLocalSettings =
+            serde_json::from_value(merged).map_err(|error| error.to_string())?;
         let canonical = serde_json::to_value(settings).map_err(|error| error.to_string())?;
         // 只投影明确出现的字段；默认化非法值不会把缺项也变成覆盖请求。
         let projected = project_local_settings_patch(&presence, &canonical, &shape);
@@ -193,7 +205,11 @@ impl GroupLocalSettingsPatch {
         let shape = serde_json::to_value(GroupLocalSettings::default())
             .map_err(|error| error.to_string())?;
         let mut merged = serde_json::to_value(current).map_err(|error| error.to_string())?;
-        merge_local_settings_patch(&mut merged, &serde_json::Value::Object(self.0.clone()), &shape);
+        merge_local_settings_patch(
+            &mut merged,
+            &serde_json::Value::Object(self.0.clone()),
+            &shape,
+        );
         serde_json::from_value(merged).map_err(|error| error.to_string())
     }
 }
@@ -206,10 +222,14 @@ fn normalize_local_settings_patch(
         // 空对象模板是 memberStyles 这种动态映射；它和数组都是整体替换叶值。
         return Some(value.clone());
     };
-    let Some(source) = value.as_object() else { return Some(shape.clone()); };
+    let Some(source) = value.as_object() else {
+        return Some(shape.clone());
+    };
     let mut patch = serde_json::Map::new();
     for (key, value) in source {
-        let Some(field_shape) = fields.get(key) else { continue; };
+        let Some(field_shape) = fields.get(key) else {
+            continue;
+        };
         if let Some(value) = normalize_local_settings_patch(value, field_shape) {
             patch.insert(key.clone(), value);
         }
@@ -226,10 +246,16 @@ fn merge_local_settings_patch(
         *target = patch.clone();
         return;
     };
-    let Some(source) = patch.as_object() else { return; };
-    let Some(target) = target.as_object_mut() else { return; };
+    let Some(source) = patch.as_object() else {
+        return;
+    };
+    let Some(target) = target.as_object_mut() else {
+        return;
+    };
     for (key, value) in source {
-        let Some(shape) = fields.get(key) else { continue; };
+        let Some(shape) = fields.get(key) else {
+            continue;
+        };
         let current = target.entry(key.clone()).or_insert_with(|| shape.clone());
         merge_local_settings_patch(current, value, shape);
     }
@@ -247,7 +273,10 @@ fn project_local_settings_patch(
     if let Some(presence) = presence.as_object() {
         for (key, field_shape) in fields {
             if let (Some(supplied), Some(value)) = (presence.get(key), canonical.get(key)) {
-                projected.insert(key.clone(), project_local_settings_patch(supplied, value, field_shape));
+                projected.insert(
+                    key.clone(),
+                    project_local_settings_patch(supplied, value, field_shape),
+                );
             }
         }
     }
@@ -280,7 +309,8 @@ pub struct SequentialModeSettings {
 impl SequentialModeSettings {
     fn normalize(&mut self) {
         let mut seen = std::collections::BTreeSet::new();
-        self.speaker_order.retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
+        self.speaker_order
+            .retain(|id| !id.trim().is_empty() && seen.insert(id.clone()));
     }
 }
 
@@ -346,13 +376,25 @@ impl JevModeSettings {
             }
         }
         for (value, max, default) in [
-            (&mut self.max_speakers_per_round, 32, defaults.max_speakers_per_round),
-            (&mut self.max_autonomous_rounds, 100, defaults.max_autonomous_rounds),
+            (
+                &mut self.max_speakers_per_round,
+                32,
+                defaults.max_speakers_per_round,
+            ),
+            (
+                &mut self.max_autonomous_rounds,
+                100,
+                defaults.max_autonomous_rounds,
+            ),
             (&mut self.history_window, 200, defaults.history_window),
         ] {
-            if !(1..=max).contains(value) { *value = default; }
+            if !(1..=max).contains(value) {
+                *value = default;
+            }
         }
-        if self.continue_debounce_ms > 10_000 { self.continue_debounce_ms = defaults.continue_debounce_ms; }
+        if self.continue_debounce_ms > 10_000 {
+            self.continue_debounce_ms = defaults.continue_debounce_ms;
+        }
         self.member_styles.retain(|id, _| !id.trim().is_empty());
     }
 }
@@ -364,15 +406,40 @@ impl<'de> Deserialize<'de> for JevModeSettings {
         let mut settings = Self {
             navigator_prompt: local_field(&value, "navigatorPrompt", defaults.navigator_prompt),
             speaker_threshold: local_field(&value, "speakerThreshold", defaults.speaker_threshold),
-            continue_threshold: local_field(&value, "continueThreshold", defaults.continue_threshold),
+            continue_threshold: local_field(
+                &value,
+                "continueThreshold",
+                defaults.continue_threshold,
+            ),
             stop_threshold: local_field(&value, "stopThreshold", defaults.stop_threshold),
-            max_speakers_per_round: local_field(&value, "maxSpeakersPerRound", defaults.max_speakers_per_round),
-            max_autonomous_rounds: local_field(&value, "maxAutonomousRounds", defaults.max_autonomous_rounds),
+            max_speakers_per_round: local_field(
+                &value,
+                "maxSpeakersPerRound",
+                defaults.max_speakers_per_round,
+            ),
+            max_autonomous_rounds: local_field(
+                &value,
+                "maxAutonomousRounds",
+                defaults.max_autonomous_rounds,
+            ),
             history_window: local_field(&value, "historyWindow", defaults.history_window),
-            continue_debounce_ms: local_field(&value, "continueDebounceMs", defaults.continue_debounce_ms),
+            continue_debounce_ms: local_field(
+                &value,
+                "continueDebounceMs",
+                defaults.continue_debounce_ms,
+            ),
             fallback_policy: local_field(&value, "fallbackPolicy", defaults.fallback_policy),
-            member_styles: value.get("memberStyles").and_then(serde_json::Value::as_object)
-                .map(|styles| styles.iter().map(|(id, style)| (id.clone(), style.as_str().unwrap_or_default().to_string())).collect())
+            member_styles: value
+                .get("memberStyles")
+                .and_then(serde_json::Value::as_object)
+                .map(|styles| {
+                    styles
+                        .iter()
+                        .map(|(id, style)| {
+                            (id.clone(), style.as_str().unwrap_or_default().to_string())
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
         };
         settings.normalize();
@@ -382,9 +449,13 @@ impl<'de> Deserialize<'de> for JevModeSettings {
 
 pub fn parse_group_local_settings(raw: Option<&str>) -> GroupLocalSettings {
     let defaults = serde_json::json!(GroupLocalSettings::default());
-    raw.and_then(|raw| serde_json::from_value(
-        crate::vcp_modules::settings_manager::schema::parse_config_json(raw, &defaults)
-    ).ok()).unwrap_or_default()
+    raw.and_then(|raw| {
+        serde_json::from_value(
+            crate::vcp_modules::settings_manager::schema::parse_config_json(raw, &defaults),
+        )
+        .ok()
+    })
+    .unwrap_or_default()
 }
 
 /// 群组完整配置结构 (对齐桌面端 config.json)

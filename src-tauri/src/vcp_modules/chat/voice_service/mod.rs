@@ -30,18 +30,21 @@ pub use call::{
 pub use document::{allocate_voice_document, connect_voice_document, VoiceDocumentState};
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 pub use input::handle_audio_event;
-pub use input::{close_voice_microphone, start_voice_microphone, VoiceServiceState};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub use input::invalidate_document;
-pub use tts::{
-    connect_tts_document,
-    feed_chat_event, has_chat_listener, preview_tts, preview_voice_clone_sample, start_tts_session, stop_chat_reply_by_origin, stop_tts,
-    submit_tts_text, TtsServiceState,
+pub use input::{close_voice_microphone, start_voice_microphone, VoiceServiceState};
+pub use samples::{
+    delete_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample,
+    list_voice_clone_samples,
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub use tts::handle_playback_event;
 pub(crate) use tts::stop_bubble_for_messages;
-pub use samples::{delete_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample, list_voice_clone_samples};
+pub use tts::{
+    connect_tts_document, feed_chat_event, has_chat_listener, preview_tts,
+    preview_voice_clone_sample, start_tts_session, stop_chat_reply_by_origin, stop_tts,
+    submit_tts_text, TtsServiceState,
+};
 
 use crate::vcp_modules::settings_manager::{
     value_or_preset, Settings, VoiceInputEncoding, VoiceTtsMode, VOICE_API_BASE_URL_PRESET,
@@ -179,11 +182,17 @@ mod tests {
         for blank in ["", " \t "] {
             settings.voice.connection.api_base_url = blank.into();
             let config = VoiceServiceConfig::from_settings(&settings);
-            assert_eq!(config.endpoint().unwrap(), "https://api.xiaomimimo.com/v1/chat/completions");
+            assert_eq!(
+                config.endpoint().unwrap(),
+                "https://api.xiaomimimo.com/v1/chat/completions"
+            );
         }
         settings.voice.connection.api_base_url = " https://voice.example/v1/ ".into();
         let mut config = VoiceServiceConfig::from_settings(&settings);
-        assert_eq!(config.endpoint().unwrap(), "https://voice.example/v1/chat/completions");
+        assert_eq!(
+            config.endpoint().unwrap(),
+            "https://voice.example/v1/chat/completions"
+        );
         config.base_url = "broken-address".into();
         assert!(config.endpoint().is_err());
     }
@@ -224,7 +233,10 @@ mod tests {
         assert!(config.validate_tts().unwrap_err().contains("音色配置无效"));
         config.tts_mode = VoiceTtsMode::Clone;
         assert!(!config.has_selected_voice());
-        assert!(config.validate_tts().unwrap_err().contains("未选择朗读音色"));
+        assert!(config
+            .validate_tts()
+            .unwrap_err()
+            .contains("未选择朗读音色"));
         config.clone_sample_id = "0123456789abcdef0123456789abcdef".into();
         assert!(config.has_selected_voice());
         assert_eq!(config.tts_mode, VoiceTtsMode::Clone);

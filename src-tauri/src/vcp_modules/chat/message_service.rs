@@ -25,7 +25,9 @@ pub struct MessageWriteResultDto {
     pub topic_updated_at: i64,
 }
 
-fn project_shell_agent(row: sqlx::sqlite::SqliteRow) -> Result<crate::vcp_modules::agent_types::AgentConfig, String> {
+fn project_shell_agent(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<crate::vcp_modules::agent_types::AgentConfig, String> {
     use crate::vcp_modules::agent_types::AgentConfig;
     let name = match row.try_get::<Option<String>, _>("name") {
         Ok(Some(name)) => name,
@@ -41,10 +43,18 @@ fn project_shell_agent(row: sqlx::sqlite::SqliteRow) -> Result<crate::vcp_module
     // these placeholders are never saved or used as an Agent configuration.
     Ok(AgentConfig {
         id: row.try_get("agent_id").map_err(|error| error.to_string())?,
-        name, avatar_calculated_color,
-        system_prompt: String::new(), mobile_system_prompt: String::new(), model: String::new(),
-        temperature: 0.0, context_token_limit: 0, max_output_tokens: 0,
-        stream_output: false, use_temperature: false, voice: Default::default(), topics: vec![],
+        name,
+        avatar_calculated_color,
+        system_prompt: String::new(),
+        mobile_system_prompt: String::new(),
+        model: String::new(),
+        temperature: 0.0,
+        context_token_limit: 0,
+        max_output_tokens: 0,
+        stream_output: false,
+        use_temperature: false,
+        voice: Default::default(),
+        topics: vec![],
     })
 }
 
@@ -64,18 +74,25 @@ async fn project_history_attachment(
         attachment_order: Some(row.get("attachment_order")),
         internal_path: row.get("internal_path"),
         extracted_text: row.get("extracted_text"),
-        image_frames: row.get::<Option<String>, _>("image_frames")
+        image_frames: row
+            .get::<Option<String>, _>("image_frames")
             .and_then(|frames| serde_json::from_str(&frames).ok()),
         thumbnail_path: row.get("thumbnail_path"),
         created_at: Some(row.get::<i64, _>("created_at") as u64),
     };
     crate::vcp_modules::file_manager::refresh_attachment_paths(app, &mut attachment).await;
-    if include_extracted_text && attachment.extracted_text.is_none()
-        && attachment.status.as_deref() == Some("ready") {
+    if include_extracted_text
+        && attachment.extracted_text.is_none()
+        && attachment.status.as_deref() == Some("ready")
+    {
         if let Some(hash) = attachment.hash.as_deref() {
             attachment.extracted_text = crate::vcp_modules::file_manager::ensure_extracted_text(
-                db, hash, &attachment.internal_path, &attachment.r#type,
-            ).await;
+                db,
+                hash,
+                &attachment.internal_path,
+                &attachment.r#type,
+            )
+            .await;
         }
     }
     attachment
@@ -237,7 +254,9 @@ async fn convert_history_rows(
 
         for ar in att_rows {
             let msg_id: String = ar.get("msg_id");
-            let attachment = project_history_attachment(app_handle, &db_state, &ar, include_extracted_text).await;
+            let attachment =
+                project_history_attachment(app_handle, &db_state, &ar, include_extracted_text)
+                    .await;
             att_map.entry(msg_id).or_default().push(attachment);
         }
     }
@@ -526,18 +545,23 @@ pub(crate) async fn load_chat_plain_text_history_for_context(
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
-    rows.into_iter().map(|row| {
-        Ok(ChatMessage {
-            id: row.try_get("msg_id").map_err(|error| error.to_string())?,
-            role: row.try_get("role").map_err(|error| error.to_string())?,
-            name: row.try_get("name").map_err(|error| error.to_string())?,
-            agent_id: row.try_get("agent_id").map_err(|error| error.to_string())?,
-            content: row.try_get("content").map_err(|error| error.to_string())?,
-            timestamp: u64::try_from(row.try_get::<i64, _>("timestamp").map_err(|error| error.to_string())?)
+    rows.into_iter()
+        .map(|row| {
+            Ok(ChatMessage {
+                id: row.try_get("msg_id").map_err(|error| error.to_string())?,
+                role: row.try_get("role").map_err(|error| error.to_string())?,
+                name: row.try_get("name").map_err(|error| error.to_string())?,
+                agent_id: row.try_get("agent_id").map_err(|error| error.to_string())?,
+                content: row.try_get("content").map_err(|error| error.to_string())?,
+                timestamp: u64::try_from(
+                    row.try_get::<i64, _>("timestamp")
+                        .map_err(|error| error.to_string())?,
+                )
                 .map_err(|error| error.to_string())?,
-            ..Default::default()
+                ..Default::default()
+            })
         })
-    }).collect()
+        .collect()
 }
 
 #[cfg(test)]
@@ -546,8 +570,11 @@ mod plain_text_history_tests {
 
     #[tokio::test]
     async fn text_budget_keeps_a_complete_contiguous_suffix_without_attachment_tables() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         // Intentionally no attachments or render_cache tables: this projection
         // must depend only on committed message text and speaker identity.
         sqlx::raw_sql(
@@ -568,19 +595,44 @@ mod plain_text_history_tests {
             ("active", "unfinished".into(), 4, None),
             ("deleted", "deleted".into(), 5, Some(9)),
         ] {
-            sqlx::query("INSERT INTO messages VALUES ('group','g','t',?,'assistant',NULL,'a',?,?,?)")
-                .bind(id).bind(text).bind(timestamp).bind(deleted).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO messages VALUES ('group','g','t',?,'assistant',NULL,'a',?,?,?)",
+            )
+            .bind(id)
+            .bind(text)
+            .bind(timestamp)
+            .bind(deleted)
+            .execute(&pool)
+            .await
+            .unwrap();
         }
         let key = TopicKey::new("group", "g", "t");
-        let history = load_chat_plain_text_history_for_context(&pool, &key, 200, 70).await.unwrap();
-        assert_eq!(history.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), ["new-a", "new-z"]);
+        let history = load_chat_plain_text_history_for_context(&pool, &key, 200, 70)
+            .await
+            .unwrap();
+        assert_eq!(
+            history
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["new-a", "new-z"]
+        );
         assert_eq!(history[0].content, "甲");
         assert_eq!(history[0].name.as_deref(), Some("成员"));
-        assert!(history.iter().all(|message| message.attachments.is_none() && message.blocks.is_none()));
-        let limited = load_chat_plain_text_history_for_context(&pool, &key, 1, 70).await.unwrap();
+        assert!(history
+            .iter()
+            .all(|message| message.attachments.is_none() && message.blocks.is_none()));
+        let limited = load_chat_plain_text_history_for_context(&pool, &key, 1, 70)
+            .await
+            .unwrap();
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].id, "new-z");
-        assert!(load_chat_plain_text_history_for_context(&pool, &key, 200, 1).await.unwrap().is_empty());
+        assert!(
+            load_chat_plain_text_history_for_context(&pool, &key, 200, 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
@@ -671,7 +723,9 @@ pub async fn load_chat_text_history_for_context(
 
         for ar in att_rows {
             let msg_id: String = ar.get("msg_id");
-            let attachment = project_history_attachment(app_handle, &db_state, &ar, include_extracted_text).await;
+            let attachment =
+                project_history_attachment(app_handle, &db_state, &ar, include_extracted_text)
+                    .await;
             att_map.entry(msg_id).or_default().push(attachment);
         }
     }
@@ -910,20 +964,24 @@ pub async fn edit_resend_message<R: tauri::Runtime>(
     mut message: ChatMessage,
 ) -> Result<(MessageWriteResultDto, MessageDeletionResult), String> {
     normalize_attachments_from_local_cas(app_handle, &db_state.pool, &mut message).await?;
-    let (blocks, render_bytes) = compile_and_serialize_render_async(message.content.clone()).await?;
+    let (blocks, render_bytes) =
+        compile_and_serialize_render_async(message.content.clone()).await?;
     let mut tx = db_state.write_transaction("message.edit_resend").await?;
     let mut deletion = truncate_history_after_message_in_tx(&mut tx, key, &message.id).await?;
-    let activity = MessageRepository::upsert_message(&mut tx, &message, key, &render_bytes, false)
-        .await?;
+    let activity =
+        MessageRepository::upsert_message(&mut tx, &message, key, &render_bytes, false).await?;
     if let Some(activity) = activity {
         deletion.msg_count = activity.msg_count;
         deletion.topic_updated_at = activity.updated_at;
     }
     tx.commit().await.map_err(|error| error.to_string())?;
-    Ok((MessageWriteResultDto {
-        blocks,
-        topic_updated_at: deletion.topic_updated_at,
-    }, deletion))
+    Ok((
+        MessageWriteResultDto {
+            blocks,
+            topic_updated_at: deletion.topic_updated_at,
+        },
+        deletion,
+    ))
 }
 
 #[tauri::command]
@@ -1568,7 +1626,11 @@ pub(crate) async fn finalize_stream_message<R: tauri::Runtime>(
         },
         agent_id,
     });
-    crate::vcp_modules::vcp_client::retain_request_terminal(&app_handle, message_key, terminal.clone());
+    crate::vcp_modules::vcp_client::retain_request_terminal(
+        &app_handle,
+        message_key,
+        terminal.clone(),
+    );
     finalize_stream_message_inner(
         app_handle,
         pool,
@@ -1596,7 +1658,11 @@ pub(crate) async fn finalize_recovered_stream_message<R: tauri::Runtime>(
         app_handle,
         pool,
         message_key,
-        std::sync::Arc::new(PendingStreamTerminal { content: full_content, finish_reason, agent_id }),
+        std::sync::Arc::new(PendingStreamTerminal {
+            content: full_content,
+            finish_reason,
+            agent_id,
+        }),
         Some(stream_channel),
         true,
     )
@@ -1610,7 +1676,15 @@ pub(crate) async fn retry_stream_terminal<R: tauri::Runtime>(
     terminal: std::sync::Arc<PendingStreamTerminal>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
 ) -> Result<Option<FinalizedStreamMessage>, String> {
-    finalize_stream_message_inner(app_handle, pool, message_key, terminal, stream_channel, true).await
+    finalize_stream_message_inner(
+        app_handle,
+        pool,
+        message_key,
+        terminal,
+        stream_channel,
+        true,
+    )
+    .await
 }
 
 async fn finalize_stream_message_inner<R: tauri::Runtime>(
@@ -1675,79 +1749,74 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             context["replayed"] = serde_json::json!(true);
         }
     }
-    let (end_blocks, end_timestamp, topic_updated_at) =
-        if owner_id.is_empty() || topic_id.is_empty() {
-            (None, final_ts, None)
-        } else {
-            let db_state = app_handle.state::<DbState>();
-            match commit_stream_message(
-                &db_state,
-                message_key,
-                final_content,
-                final_ts,
-                terminal_reason,
-                final_agent_id.as_deref(),
-                agent_name.as_deref(),
-            )
-            .await
-            {
-                Ok(StreamCommit::Committed(blocks, start_timestamp, updated_at)) => {
-                    (Some(blocks), start_timestamp, Some(updated_at))
-                }
-                Ok(StreamCommit::AlreadyFinalized(message)) => {
-                    crate::vcp_modules::vcp_client::release_committed_helper(
-                        &app_handle,
-                        message_key,
-                    )
-                    .await;
-                    // A different durable writer may have settled the row while
-                    // this consumer was attached. Replay that result through the
-                    // same output owner; its closed flag suppresses duplicates.
-                    let mut context = context;
-                    if let Some(context) = context.as_mut() {
-                        context["replayed"] = serde_json::json!(true);
-                    }
-                    crate::vcp_modules::vcp_client::deliver_request_event(
-                        &app_handle,
-                        message_key,
-                        stream_channel,
-                        crate::vcp_modules::vcp_client::StreamEvent::end(
-                            message_id.to_string(),
-                            context,
-                            Some(message.finish_reason.clone()),
-                            Some(message.content.clone()),
-                            None,
-                            Some(message.timestamp),
-                            message.topic_updated_at,
-                        ),
-                    );
-                    return Ok(Some(message));
-                }
-                Ok(StreamCommit::Removed) => {
-                    crate::vcp_modules::vcp_client::discard_request_helper(
-                        &app_handle,
-                        message_key,
-                    )
-                    .await;
-                    return Ok(None);
-                }
-                Err(error) => {
-                    let mut event = crate::vcp_modules::vcp_client::StreamEvent::error(
-                        message_id.to_string(),
-                        context.clone(),
-                        format!("终态保存失败: {}", error),
-                    );
-                    event.content = Some(final_content.clone());
-                    crate::vcp_modules::vcp_client::deliver_request_event(
-                        &app_handle,
-                        message_key,
-                        stream_channel.clone(),
-                        event,
-                    );
-                    return Err(error);
-                }
+    let (end_blocks, end_timestamp, topic_updated_at) = if owner_id.is_empty()
+        || topic_id.is_empty()
+    {
+        (None, final_ts, None)
+    } else {
+        let db_state = app_handle.state::<DbState>();
+        match commit_stream_message(
+            &db_state,
+            message_key,
+            final_content,
+            final_ts,
+            terminal_reason,
+            final_agent_id.as_deref(),
+            agent_name.as_deref(),
+        )
+        .await
+        {
+            Ok(StreamCommit::Committed(blocks, start_timestamp, updated_at)) => {
+                (Some(blocks), start_timestamp, Some(updated_at))
             }
-        };
+            Ok(StreamCommit::AlreadyFinalized(message)) => {
+                crate::vcp_modules::vcp_client::release_committed_helper(&app_handle, message_key)
+                    .await;
+                // A different durable writer may have settled the row while
+                // this consumer was attached. Replay that result through the
+                // same output owner; its closed flag suppresses duplicates.
+                let mut context = context;
+                if let Some(context) = context.as_mut() {
+                    context["replayed"] = serde_json::json!(true);
+                }
+                crate::vcp_modules::vcp_client::deliver_request_event(
+                    &app_handle,
+                    message_key,
+                    stream_channel,
+                    crate::vcp_modules::vcp_client::StreamEvent::end(
+                        message_id.to_string(),
+                        context,
+                        Some(message.finish_reason.clone()),
+                        Some(message.content.clone()),
+                        None,
+                        Some(message.timestamp),
+                        message.topic_updated_at,
+                    ),
+                );
+                return Ok(Some(message));
+            }
+            Ok(StreamCommit::Removed) => {
+                crate::vcp_modules::vcp_client::discard_request_helper(&app_handle, message_key)
+                    .await;
+                return Ok(None);
+            }
+            Err(error) => {
+                let mut event = crate::vcp_modules::vcp_client::StreamEvent::error(
+                    message_id.to_string(),
+                    context.clone(),
+                    format!("终态保存失败: {}", error),
+                );
+                event.content = Some(final_content.clone());
+                crate::vcp_modules::vcp_client::deliver_request_event(
+                    &app_handle,
+                    message_key,
+                    stream_channel.clone(),
+                    event,
+                );
+                return Err(error);
+            }
+        }
+    };
 
     crate::vcp_modules::vcp_client::release_committed_helper(&app_handle, message_key).await;
 
@@ -2097,21 +2166,38 @@ mod stream_lifecycle_tests {
 
     #[tokio::test]
     async fn shell_presentation_defaults_bad_values_without_fabricating_identity() {
-        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-        let broken = sqlx::query("SELECT 'agent' AS agent_id,x'ff' AS name,x'ff' AS dominant_color")
-            .fetch_one(&pool).await.unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let broken =
+            sqlx::query("SELECT 'agent' AS agent_id,x'ff' AS name,x'ff' AS dominant_color")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         let agent = project_shell_agent(broken).unwrap();
         assert_eq!(agent.id, "agent");
-        assert_eq!(agent.name, crate::vcp_modules::agent_types::AgentConfig::default().name);
+        assert_eq!(
+            agent.name,
+            crate::vcp_modules::agent_types::AgentConfig::default().name
+        );
         assert_eq!(agent.avatar_calculated_color, None);
         let empty = sqlx::query("SELECT 'agent' AS agent_id,'' AS name,NULL AS dominant_color")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(project_shell_agent(empty).unwrap().name, "");
-        let identity = sqlx::query("SELECT x'ff' AS agent_id,'Keep' AS name,NULL AS dominant_color")
-            .fetch_one(&pool).await.unwrap();
+        let identity =
+            sqlx::query("SELECT x'ff' AS agent_id,'Keep' AS name,NULL AS dominant_color")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert!(project_shell_agent(identity).is_err());
         let missing_column = sqlx::query("SELECT 'agent' AS agent_id,NULL AS dominant_color")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert!(project_shell_agent(missing_column).is_err());
     }
 
@@ -2133,10 +2219,12 @@ mod stream_lifecycle_tests {
             .execute(&pool)
             .await
             .expect("baseline schema");
-        sqlx::raw_sql(include_str!("../../../migrations/0102_stream_stop_intent.sql"))
-            .execute(&pool)
-            .await
-            .expect("stream stop intent schema");
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0102_stream_stop_intent.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("stream stop intent schema");
         sqlx::query(
             "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
              VALUES ('agent', 'agent-1', 'Agent', 'test', 1)",
@@ -2160,43 +2248,76 @@ mod stream_lifecycle_tests {
         let app = tauri::test::mock_app();
         app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
         let anchor = ChatMessage {
-            id: "anchor".into(), role: "user".into(), content: "original".into(),
-            timestamp: 1, ..Default::default()
+            id: "anchor".into(),
+            role: "user".into(),
+            content: "original".into(),
+            timestamp: 1,
+            ..Default::default()
         };
         let following = ChatMessage {
-            id: "following".into(), role: "assistant".into(), content: "following reply".into(),
-            timestamp: 2, ..Default::default()
+            id: "following".into(),
+            role: "assistant".into(),
+            content: "following reply".into(),
+            timestamp: 2,
+            ..Default::default()
         };
         for message in [anchor.clone(), following] {
-            append_single_message(app.handle().clone(), &pool, "agent-1", "agent", "topic-1".into(), message)
-                .await.expect("seed history");
+            append_single_message(
+                app.handle().clone(),
+                &pool,
+                "agent-1",
+                "agent",
+                "topic-1".into(),
+                message,
+            )
+            .await
+            .expect("seed history");
         }
         sqlx::raw_sql(
             "CREATE TRIGGER reject_edited_body BEFORE UPDATE OF content ON messages
              WHEN NEW.msg_id = 'anchor' AND NEW.content = 'edited'
              BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
-        ).execute(&pool).await.expect("inject write failure");
-        let edited = ChatMessage { content: "edited".into(), ..anchor };
+        )
+        .execute(&pool)
+        .await
+        .expect("inject write failure");
+        let edited = ChatMessage {
+            content: "edited".into(),
+            ..anchor
+        };
         let db = app.state::<DbState>();
-        let error = edit_resend_message(app.handle(), &db, &topic_key(), edited.clone()).await
-            .err().expect("the edit must fail after attempted truncation");
+        let error = edit_resend_message(app.handle(), &db, &topic_key(), edited.clone())
+            .await
+            .err()
+            .expect("the edit must fail after attempted truncation");
         assert!(error.contains("injected write failure"));
-        let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
-            "SELECT msg_id, content, deleted_at FROM messages ORDER BY timestamp",
-        ).fetch_all(&pool).await.expect("history after rollback");
-        assert_eq!(rows, vec![
-            ("anchor".into(), "original".into(), None),
-            ("following".into(), "following reply".into(), None),
-        ]);
-        sqlx::query("DROP TRIGGER reject_edited_body").execute(&pool).await.expect("remove injected failure");
-        let (persisted, deletion) = edit_resend_message(app.handle(), &db, &topic_key(), edited).await
+        let rows: Vec<(String, String, Option<i64>)> =
+            sqlx::query_as("SELECT msg_id, content, deleted_at FROM messages ORDER BY timestamp")
+                .fetch_all(&pool)
+                .await
+                .expect("history after rollback");
+        assert_eq!(
+            rows,
+            vec![
+                ("anchor".into(), "original".into(), None),
+                ("following".into(), "following reply".into(), None),
+            ]
+        );
+        sqlx::query("DROP TRIGGER reject_edited_body")
+            .execute(&pool)
+            .await
+            .expect("remove injected failure");
+        let (persisted, deletion) = edit_resend_message(app.handle(), &db, &topic_key(), edited)
+            .await
             .expect("retry edit");
         assert!(!persisted.blocks.is_empty());
         assert_eq!(deletion.deleted_ids, vec!["following"]);
         assert_eq!(deletion.msg_count, 1);
-        let visible: Vec<(String, String)> = sqlx::query_as(
-            "SELECT msg_id, content FROM messages WHERE deleted_at IS NULL",
-        ).fetch_all(&pool).await.expect("committed history");
+        let visible: Vec<(String, String)> =
+            sqlx::query_as("SELECT msg_id, content FROM messages WHERE deleted_at IS NULL")
+                .fetch_all(&pool)
+                .await
+                .expect("committed history");
         assert_eq!(visible, vec![("anchor".into(), "edited".into())]);
     }
 
@@ -2706,26 +2827,47 @@ mod stream_lifecycle_tests {
         let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let key = message_key("jev-cache");
         begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
-            .await.expect("begin generation");
+            .await
+            .expect("begin generation");
         let raw = "<<<[TOOL_REQUEST]>>>\nJEV:「始」使用 'B站获取'「末」\n<<<[END_TOOL_REQUEST]>>>";
         let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(raw);
         sqlx::query("UPDATE messages SET content = ?, content_hash = ? WHERE msg_id = 'jev-cache'")
-            .bind(raw).bind(&hash).execute(&pool).await.unwrap();
-        let old_blocks = vec![ContentBlock::tool_use("Processing...".to_string(),
-            "\nJEV:「始」使用 'B站获取'「末」\n".to_string(), true)];
+            .bind(raw)
+            .bind(&hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_blocks = vec![ContentBlock::tool_use(
+            "Processing...".to_string(),
+            "\nJEV:「始」使用 'B站获取'「末」\n".to_string(),
+            true,
+        )];
         let old_cache = serialize_render_async(old_blocks).await.unwrap();
-        assert!(decode_valid_render_cache(Some(old_cache), Some(hash.clone()), Some(2), &hash)
-            .await.is_none());
+        assert!(
+            decode_valid_render_cache(Some(old_cache), Some(hash.clone()), Some(2), &hash)
+                .await
+                .is_none()
+        );
 
-        let (_, new_cache) = compile_and_serialize_render_async(raw.to_string()).await.unwrap();
-        assert!(write_render_cache_cas(&db_state, &key, &hash, &new_cache).await.unwrap());
+        let (_, new_cache) = compile_and_serialize_render_async(raw.to_string())
+            .await
+            .unwrap();
+        assert!(write_render_cache_cas(&db_state, &key, &hash, &new_cache)
+            .await
+            .unwrap());
         let row = sqlx::query("SELECT m.content, m.content_hash, r.render_content, r.renderer_schema_version \
             FROM messages m JOIN render_cache r USING (owner_type, owner_id, topic_id, msg_id) WHERE m.msg_id = 'jev-cache'")
             .fetch_one(&pool).await.unwrap();
         assert_eq!(row.get::<String, _>("content"), raw);
         assert_eq!(row.get::<String, _>("content_hash"), hash);
-        let decoded = decode_valid_render_cache(Some(row.get("render_content")), Some(hash.clone()),
-            Some(row.get("renderer_schema_version")), &hash).await.unwrap();
+        let decoded = decode_valid_render_cache(
+            Some(row.get("render_content")),
+            Some(hash.clone()),
+            Some(row.get("renderer_schema_version")),
+            &hash,
+        )
+        .await
+        .unwrap();
         assert_eq!(decoded[0]["type"], "jev-tool-use");
         assert_eq!(decoded[0]["tool_name"], "B站获取");
         assert_eq!(decoded[0]["content"], "\nJEV:「始」使用 'B站获取'「末」\n");

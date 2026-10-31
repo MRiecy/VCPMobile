@@ -66,7 +66,8 @@ pub async fn process_video_for_multimodal<R: Runtime>(
                     return Err("视频处理结果不是 JPEG 画面".into());
                 }
                 let prefix = FRAME_DATA_PREFIX;
-                let mut data_url = String::with_capacity(prefix.len() + bytes.len().div_ceil(3) * 4);
+                let mut data_url =
+                    String::with_capacity(prefix.len() + bytes.len().div_ceil(3) * 4);
                 data_url.push_str(prefix);
                 base64::engine::general_purpose::STANDARD.encode_string(&bytes, &mut data_url);
                 frames.push(data_url);

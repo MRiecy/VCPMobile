@@ -4,8 +4,8 @@ use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use std::io::Write;
+use std::marker::PhantomData;
 
 pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 
@@ -15,7 +15,11 @@ pub(crate) fn encoded_json_len<T: Serialize>(
     limit: usize,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<usize, serde_json::Error> {
-    struct Counter<'a> { bytes: usize, limit: usize, cancellation: Option<&'a tokio_util::sync::CancellationToken> }
+    struct Counter<'a> {
+        bytes: usize,
+        limit: usize,
+        cancellation: Option<&'a tokio_util::sync::CancellationToken>,
+    }
     impl Write for Counter<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self.cancellation.is_some_and(|token| token.is_cancelled()) {
@@ -27,9 +31,15 @@ pub(crate) fn encoded_json_len<T: Serialize>(
             self.bytes += bytes.len();
             Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
-    let mut counter = Counter { bytes: 0, limit, cancellation };
+    let mut counter = Counter {
+        bytes: 0,
+        limit,
+        cancellation,
+    };
     serde_json::to_writer(&mut counter, value)?;
     Ok(counter.bytes)
 }

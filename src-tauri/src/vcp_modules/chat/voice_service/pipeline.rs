@@ -124,7 +124,9 @@ impl SegmentBuffer {
 pub(super) trait SegmentSource {
     type Piece;
     /// The chat message owning the piece most recently returned by next().
-    fn message_id(&self) -> Option<&str> { None }
+    fn message_id(&self) -> Option<&str> {
+        None
+    }
     fn next(
         &mut self,
         cancel: &CancellationToken,
@@ -204,7 +206,10 @@ where
                     return Ok(());
                 };
                 while let Some(pcm) = segment.next(&local).await? {
-                    if let Some(id) = message.take().filter(|id| Some(id) != last_message.as_ref()) {
+                    if let Some(id) = message
+                        .take()
+                        .filter(|id| Some(id) != last_message.as_ref())
+                    {
                         consumer.mark_message(id.clone());
                         last_message = Some(id);
                     }
@@ -306,7 +311,9 @@ mod tests {
         assert!(requests.try_recv().is_err());
         release.add_permits(1);
         assert_eq!(requests.recv().await, Some(PREFETCH_SEGMENTS as u8 + 1));
-        let expected: Vec<_> = (0..PREFETCH_SEGMENTS as u8 + 2).flat_map(|piece| [piece, 0]).collect();
+        let expected: Vec<_> = (0..PREFETCH_SEGMENTS as u8 + 2)
+            .flat_map(|piece| [piece, 0])
+            .collect();
         assert_eq!(worker.await.unwrap(), expected);
     }
 
@@ -404,7 +411,10 @@ mod tests {
                 Ok(())
             }
             async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
-                self.completed.send(std::mem::take(&mut self.pcm)).await.unwrap();
+                self.completed
+                    .send(std::mem::take(&mut self.pcm))
+                    .await
+                    .unwrap();
                 Ok(())
             }
         }
@@ -419,16 +429,25 @@ mod tests {
                     segment.push(vec![0x12, 0x34])?;
                     segment.finish()
                 },
-                &mut BoundaryConsumer { pcm: Vec::new(), completed },
-            ).await
+                &mut BoundaryConsumer {
+                    pcm: Vec::new(),
+                    completed,
+                },
+            )
+            .await
         });
         let first = tokio::time::timeout(std::time::Duration::from_secs(1), segments.recv())
-            .await.expect("a short segment does not wait for the next speaker or job EOS");
+            .await
+            .expect("a short segment does not wait for the next speaker or job EOS");
         assert_eq!(first, Some(vec![0x12, 0x34]));
         assert!(!worker.is_finished());
         stop.cancel();
         assert_eq!(worker.await.unwrap().unwrap_err(), CANCELLED);
-        assert_eq!(segments.recv().await, None, "cancellation is not a completed segment");
+        assert_eq!(
+            segments.recv().await,
+            None,
+            "cancellation is not a completed segment"
+        );
     }
 
     #[tokio::test]

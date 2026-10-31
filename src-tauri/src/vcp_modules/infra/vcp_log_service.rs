@@ -751,7 +751,10 @@ mod tests {
             paths.sort();
             assert_eq!(
                 paths,
-                ["/VCPlog/VCP_Key=runtime-test", "/vcpinfo/VCP_Key=runtime-test"]
+                [
+                    "/VCPlog/VCP_Key=runtime-test",
+                    "/vcpinfo/VCP_Key=runtime-test"
+                ]
             );
         }
 
@@ -844,10 +847,12 @@ mod tests {
         }
         let mut stopped = Vec::new();
         for _ in 0..2 {
-            stopped.push(tokio::time::timeout(Duration::from_secs(5), status_rx.recv())
-                .await
-                .unwrap()
-                .unwrap());
+            stopped.push(
+                tokio::time::timeout(Duration::from_secs(5), status_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
         }
         stopped.sort();
         assert_eq!(stopped, ["info", "log"]);
@@ -871,13 +876,15 @@ mod tests {
             ("/VCPlog/VCP_Key=runtime-test".into(), false)
         );
         expect_status("closed", "connected").await;
-        assert!(super::super::vcp_info_service::init_vcp_info_connection_internal(
-            app.handle().clone(),
-            "example.invalid".into(),
-            "runtime-test".into(),
-        )
-        .await
-        .is_err());
+        assert!(
+            super::super::vcp_info_service::init_vcp_info_connection_internal(
+                app.handle().clone(),
+                "example.invalid".into(),
+                "runtime-test".into(),
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(
             next_socket(&mut socket_rx).await,
             ("/vcpinfo/VCP_Key=runtime-test".into(), false)

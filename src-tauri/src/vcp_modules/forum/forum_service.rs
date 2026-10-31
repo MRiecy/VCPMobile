@@ -328,8 +328,7 @@ async fn create_post(
     }
     let mut url = resolve_service_base(&settings.server.url, settings.server.endpoint_mode)
         .map_err(|error| error.to_string())?;
-    append_url_segments(&mut url, &["v1", "human", "tool"])
-        .map_err(|error| error.to_string())?;
+    append_url_segments(&mut url, &["v1", "human", "tool"]).map_err(|error| error.to_string())?;
 
     let tool_body = build_create_post_body(maid, board, title, content);
     let request = client(HttpProfile::AdminApi)
@@ -441,8 +440,12 @@ mod tests {
         assert_eq!(requests[1].authorization, ["Bearer forum-bearer"]);
         assert_eq!(requests[1].content_type, "text/plain;charset=UTF-8");
         assert!(requests[1].body.starts_with("<<<[TOOL_REQUEST]>>>\n"));
-        assert!(requests[1].body.contains("command:「始ESCAPE」CreatePost「末ESCAPE」"));
-        assert!(requests[1].body.contains("content:「始ESCAPE」Body「末ESCAPE」"));
+        assert!(requests[1]
+            .body
+            .contains("command:「始ESCAPE」CreatePost「末ESCAPE」"));
+        assert!(requests[1]
+            .body
+            .contains("content:「始ESCAPE」Body「末ESCAPE」"));
         assert!(requests[1].body.ends_with("\n<<<[END_TOOL_REQUEST]>>>"));
     }
 

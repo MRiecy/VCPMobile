@@ -127,7 +127,8 @@ impl MessageSpeech {
         if rebuild {
             self.reply.update(self.stable_spoken.clone(), finished)?;
         } else {
-            self.reply.append(&self.stable_spoken[previous_stable..], finished)?;
+            self.reply
+                .append(&self.stable_spoken[previous_stable..], finished)?;
         }
         self.finished = finished;
         Ok(())
@@ -159,7 +160,9 @@ impl MessageSpeech {
         let remaining = MAX_TEXT_BYTES - self.stable_spoken.len();
         let accepted = bounded_prefix(text, remaining.saturating_sub(separator));
         if remaining >= separator {
-            if separator != 0 { self.stable_spoken.push('\n'); }
+            if separator != 0 {
+                self.stable_spoken.push('\n');
+            }
             self.stable_spoken.push_str(accepted);
         }
         // Markdown projection can expand bytes (e.g. table separators become
@@ -337,8 +340,10 @@ impl ChatFeed {
             .as_ref()
             .and_then(|update| update.chunk.as_deref());
         if replacement.is_some() || delta.is_some() {
-            let agent_id = context.and_then(|value| value["agentId"].as_str())
-                .filter(|id| !id.is_empty()).map(str::to_owned);
+            let agent_id = context
+                .and_then(|value| value["agentId"].as_str())
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
             let index = self
                 .messages
                 .iter()
@@ -502,14 +507,19 @@ mod tests {
 
     fn delta(id: &str, text: &str, group: bool) -> StreamEvent {
         let mut event = update(id, "", group);
-        event.aurora = Some(serde_json::from_value(json!({
-            "kind": "delta", "chunk": text,
-        })).unwrap());
+        event.aurora = Some(
+            serde_json::from_value(json!({
+                "kind": "delta", "chunk": text,
+            }))
+            .unwrap(),
+        );
         event
     }
 
     fn drain_feed(feed: &mut ChatFeed) -> Vec<SpeechPiece> {
-        feed.take_update().unwrap().map_or_else(Vec::new, |update| update.pieces)
+        feed.take_update()
+            .unwrap()
+            .map_or_else(Vec::new, |update| update.pieces)
     }
 
     #[test]
@@ -524,7 +534,9 @@ mod tests {
         let mut incremental = ChatFeed::new();
         let mut actual = Vec::new();
         for ch in raw.chars() {
-            incremental.accept(&delta("message", &ch.to_string(), true)).unwrap();
+            incremental
+                .accept(&delta("message", &ch.to_string(), true))
+                .unwrap();
             actual.extend(drain_feed(&mut incremental));
         }
         incremental.accept(&member("message", &raw)).unwrap();
@@ -540,13 +552,25 @@ mod tests {
         let mut speech = MessageSpeech::new();
         speech.update(&story, true).unwrap();
         let spoken = drain_speech(&mut speech);
-        assert_eq!(spoken.iter().map(|(text, _)| text.as_str()).collect::<String>(), story);
+        assert_eq!(
+            spoken
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<String>(),
+            story
+        );
 
         let mut feed = ChatFeed::new();
         feed.accept(&member("story", &story)).unwrap();
         let pieces = drain_feed(&mut feed);
         assert!(pieces.iter().all(|piece| !piece.notice));
-        assert_eq!(pieces.iter().map(|piece| piece.text.as_str()).collect::<String>(), story);
+        assert_eq!(
+            pieces
+                .iter()
+                .map(|piece| piece.text.as_str())
+                .collect::<String>(),
+            story
+        );
     }
 
     #[test]
@@ -560,7 +584,13 @@ mod tests {
             assert!(speech.finished);
             let spoken = drain_speech(&mut speech);
             assert_eq!(spoken.last(), Some(&(TRUNCATION_NOTICE.into(), None)));
-            assert_eq!(spoken[..spoken.len() - 1].iter().map(|(text, _)| text.as_str()).collect::<String>(), prefix);
+            assert_eq!(
+                spoken[..spoken.len() - 1]
+                    .iter()
+                    .map(|(text, _)| text.as_str())
+                    .collect::<String>(),
+                prefix
+            );
             speech.update(&raw, true).unwrap();
             speech.update("迟到的不同终态", true).unwrap();
             assert!(drain_speech(&mut speech).is_empty());
@@ -580,9 +610,20 @@ mod tests {
         let final_update = feed.take_update().unwrap().unwrap();
         assert!(final_update.finished);
         pieces.extend(final_update.pieces);
-        assert_eq!(pieces.last(), Some(&piece("second", TRUNCATION_NOTICE, None)));
-        assert_eq!(pieces.iter().filter(|piece| piece.text == TRUNCATION_NOTICE).count(), 1);
-        assert!(!feed.accept(&member("second", "中文😀之后的完整终态")).unwrap());
+        assert_eq!(
+            pieces.last(),
+            Some(&piece("second", TRUNCATION_NOTICE, None))
+        );
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|piece| piece.text == TRUNCATION_NOTICE)
+                .count(),
+            1
+        );
+        assert!(!feed
+            .accept(&member("second", "中文😀之后的完整终态"))
+            .unwrap());
         assert!(!feed.accept(&member("third", "后续成员")).unwrap());
         feed.finish_submission();
         assert!(drain_feed(&mut feed).is_empty());
@@ -599,16 +640,26 @@ mod tests {
         let update = feed.take_update().unwrap().unwrap();
         assert!(update.finished);
         assert_eq!(update.pieces.first().unwrap().message_id, "first");
-        assert_eq!(update.pieces.last(), Some(&piece("second", TRUNCATION_NOTICE, None)));
-        assert!(update.pieces.iter().any(|piece| piece.message_id == "second" && piece.text == "中文"));
+        assert_eq!(
+            update.pieces.last(),
+            Some(&piece("second", TRUNCATION_NOTICE, None))
+        );
+        assert!(update
+            .pieces
+            .iter()
+            .any(|piece| piece.message_id == "second" && piece.text == "中文"));
         assert!(!feed.accept(&delta("second", "迟到增量", true)).unwrap());
         assert!(feed.take_update().unwrap().is_none());
     }
 
     #[test]
     fn expanded_table_projection_seals_group_on_contentless_end_and_coalesces_notices() {
-        let table = format!("{}|\n{}|\n{}", "|a".repeat(16), "|---".repeat(16),
-            format!("{}\n", "|".repeat(17)).repeat(MAX_TEXT_BYTES / 44));
+        let table = format!(
+            "{}|\n{}|\n{}",
+            "|a".repeat(16),
+            "|---".repeat(16),
+            format!("{}\n", "|".repeat(17)).repeat(MAX_TEXT_BYTES / 44)
+        );
         assert!(table.len() * 2 < MAX_TEXT_BYTES);
         assert!(readable::project_markdown_block(&table).len() > MAX_TEXT_BYTES);
         let mut feed = ChatFeed::new();
@@ -623,7 +674,10 @@ mod tests {
         assert_eq!(update.pieces.iter().filter(|piece| piece.notice).count(), 1);
         assert!(update.pieces.last().unwrap().notice);
         assert_eq!(update.pieces.last().unwrap().message_id, "second");
-        assert!(feed.messages.iter().all(|message| message.speech.stable_spoken.len() <= MAX_TEXT_BYTES));
+        assert!(feed
+            .messages
+            .iter()
+            .all(|message| message.speech.stable_spoken.len() <= MAX_TEXT_BYTES));
         assert!(!feed.accept(&delta("third", "迟到成员", true)).unwrap());
         feed.finish_submission();
         assert!(drain_feed(&mut feed).is_empty());
@@ -636,7 +690,10 @@ mod tests {
         feed.accept(&delta("message", prefix, true)).unwrap();
         assert!(!drain_feed(&mut feed).is_empty());
         let replacement = format!("改写已经朗读的内容。{}", "a".repeat(MAX_TEXT_BYTES));
-        assert!(feed.accept(&update("message", &replacement, true)).unwrap_err().contains("已开始朗读"));
+        assert!(feed
+            .accept(&update("message", &replacement, true))
+            .unwrap_err()
+            .contains("已开始朗读"));
 
         let mut feed = ChatFeed::new();
         feed.accept(&delta("message", prefix, true)).unwrap();
@@ -646,18 +703,30 @@ mod tests {
         pieces.extend(drain_feed(&mut feed));
         assert_eq!(feed.accepted_text_bytes, MAX_TEXT_BYTES);
         assert_eq!(pieces.last().unwrap().text, TRUNCATION_NOTICE);
-        assert_eq!(pieces.iter().filter(|piece| piece.text == TRUNCATION_NOTICE).count(), 1);
+        assert_eq!(
+            pieces
+                .iter()
+                .filter(|piece| piece.text == TRUNCATION_NOTICE)
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn message_author_is_carried_with_every_piece_and_cannot_change_midstream() {
         let mut feed = ChatFeed::new();
-        let mut first = update("message", &"这是第一位成员正在说的话。\n\n".repeat(30), true);
+        let mut first = update(
+            "message",
+            &"这是第一位成员正在说的话。\n\n".repeat(30),
+            true,
+        );
         first.context = Some(json!({"isGroupMessage":true,"agentId":"first"}));
         feed.accept(&first).unwrap();
         let pieces = feed.take_update().unwrap().unwrap().pieces;
         assert!(!pieces.is_empty());
-        assert!(pieces.iter().all(|piece| piece.agent_id.as_deref() == Some("first")));
+        assert!(pieces
+            .iter()
+            .all(|piece| piece.agent_id.as_deref() == Some("first")));
         let mut changed = member("message", "替换后的正文。");
         changed.context = Some(json!({"isGroupMessage":true,"agentId":"second"}));
         assert!(feed.accept(&changed).unwrap_err().contains("发言者"));

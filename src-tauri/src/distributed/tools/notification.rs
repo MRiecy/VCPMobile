@@ -76,8 +76,13 @@ mod tests {
 
     #[test]
     fn notification_content_has_no_synthetic_default() {
-        for args in [json!({}), json!({"title":"present"}), json!({"body":"present"}),
-            json!({"title":false,"body":"present"}), json!({"title":"present","body":42})] {
+        for args in [
+            json!({}),
+            json!({"title":"present"}),
+            json!({"body":"present"}),
+            json!({"title":false,"body":"present"}),
+            json!({"title":"present","body":42}),
+        ] {
             assert!(serde_json::from_value::<NotificationArgs>(args).is_err());
         }
         let args: NotificationArgs = serde_json::from_value(json!({"title":"","body":""})).unwrap();

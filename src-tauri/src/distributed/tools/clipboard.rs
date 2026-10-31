@@ -90,13 +90,26 @@ mod tests {
     #[test]
     fn required_clipboard_intent_is_not_replaced_by_read_or_empty_write() {
         for args in [
-            json!({}), json!({"action":null}), json!({"action":false}),
-            json!({"action":"unknown"}), json!({"action":"write"}),
-            json!({"action":"write","content":null}), json!({"action":"write","content":123}),
+            json!({}),
+            json!({"action":null}),
+            json!({"action":false}),
+            json!({"action":"unknown"}),
+            json!({"action":"write"}),
+            json!({"action":"write","content":null}),
+            json!({"action":"write","content":123}),
         ] {
             assert!(serde_json::from_value::<ClipboardArgs>(args).is_err());
         }
-        assert_eq!(serde_json::from_value::<ClipboardArgs>(json!({"action":"read"})).unwrap(), ClipboardArgs::Read);
-        assert_eq!(serde_json::from_value::<ClipboardArgs>(json!({"action":"write","content":""})).unwrap(), ClipboardArgs::Write { content: String::new() });
+        assert_eq!(
+            serde_json::from_value::<ClipboardArgs>(json!({"action":"read"})).unwrap(),
+            ClipboardArgs::Read
+        );
+        assert_eq!(
+            serde_json::from_value::<ClipboardArgs>(json!({"action":"write","content":""}))
+                .unwrap(),
+            ClipboardArgs::Write {
+                content: String::new()
+            }
+        );
     }
 }

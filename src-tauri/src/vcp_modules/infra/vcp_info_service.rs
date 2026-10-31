@@ -124,9 +124,7 @@ pub async fn init_vcp_info_connection_internal<R: tauri::Runtime>(
             apply_info_endpoint(&app, None);
             let message = issue.to_string();
             super::vcp_log_service::report_connection_configuration_error(
-                &app,
-                "VCPInfo",
-                &message,
+                &app, "VCPInfo", &message,
             );
             Err(message)
         }

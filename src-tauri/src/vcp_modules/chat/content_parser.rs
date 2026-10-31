@@ -511,7 +511,10 @@ fn is_matching_fence_close(line: &str, (fence_char, count): (char, usize)) -> bo
     if line.len() - trimmed.len() > 3 {
         return false;
     }
-    let closing_count = trimmed.bytes().take_while(|&ch| ch == fence_char as u8).count();
+    let closing_count = trimmed
+        .bytes()
+        .take_while(|&ch| ch == fence_char as u8)
+        .count();
     closing_count >= count
         && trimmed[closing_count..]
             .strip_suffix('\r')
@@ -589,9 +592,10 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
     while current_pos < text.len() {
         let remaining = &text[current_pos..];
 
-        if let Some(caps) = MASTER_START.captures_iter(remaining).find(|caps| {
-            caps.get(13).is_none() || (current_pos == 0 && starts_with_guidance)
-        }) {
+        if let Some(caps) = MASTER_START
+            .captures_iter(remaining)
+            .find(|caps| caps.get(13).is_none() || (current_pos == 0 && starts_with_guidance))
+        {
             let m = caps.get(0).unwrap();
             let start_idx = m.start();
             let end_idx = m.end();
@@ -1087,13 +1091,18 @@ pub(crate) fn parse_jev_tool_request(source: &str) -> Option<String> {
             }
             // 仅为名称识别规范化单引号实体，返回的块正文仍是原始请求体。
             let parse_source = JEV_QUOTE_ENTITY.replace_all(raw, "'");
-            let explicit_name = JEV_TOOL_NAMES.iter().find_map(|pattern| {
-                pattern.captures(&parse_source)
-                    .and_then(|captures| captures.get(1))
-                    .map(|matched| matched.as_str().trim())
-            }).unwrap_or_default();
+            let explicit_name = JEV_TOOL_NAMES
+                .iter()
+                .find_map(|pattern| {
+                    pattern
+                        .captures(&parse_source)
+                        .and_then(|captures| captures.get(1))
+                        .map(|matched| matched.as_str().trim())
+                })
+                .unwrap_or_default();
             let display_name = if explicit_name.is_empty() {
-                JEV_CAPABILITY.captures(&parse_source)
+                JEV_CAPABILITY
+                    .captures(&parse_source)
                     .and_then(|captures| captures.get(1))
                     .map(|matched| matched.as_str().trim())
                     .unwrap_or_default()
@@ -1403,8 +1412,12 @@ mod tests {
         ] {
             let inner = format!("JEV:「始」{value}「末」");
             let blocks = parse_content(&tool_request(&inner));
-            let ContentBlock::JevToolUse { tool_name, content, is_complete, .. } =
-                first_non_markdown(&blocks)
+            let ContentBlock::JevToolUse {
+                tool_name,
+                content,
+                is_complete,
+                ..
+            } = first_non_markdown(&blocks)
             else {
                 panic!("expected JEV for {value}");
             };
@@ -1424,21 +1437,35 @@ mod tests {
             "tool_name:「始」Example「末」\nJEV:「始」  「末」".to_string(),
             "<tool_name>Example</tool_name>\nother_JEV:「始」'错误工具'「末」".to_string(),
         ] {
-            assert!(matches!(first_non_markdown(&parse_content(&tool_request(&inner))),
-                ContentBlock::ToolUse { tool_name, .. } if tool_name == "Example"));
+            assert!(
+                matches!(first_non_markdown(&parse_content(&tool_request(&inner))),
+                ContentBlock::ToolUse { tool_name, .. } if tool_name == "Example")
+            );
         }
         let inner = format!("{quoted_example}\nJEV:「始」{{联网搜索}}「末」");
-        assert!(matches!(first_non_markdown(&parse_content(&tool_request(&inner))),
-            ContentBlock::JevToolUse { tool_name, .. } if tool_name == "联网搜索"));
+        assert!(
+            matches!(first_non_markdown(&parse_content(&tool_request(&inner))),
+            ContentBlock::JevToolUse { tool_name, .. } if tool_name == "联网搜索")
+        );
 
         for (fields, update) in [
-            ("command:「始」create「末」\nContent:「始」日记「末」", false),
-            ("command:「始」update「末」\ntarget:「始」旧「末」\nreplace:「始」新「末」", true),
+            (
+                "command:「始」create「末」\nContent:「始」日记「末」",
+                false,
+            ),
+            (
+                "command:「始」update「末」\ntarget:「始」旧「末」\nreplace:「始」新「末」",
+                true,
+            ),
         ] {
-            let inner = format!("tool_name:「始」DailyNote「末」\n{fields}\nJEV:「始」'工具'「末」");
+            let inner =
+                format!("tool_name:「始」DailyNote「末」\n{fields}\nJEV:「始」'工具'「末」");
             let blocks = parse_content(&tool_request(&inner));
             assert!(if update {
-                matches!(first_non_markdown(&blocks), ContentBlock::DiaryUpdate { .. })
+                matches!(
+                    first_non_markdown(&blocks),
+                    ContentBlock::DiaryUpdate { .. }
+                )
             } else {
                 matches!(first_non_markdown(&blocks), ContentBlock::Diary { .. })
             });
@@ -1454,7 +1481,12 @@ mod tests {
             format!("<<<[TOOL_REQUEST]>>>\n{field}"),
             "<<<[TOOL_REQUEST]>>>\nJEV:「始」未闭合\n<<<[END_TOOL_REQUEST]>>>".to_string(),
         ] {
-            assert!(parse_content(&raw).iter().all(|block| matches!(block, ContentBlock::Markdown { .. })), "{raw}");
+            assert!(
+                parse_content(&raw)
+                    .iter()
+                    .all(|block| matches!(block, ContentBlock::Markdown { .. })),
+                "{raw}"
+            );
         }
     }
 
@@ -1743,12 +1775,23 @@ mod tests {
             format!("<<<[TOOL_REQUEST]>>>\n{block}\n<<<[END_TOOL_REQUEST]>>>"),
             "<<<[VOICE_GUIDANCE]>>>\n旧协议\n<<<[END_VOICE_GUIDANCE]>>>".to_string(),
         ] {
-            assert!(!parse_content(&example).iter().any(|block| matches!(block, ContentBlock::VoiceGuidance { .. })), "{example}");
+            assert!(
+                !parse_content(&example)
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::VoiceGuidance { .. })),
+                "{example}"
+            );
         }
         // 同一首行的水平空白属于协议允许范围，不能按旧缩进代码保护语义拒绝。
-        assert!(matches!(parse_content(&format!("    {block}")).first(),
-            Some(ContentBlock::VoiceGuidance { is_complete: true, .. })));
-        assert!(parse_content("<voice_guidance>\n尚未完成").iter()
+        assert!(matches!(
+            parse_content(&format!("    {block}")).first(),
+            Some(ContentBlock::VoiceGuidance {
+                is_complete: true,
+                ..
+            })
+        ));
+        assert!(parse_content("<voice_guidance>\n尚未完成")
+            .iter()
             .all(|block| matches!(block, ContentBlock::Markdown { .. })));
     }
 
@@ -1763,10 +1806,14 @@ mod tests {
         assert!(wire.contains("  ~~~~"));
         let deindented = de_indent_misinterpreted_code_blocks(raw);
         assert!(deindented.contains("    中文保留缩进"));
-        assert_eq!(find_matching_fence_end("```\n~~~\n  ~~~~~\n", "~~~~text", 0),
-            (Some(8), Some(15), true));
-        assert_eq!(find_matching_fence_end("\t~~~~\n", "~~~~text", 0),
-            (None, None, false));
+        assert_eq!(
+            find_matching_fence_end("```\n~~~\n  ~~~~~\n", "~~~~text", 0),
+            (Some(8), Some(15), true)
+        );
+        assert_eq!(
+            find_matching_fence_end("\t~~~~\n", "~~~~text", 0),
+            (None, None, false)
+        );
     }
 
     #[test]

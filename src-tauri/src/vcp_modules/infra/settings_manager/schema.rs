@@ -34,16 +34,22 @@ pub(crate) fn parse_config_json(raw: &str, defaults: &Value) -> Value {
     let Some(defaults) = defaults.as_object() else {
         return serde_json::from_str(raw).unwrap_or(Value::Null);
     };
-    let Ok(fields) = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(raw) else {
+    let Ok(fields) = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(raw)
+    else {
         return Value::Null;
     };
-    Value::Object(fields.into_iter().map(|(key, raw)| {
-        let value = match defaults.get(&key) {
-            Some(default) => parse_config_json(raw.get(), default),
-            None => serde_json::from_str(raw.get()).unwrap_or(Value::Null),
-        };
-        (key, value)
-    }).collect())
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, raw)| {
+                let value = match defaults.get(&key) {
+                    Some(default) => parse_config_json(raw.get(), default),
+                    None => serde_json::from_str(raw.get()).unwrap_or(Value::Null),
+                };
+                (key, value)
+            })
+            .collect(),
+    )
 }
 
 fn serialized_options<T: Serialize>(values: &[T]) -> Vec<String> {
@@ -85,7 +91,8 @@ fn collect_fields(
         domain,
         path: prefix.into(),
         kind,
-        backup: !(domain == ConfigDomain::Sync && matches!(prefix, "logLevel" | "prerenderEnabled")),
+        backup: !(domain == ConfigDomain::Sync
+            && matches!(prefix, "logLevel" | "prerenderEnabled")),
         secret: matches!(
             (domain, prefix),
             (ConfigDomain::Server, "apiKey" | "adminPassword" | "fileKey")
@@ -118,11 +125,14 @@ fn collect_fields(
             (ConfigDomain::Voice, "connection.apiBaseUrl") => Some(VOICE_API_BASE_URL_PRESET),
             (ConfigDomain::Jev, "typesafe.apiUrl") => Some(JevProvider::Typesafe.api_url_preset()),
             (ConfigDomain::Jev, "typesafe.model") => Some(JevProvider::Typesafe.model_preset()),
-            (ConfigDomain::Jev, "openrouter.apiUrl") => Some(JevProvider::Openrouter.api_url_preset()),
+            (ConfigDomain::Jev, "openrouter.apiUrl") => {
+                Some(JevProvider::Openrouter.api_url_preset())
+            }
             (ConfigDomain::Jev, "openrouter.model") => Some(JevProvider::Openrouter.model_preset()),
             (ConfigDomain::Jev, "appTitle") => Some(JEV_APP_TITLE_PRESET),
             _ => None,
-        }.map(str::to_owned),
+        }
+        .map(str::to_owned),
         min: None,
         max: None,
         max_chars: None,
@@ -361,10 +371,13 @@ fn is_connection_endpoint(field: &FieldDescriptor) -> bool {
 
 fn has_nonempty_default_endpoint(domain: ConfigDomain, field: &FieldDescriptor) -> bool {
     is_connection_endpoint(field)
-        && (field.preset.as_deref().is_some_and(|value| !value.is_empty())
+        && (field
+            .preset
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
             || value_at_path(&DEFAULT_DOMAINS[domain.as_str()], &field.path)
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty()))
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty()))
 }
 
 fn normalize_dependencies(
@@ -474,33 +487,48 @@ mod tests {
     #[test]
     fn stored_json_number_overflow_defaults_only_the_affected_field() {
         let defaults = domain_defaults(ConfigDomain::Voice);
-        let raw = parse_config_json(r#"{
+        let raw = parse_config_json(
+            r#"{
             "connection":{"apiBaseUrl":"https://voice.example/v1","apiKey":"keep-key"},
             "vad":{"endSilenceMs":1e400,"playbackOnsetMs":100},
             "asr":{"stream":false,"language":"en"},
             "tts":{"voice":"Mia"},"guidance":{"rules":"1e400 is literal text"}
-        }"#, &defaults);
+        }"#,
+            &defaults,
+        );
         let voice = normalize_domain(ConfigDomain::Voice, &raw);
-        assert_eq!(voice["vad"]["endSilenceMs"], defaults["vad"]["endSilenceMs"]);
+        assert_eq!(
+            voice["vad"]["endSilenceMs"],
+            defaults["vad"]["endSilenceMs"]
+        );
         assert_eq!(voice["vad"]["playbackOnsetMs"], 100);
         assert_eq!(voice["asr"]["stream"], false);
         assert_eq!(voice["asr"]["language"], "en");
         assert_eq!(voice["connection"]["apiKey"], "keep-key");
         assert_eq!(voice["tts"]["voice"], "Mia");
         assert_eq!(voice["guidance"]["rules"], "1e400 is literal text");
-        assert_eq!(parse_config_json(r#"{"asr":{"language":"en"},"vad":broken}"#, &defaults), Value::Null);
+        assert_eq!(
+            parse_config_json(r#"{"asr":{"language":"en"},"vad":broken}"#, &defaults),
+            Value::Null
+        );
     }
 
     #[test]
     fn stored_json_arrays_and_numbers_are_not_coerced() {
         let defaults = domain_defaults(ConfigDomain::Navigation);
-        let parsed = parse_config_json(r#"{"agentOrder":["a",1e400],"groupOrder":["b","1"]}"#, &defaults);
+        let parsed = parse_config_json(
+            r#"{"agentOrder":["a",1e400],"groupOrder":["b","1"]}"#,
+            &defaults,
+        );
         let navigation = normalize_domain(ConfigDomain::Navigation, &parsed);
         assert_eq!(navigation["agentOrder"], defaults["agentOrder"]);
         assert_eq!(navigation["groupOrder"], json!(["b", "1"]));
         let defaults = domain_defaults(ConfigDomain::Jev);
         for number in ["-1", "1.5", "1000.0", "\"1000\"", "4294967296", "1e400"] {
-            let parsed = parse_config_json(&format!(r#"{{"timeoutMs":{number},"maxRetries":3}}"#), &defaults);
+            let parsed = parse_config_json(
+                &format!(r#"{{"timeoutMs":{number},"maxRetries":3}}"#),
+                &defaults,
+            );
             let jev = normalize_domain(ConfigDomain::Jev, &parsed);
             assert_eq!(jev["timeoutMs"], defaults["timeoutMs"], "{number}");
             assert_eq!(jev["maxRetries"], 3);
@@ -689,17 +717,12 @@ mod tests {
         assert!(partial.get("connection").is_none());
         assert!(partial.get("guidance").is_none());
         assert_eq!(
-            normalize_domain_patch(
-                ConfigDomain::Voice,
-                &json!({"guidance":{"rules":""}})
-            ),
+            normalize_domain_patch(ConfigDomain::Voice, &json!({"guidance":{"rules":""}})),
             json!({"guidance":{"rules":""}})
         );
         for rules in ["", "  \n ", "自定义风格规则"] {
-            let normalized = normalize_domain(
-                ConfigDomain::Voice,
-                &json!({"guidance":{"rules":rules}}),
-            );
+            let normalized =
+                normalize_domain(ConfigDomain::Voice, &json!({"guidance":{"rules":rules}}));
             assert_eq!(normalized["guidance"]["rules"], rules);
         }
         let missing = normalize_domain(ConfigDomain::Voice, &json!({}));
@@ -729,12 +752,26 @@ mod tests {
     #[test]
     fn empty_defaults_preserve_explicit_connection_values() {
         for domain in [ConfigDomain::Voice, ConfigDomain::Jev] {
-            for field in domain_fields(domain).into_iter().filter(|field| field.preset.is_some()) {
+            for field in domain_fields(domain)
+                .into_iter()
+                .filter(|field| field.preset.is_some())
+            {
                 let preset = field.preset.as_deref().unwrap();
-                assert_eq!(normalize_field_value(domain, &field.path, &json!(preset)), preset);
-                assert_eq!(normalize_field_value(domain, &field.path, &json!("custom-value")), "custom-value");
-                assert_eq!(value_at_path(&domain_defaults(domain), &field.path).unwrap(), "");
-                if !is_connection_endpoint(&field) { continue; }
+                assert_eq!(
+                    normalize_field_value(domain, &field.path, &json!(preset)),
+                    preset
+                );
+                assert_eq!(
+                    normalize_field_value(domain, &field.path, &json!("custom-value")),
+                    "custom-value"
+                );
+                assert_eq!(
+                    value_at_path(&domain_defaults(domain), &field.path).unwrap(),
+                    ""
+                );
+                if !is_connection_endpoint(&field) {
+                    continue;
+                }
                 let key_path = match field.path.as_str() {
                     "connection.apiBaseUrl" => "connection.apiKey",
                     "typesafe.apiUrl" => "typesafe.apiKey",
@@ -746,14 +783,23 @@ mod tests {
                     set_value_at_path(&mut raw, &field.path, json!(input)).unwrap();
                     set_value_at_path(&mut raw, key_path, json!("retained-key")).unwrap();
                     let normalized = normalize_domain(domain, &raw);
-                    assert_eq!(value_at_path(&normalized, key_path).unwrap(), "retained-key");
+                    assert_eq!(
+                        value_at_path(&normalized, key_path).unwrap(),
+                        "retained-key"
+                    );
                     assert_eq!(value_at_path(&normalized, &field.path).unwrap(), input);
                 }
                 let mut missing = json!({});
                 set_value_at_path(&mut missing, key_path, json!("retained-key")).unwrap();
-                assert_eq!(value_at_path(&normalize_domain(domain, &missing), key_path).unwrap(), "");
+                assert_eq!(
+                    value_at_path(&normalize_domain(domain, &missing), key_path).unwrap(),
+                    ""
+                );
                 set_value_at_path(&mut missing, &field.path, json!(false)).unwrap();
-                assert_eq!(value_at_path(&normalize_domain(domain, &missing), key_path).unwrap(), "");
+                assert_eq!(
+                    value_at_path(&normalize_domain(domain, &missing), key_path).unwrap(),
+                    ""
+                );
             }
         }
     }

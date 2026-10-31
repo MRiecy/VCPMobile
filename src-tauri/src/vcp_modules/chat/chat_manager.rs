@@ -236,7 +236,8 @@ pub async fn patch_single_message(
     {
         log::warn!("[ChatManager] Message edit committed; narration cleanup failed: {error}");
     }
-    if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+    if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
+    {
         turns.notify_history_changed(&key);
     }
     Ok(result)
@@ -263,7 +264,9 @@ pub async fn delete_messages(
         log::warn!("[ChatManager] Deleted messages committed; narration cleanup failed: {error}");
     }
     if !result.deleted_ids.is_empty() {
-        if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+        if let Some(turns) =
+            app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
+        {
             turns.notify_history_changed(&key);
         }
     }
@@ -317,7 +320,10 @@ pub async fn edit_resend_message(
     let (persisted, deletion) =
         message_service::edit_resend_message(&app_handle, &db_state, &key, message).await?;
     finish_history_truncation(&app_handle, &key, &deletion).await;
-    Ok(EditResendResultDto { persisted, msg_count: deletion.msg_count })
+    Ok(EditResendResultDto {
+        persisted,
+        msg_count: deletion.msg_count,
+    })
 }
 
 #[tauri::command]
@@ -355,7 +361,9 @@ async fn finish_history_truncation(
         log::warn!("[ChatManager] History truncation committed; narration cleanup failed: {error}");
     }
     if !deletion.deleted_ids.is_empty() {
-        if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+        if let Some(turns) =
+            app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
+        {
             turns.cancel(key);
         }
     }

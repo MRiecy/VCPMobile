@@ -1780,11 +1780,13 @@ x' \\ y'
         // 验证行内紧贴场景下同样不被撕裂成标题，保持在单段落中
         let nodes_inline = parse_markdown_to_ast(&format!("矩阵变换：\n$$\n{latex}\n$$"));
         assert_eq!(nodes_inline.len(), 1);
-        assert!(matches!(&nodes_inline[0], MarkdownNode::Paragraph { children, .. }
+        assert!(
+            matches!(&nodes_inline[0], MarkdownNode::Paragraph { children, .. }
             if children.len() == 3
                 && matches!(&children[0], InlineNode::Text { value, .. } if value == "矩阵变换：")
                 && matches!(&children[1], InlineNode::Break)
-                && matches!(&children[2], InlineNode::InlineMath { display_mode: true, .. })));
+                && matches!(&children[2], InlineNode::InlineMath { display_mode: true, .. }))
+        );
     }
 
     #[test]
@@ -1802,7 +1804,9 @@ x' \\ y'
         let source = "$$\nx\n=\ny\n$$\n";
         for fence in ["```", "~~~"] {
             let nodes = parse_markdown_to_ast(&format!("{fence}text\n{source}{fence}"));
-            assert!(matches!(nodes.as_slice(), [MarkdownNode::CodeBlock { code, .. }] if code == source));
+            assert!(
+                matches!(nodes.as_slice(), [MarkdownNode::CodeBlock { code, .. }] if code == source)
+            );
         }
         let nodes = parse_markdown_to_ast("标题\n=\n\n$x$\n\n$$y=z$$");
         assert!(matches!(nodes[0], MarkdownNode::Heading { level: 1, .. }));
@@ -2039,7 +2043,9 @@ x' \\ y'
                 "正文**「加粗内容」**：",
                 vec![
                     InlineNode::text("正文".into()),
-                    bold(vec![InlineNode::text("\u{200b}「加粗内容」\u{200b}".into())]),
+                    bold(vec![InlineNode::text(
+                        "\u{200b}「加粗内容」\u{200b}".into(),
+                    )]),
                     InlineNode::text("：".into()),
                 ],
             ),

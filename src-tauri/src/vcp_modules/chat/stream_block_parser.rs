@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::content_parser::{
-    extract_tool_name, find_tool_request_end, parse_daily_note_tool_request, parse_jev_tool_request,
-    parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
-    BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
-    KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
-    THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START, VOICE_GUIDANCE_END,
-    VOICE_GUIDANCE_START,
+    extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
+    parse_jev_tool_request, parse_legacy_daily_note, BlockType, ParsedDailyNote,
+    ToolCallSummaryItem, ToolResultDetail, BUTTON_CLICK, DIARY_END, DIARY_START,
+    GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END,
+    STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END, THOUGHT_START, TOOL_RESULT_END,
+    TOOL_RESULT_START, TOOL_START, VOICE_GUIDANCE_END, VOICE_GUIDANCE_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -789,7 +789,8 @@ fn build_stream_block(
                 build_daily_note_stream_block(note)
             } else if let Some(tool_name) = parse_jev_tool_request(inner_content) {
                 let hash = HashAggregator::compute_content_hash(&format!(
-                    "jev-tool-use:{}:{}", tool_name, inner_content
+                    "jev-tool-use:{}:{}",
+                    tool_name, inner_content
                 ));
                 StreamBlock::JevToolUse {
                     tool_name,
@@ -1099,13 +1100,22 @@ mod tests {
             let (display_blocks, display_tail, display_type) = display.process(text);
             let speech_blocks = speech.process_stable(text);
             let (borrowed_blocks, borrowed_tail, borrowed_type) = borrowed.process_borrowed(text);
-            assert_eq!(serde_json::to_value(&speech_blocks).unwrap(), serde_json::to_value(&display_blocks).unwrap());
-            assert_eq!(serde_json::to_value(&borrowed_blocks).unwrap(), serde_json::to_value(&display_blocks).unwrap());
+            assert_eq!(
+                serde_json::to_value(&speech_blocks).unwrap(),
+                serde_json::to_value(&display_blocks).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(&borrowed_blocks).unwrap(),
+                serde_json::to_value(&display_blocks).unwrap()
+            );
             assert_eq!(borrowed_tail, display_tail);
             assert_eq!(borrowed_type, display_type);
             assert_eq!(speech.tail_start(), display.tail_start());
             if !borrowed_tail.is_empty() {
-                assert_eq!(borrowed_tail.as_ptr(), text[borrowed.tail_start()..].as_ptr());
+                assert_eq!(
+                    borrowed_tail.as_ptr(),
+                    text[borrowed.tail_start()..].as_ptr()
+                );
             }
         }
         let (blocks, terminal) = speech.finish_for_speech(raw);
@@ -1165,14 +1175,31 @@ mod tests {
             let (blocks, remaining, _) = parser.process(&raw[..end]);
             stable.extend(blocks);
             tail = remaining;
-            let count = stable.iter().filter(|block| matches!(block, StreamBlock::JevToolUse { .. })).count();
-            assert_eq!(count, usize::from(end >= request.len()), "prefix length {end}");
+            let count = stable
+                .iter()
+                .filter(|block| matches!(block, StreamBlock::JevToolUse { .. }))
+                .count();
+            assert_eq!(
+                count,
+                usize::from(end >= request.len()),
+                "prefix length {end}"
+            );
         }
         assert!(tail.contains("后文"));
         let full = crate::vcp_modules::content_parser::parse_content(&request);
-        let full = full.iter().find(|block| matches!(block,
-            crate::vcp_modules::content_parser::ContentBlock::JevToolUse { .. })).unwrap();
-        let stream = stable.iter().find(|block| matches!(block, StreamBlock::JevToolUse { .. })).unwrap();
+        let full = full
+            .iter()
+            .find(|block| {
+                matches!(
+                    block,
+                    crate::vcp_modules::content_parser::ContentBlock::JevToolUse { .. }
+                )
+            })
+            .unwrap();
+        let stream = stable
+            .iter()
+            .find(|block| matches!(block, StreamBlock::JevToolUse { .. }))
+            .unwrap();
         let mut full_json = serde_json::to_value(full).unwrap();
         let mut stream_json = serde_json::to_value(stream).unwrap();
         full_json.as_object_mut().unwrap().remove("is_complete");
@@ -1181,9 +1208,13 @@ mod tests {
         assert_eq!(stream_json, full_json);
         assert_eq!(stream_json["tool_name"], "B站获取");
 
-        let partial = &request[..request.find("\n<<<[END_TOOL_REQUEST]>>>\n「末ESCAPE」").unwrap()];
+        let partial = &request[..request
+            .find("\n<<<[END_TOOL_REQUEST]>>>\n「末ESCAPE」")
+            .unwrap()];
         let stopped = StreamBlockParser::new().finalize(partial);
-        assert!(matches!(stopped.as_slice(), [StreamBlock::Markdown { content, .. }] if content == partial));
+        assert!(
+            matches!(stopped.as_slice(), [StreamBlock::Markdown { content, .. }] if content == partial)
+        );
     }
 
     #[test]
@@ -1407,11 +1438,21 @@ mod tests {
             completed.extend(blocks);
         }
         completed.extend(parser.finalize(full));
-        assert!(matches!(completed.first(), Some(StreamBlock::VoiceGuidance {
+        assert!(
+            matches!(completed.first(), Some(StreamBlock::VoiceGuidance {
             content, is_complete: true, ..
-        }) if content == "自然清亮"));
-        assert!(matches!(completed.last(), Some(StreamBlock::Markdown { content, .. }) if content == "[轻笑]你好。"));
-        assert_eq!(completed.iter().filter(|block| matches!(block, StreamBlock::VoiceGuidance { .. })).count(), 1);
+        }) if content == "自然清亮")
+        );
+        assert!(
+            matches!(completed.last(), Some(StreamBlock::Markdown { content, .. }) if content == "[轻笑]你好。")
+        );
+        assert_eq!(
+            completed
+                .iter()
+                .filter(|block| matches!(block, StreamBlock::VoiceGuidance { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1425,12 +1466,16 @@ mod tests {
         assert!(active.is_empty());
         assert_eq!(tail, raw);
         assert_eq!(tail_type, Some(BlockType::VoiceGuidance));
-        assert!(matches!(parser.finalize(raw).as_slice(), [StreamBlock::Markdown {
+        assert!(
+            matches!(parser.finalize(raw).as_slice(), [StreamBlock::Markdown {
             content, ..
-        }] if content == raw));
+        }] if content == raw)
+        );
         let mut parser = StreamBlockParser::new();
         assert_eq!(parser.process("<").1, "<");
-        assert!(matches!(parser.finalize("<").as_slice(), [StreamBlock::Markdown { content, .. }] if content == "<"));
+        assert!(
+            matches!(parser.finalize("<").as_slice(), [StreamBlock::Markdown { content, .. }] if content == "<")
+        );
     }
 
     #[test]
@@ -1457,7 +1502,12 @@ mod tests {
                 blocks.extend(parser.process(&text).0);
             }
             blocks.extend(parser.finalize(&text));
-            assert!(!blocks.iter().any(|block| matches!(block, StreamBlock::VoiceGuidance { .. })), "{example}");
+            assert!(
+                !blocks
+                    .iter()
+                    .any(|block| matches!(block, StreamBlock::VoiceGuidance { .. })),
+                "{example}"
+            );
         }
     }
 
@@ -1465,15 +1515,39 @@ mod tests {
     fn speech_terminal_unwraps_only_the_identified_outer_marker_once() {
         for (raw, expected, block_type) in [
             ("末尾普通正文", "末尾普通正文", None),
-            ("<voice_guidance>\n没有闭合但需要补读", "\n没有闭合但需要补读", Some(BlockType::VoiceGuidance)),
-            ("<think>需要保留的内容", "需要保留的内容", Some(BlockType::Think)),
-            ("[--- VCP元思考链 ---]\n需要保留的内容", "\n需要保留的内容", Some(BlockType::Thought)),
-            ("<<<[TOOL_REQUEST]>>>\n正文内容", "\n正文内容", Some(BlockType::Tool)),
-            ("~~~text\n正文内容", "\n正文内容", Some(BlockType::CodeFence)),
+            (
+                "<voice_guidance>\n没有闭合但需要补读",
+                "\n没有闭合但需要补读",
+                Some(BlockType::VoiceGuidance),
+            ),
+            (
+                "<think>需要保留的内容",
+                "需要保留的内容",
+                Some(BlockType::Think),
+            ),
+            (
+                "[--- VCP元思考链 ---]\n需要保留的内容",
+                "\n需要保留的内容",
+                Some(BlockType::Thought),
+            ),
+            (
+                "<<<[TOOL_REQUEST]>>>\n正文内容",
+                "\n正文内容",
+                Some(BlockType::Tool),
+            ),
+            (
+                "~~~text\n正文内容",
+                "\n正文内容",
+                Some(BlockType::CodeFence),
+            ),
             ("```rust", "", Some(BlockType::CodeFence)),
             ("<div>正文内容", "正文内容", Some(BlockType::HtmlContainer)),
             ("<style>正文内容", "正文内容", Some(BlockType::Style)),
-            ("<!doctype html>\n<html>正文内容", "\n<html>正文内容", Some(BlockType::HtmlDoc)),
+            (
+                "<!doctype html>\n<html>正文内容",
+                "\n<html>正文内容",
+                Some(BlockType::HtmlDoc),
+            ),
         ] {
             let mut parser = StreamBlockParser::new();
             let (stable, _, _) = parser.process(raw);
@@ -1493,8 +1567,10 @@ mod tests {
     fn speech_terminal_keeps_closed_blocks_stable_and_unclosed_tail_separate() {
         let raw = "<voice_guidance>轻声</voice_guidance>\n开头正文。\n\n<think>终态正文";
         let (stable, terminal) = StreamBlockParser::new().finish_for_speech(raw);
-        assert!(matches!(stable.as_slice(), [StreamBlock::VoiceGuidance { .. }, StreamBlock::Markdown { content, .. }]
-            if content == "开头正文。"));
+        assert!(
+            matches!(stable.as_slice(), [StreamBlock::VoiceGuidance { .. }, StreamBlock::Markdown { content, .. }]
+            if content == "开头正文。")
+        );
         let terminal = terminal.unwrap();
         assert_eq!(terminal.content, "终态正文");
         assert_eq!(terminal.unclosed_block, Some(BlockType::Think));
@@ -1506,14 +1582,23 @@ mod tests {
         let mut incremental = StreamBlockParser::new();
         let mut blocks = Vec::new();
         let mut fed = String::new();
-        for chunk in ["  ~~", "~~te", "xt\r\nbody\n```\n", "~~~\n    ~~~~\n  ~~", "~~~\n\n正文"] {
+        for chunk in [
+            "  ~~",
+            "~~te",
+            "xt\r\nbody\n```\n",
+            "~~~\n    ~~~~\n  ~~",
+            "~~~\n\n正文",
+        ] {
             fed.push_str(chunk);
             blocks.extend(incremental.process(&fed).0);
         }
         assert_eq!(fed, full);
         blocks.extend(incremental.finalize(full));
         let one_shot = StreamBlockParser::new().finalize(full);
-        assert_eq!(serde_json::to_value(blocks).unwrap(), serde_json::to_value(one_shot).unwrap());
+        assert_eq!(
+            serde_json::to_value(blocks).unwrap(),
+            serde_json::to_value(one_shot).unwrap()
+        );
     }
 
     #[test]

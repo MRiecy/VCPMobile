@@ -1,6 +1,8 @@
 //! Shared, cancellable JEV transport. It does not own group queues or messages.
 
-use super::jev_protocol::{encoded_json_len, JevDecisionRequest, JevDecisionResponse, MAX_REQUEST_BYTES};
+use super::jev_protocol::{
+    encoded_json_len, JevDecisionRequest, JevDecisionResponse, MAX_REQUEST_BYTES,
+};
 use crate::vcp_modules::infra::settings_manager::types::{
     value_or_preset, JevConfig, JevProvider, JEV_APP_TITLE_PRESET,
 };
@@ -243,7 +245,10 @@ impl JevClient {
         if config.provider == JevProvider::Openrouter {
             for (name, value) in [
                 ("http-referer", config.http_referer.trim()),
-                ("x-openrouter-title", value_or_preset(&config.app_title, JEV_APP_TITLE_PRESET)),
+                (
+                    "x-openrouter-title",
+                    value_or_preset(&config.app_title, JEV_APP_TITLE_PRESET),
+                ),
             ] {
                 if !value.is_empty() {
                     headers.insert(
@@ -315,7 +320,10 @@ impl JevClient {
 }
 
 fn endpoint(config: &JevConfig) -> Result<Url, JevClientError> {
-    let value = value_or_preset(&config.active_provider().api_url, config.provider.api_url_preset());
+    let value = value_or_preset(
+        &config.active_provider().api_url,
+        config.provider.api_url_preset(),
+    );
     let error = || {
         JevClientError::new(
             "JEV_INVALID_URL",
@@ -347,19 +355,37 @@ pub(crate) fn history_byte_budget(
     config: &JevConfig,
     request: &JevDecisionRequest,
 ) -> Result<usize, JevClientError> {
-    if !request.state.get("recentMessages").and_then(serde_json::Value::as_array)
+    if !request
+        .state
+        .get("recentMessages")
+        .and_then(serde_json::Value::as_array)
         .is_some_and(Vec::is_empty)
     {
-        return Err(JevClientError::new("JEV_INVALID_REQUEST", "Jev 历史预算必须在装配消息前计算。"));
+        return Err(JevClientError::new(
+            "JEV_INVALID_REQUEST",
+            "Jev 历史预算必须在装配消息前计算。",
+        ));
     }
-    let model = value_or_preset(&config.active_provider().model, config.provider.model_preset());
-    let fixed_bytes = encoded_json_len(&Body { model, request }, MAX_REQUEST_BYTES, None)
-        .map_err(|_| JevClientError::new("JEV_INVALID_REQUEST", "Jev 固定配置超过 64 MiB 请求上限。"))?;
+    let model = value_or_preset(
+        &config.active_provider().model,
+        config.provider.model_preset(),
+    );
+    let fixed_bytes =
+        encoded_json_len(&Body { model, request }, MAX_REQUEST_BYTES, None).map_err(|_| {
+            JevClientError::new("JEV_INVALID_REQUEST", "Jev 固定配置超过 64 MiB 请求上限。")
+        })?;
     Ok(MAX_REQUEST_BYTES - fixed_bytes)
 }
 
-fn encode_body(model: &str, request: &JevDecisionRequest, cancellation: &CancellationToken) -> Result<Vec<u8>, JevClientError> {
-    struct BoundedBody<'a> { bytes: Vec<u8>, cancellation: &'a CancellationToken }
+fn encode_body(
+    model: &str,
+    request: &JevDecisionRequest,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, JevClientError> {
+    struct BoundedBody<'a> {
+        bytes: Vec<u8>,
+        cancellation: &'a CancellationToken,
+    }
     impl Write for BoundedBody<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self.cancellation.is_cancelled() {
@@ -375,14 +401,23 @@ fn encode_body(model: &str, request: &JevDecisionRequest, cancellation: &Cancell
             Ok(())
         }
     }
-    let mut body = BoundedBody { bytes: Vec::new(), cancellation };
+    let mut body = BoundedBody {
+        bytes: Vec::new(),
+        cancellation,
+    };
     serde_json::to_writer(&mut body, &Body { model, request }).map_err(|_| {
-        if cancellation.is_cancelled() { JevClientError::cancelled() } else { JevClientError::new(
-            "JEV_INVALID_REQUEST",
-            "Jev 请求无法编码或超过 64 MiB，请缩小仲裁上下文。",
-        ) }
+        if cancellation.is_cancelled() {
+            JevClientError::cancelled()
+        } else {
+            JevClientError::new(
+                "JEV_INVALID_REQUEST",
+                "Jev 请求无法编码或超过 64 MiB，请缩小仲裁上下文。",
+            )
+        }
     })?;
-    if cancellation.is_cancelled() { return Err(JevClientError::cancelled()); }
+    if cancellation.is_cancelled() {
+        return Err(JevClientError::cancelled());
+    }
     Ok(body.bytes)
 }
 
@@ -650,7 +685,11 @@ mod tests {
             reply.body = body;
             let fixture = fixture(vec![reply]).await;
             let error = JevClient::default()
-                .decide(&config(&fixture.url), Arc::new(request()), CancellationToken::new())
+                .decide(
+                    &config(&fixture.url),
+                    Arc::new(request()),
+                    CancellationToken::new(),
+                )
                 .await
                 .unwrap_err();
             assert_eq!(error.code, code);
@@ -755,7 +794,11 @@ mod tests {
         reply.body["extra"] = json!("x".repeat(MAX_RESPONSE_BYTES));
         let fixture = fixture(vec![reply]).await;
         let error = JevClient::default()
-            .decide(&config(&fixture.url), Arc::new(request()), CancellationToken::new())
+            .decide(
+                &config(&fixture.url),
+                Arc::new(request()),
+                CancellationToken::new(),
+            )
             .await
             .unwrap_err();
         assert_eq!(error.code, "JEV_INVALID_RESPONSE");
@@ -770,7 +813,9 @@ mod tests {
         assert!(encode_body("model", &request, &CancellationToken::new()).is_ok());
         request.state = Value::String("x".repeat(MAX_REQUEST_BYTES));
         assert_eq!(
-            encode_body("model", &request, &CancellationToken::new()).unwrap_err().code,
+            encode_body("model", &request, &CancellationToken::new())
+                .unwrap_err()
+                .code,
             "JEV_INVALID_REQUEST"
         );
         assert!(endpoint(&config("/alpha/decisions")).is_err());
@@ -789,9 +834,14 @@ mod tests {
         let mut request = request();
         request.state["recentMessages"] = json!([]);
         request.state["group"]["prompt"] = json!("讨论\"规则\n");
-        let model = value_or_preset(&config.active_provider().model, config.provider.model_preset());
+        let model = value_or_preset(
+            &config.active_provider().model,
+            config.provider.model_preset(),
+        );
         assert_eq!(model, "模型\"\\\n尾部");
-        let empty_body_bytes = encode_body(model, &request, &CancellationToken::new()).unwrap().len();
+        let empty_body_bytes = encode_body(model, &request, &CancellationToken::new())
+            .unwrap()
+            .len();
         let budget = history_byte_budget(&config, &request).unwrap();
         assert_eq!(budget + empty_body_bytes, 64 * 1024 * 1024);
 
@@ -805,12 +855,16 @@ mod tests {
         crate::vcp_modules::group::group_speaking_policy::append_jev_history(
             &mut assembled,
             vec![crate::vcp_modules::chat_manager::ChatMessage {
-                id: "latest".into(), role: "user".into(), content: text.into(), timestamp: 7,
+                id: "latest".into(),
+                role: "user".into(),
+                content: text.into(),
+                timestamp: 7,
                 ..Default::default()
             }],
             message_bytes,
             &CancellationToken::new(),
-        ).unwrap();
+        )
+        .unwrap();
         let body = encode_body(model, &assembled, &CancellationToken::new()).unwrap();
         assert_eq!(body.len(), empty_body_bytes + message_bytes);
         assert_eq!(body.len() + (budget - message_bytes), MAX_REQUEST_BYTES);
@@ -818,13 +872,19 @@ mod tests {
         assert_eq!(decoded["model"], "模型\"\\\n尾部");
         assert_eq!(decoded["state"]["recentMessages"], expected_history);
         request.state["recentMessages"] = json!([{"text":"already assembled"}]);
-        assert_eq!(history_byte_budget(&config, &request).unwrap_err().code, "JEV_INVALID_REQUEST");
+        assert_eq!(
+            history_byte_budget(&config, &request).unwrap_err().code,
+            "JEV_INVALID_REQUEST"
+        );
 
         request.state["recentMessages"] = json!([]);
         // Escaping expands this fixed metadata beyond the limit without needing
         // to construct a 64 MiB serialized body just to discover the overflow.
         request.state["group"]["prompt"] = Value::String("\u{0000}".repeat(MAX_REQUEST_BYTES / 6));
-        assert_eq!(history_byte_budget(&config, &request).unwrap_err().code, "JEV_INVALID_REQUEST");
+        assert_eq!(
+            history_byte_budget(&config, &request).unwrap_err().code,
+            "JEV_INVALID_REQUEST"
+        );
     }
 
     #[test]
@@ -843,7 +903,10 @@ mod tests {
         drop(listener);
         let mut settings = config(&url);
         settings.max_retries = 0;
-        let error = JevClient::default().decide(&settings, Arc::new(request()), CancellationToken::new()).await.unwrap_err();
+        let error = JevClient::default()
+            .decide(&settings, Arc::new(request()), CancellationToken::new())
+            .await
+            .unwrap_err();
         assert_eq!(error.code, "JEV_NETWORK_ERROR");
         assert!(error.is_retry_exhausted());
 
@@ -851,7 +914,14 @@ mod tests {
         reply.status = StatusCode::SERVICE_UNAVAILABLE;
         reply.retry_after = Some("600");
         let fixture = fixture(vec![reply]).await;
-        let error = JevClient::default().decide(&config(&fixture.url), Arc::new(request()), CancellationToken::new()).await.unwrap_err();
+        let error = JevClient::default()
+            .decide(
+                &config(&fixture.url),
+                Arc::new(request()),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
         assert!(!error.is_retry_exhausted());
         assert_eq!(fixture.state.requests.lock().unwrap().len(), 1);
     }
@@ -859,8 +929,16 @@ mod tests {
     #[tokio::test]
     async fn empty_overrides_follow_provider_presets_in_requests() {
         for (provider, expected_url, expected_model) in [
-            (JevProvider::Typesafe, "https://api.typesafe.ai/v1/systemone", "jev-latest"),
-            (JevProvider::Openrouter, "https://openrouter.ai/api/alpha/decisions", "~typesafe/jev-latest"),
+            (
+                JevProvider::Typesafe,
+                "https://api.typesafe.ai/v1/systemone",
+                "jev-latest",
+            ),
+            (
+                JevProvider::Openrouter,
+                "https://openrouter.ai/api/alpha/decisions",
+                "~typesafe/jev-latest",
+            ),
         ] {
             let mut config = JevConfig::default();
             config.enabled = true;
@@ -880,7 +958,10 @@ mod tests {
             active.api_key = "fixture-key".into();
             active.model = " \t ".into();
             config.app_title = " \t ".into();
-            JevClient::default().decide(&config, Arc::new(request()), CancellationToken::new()).await.unwrap();
+            JevClient::default()
+                .decide(&config, Arc::new(request()), CancellationToken::new())
+                .await
+                .unwrap();
             let requests = fixture.state.requests.lock().unwrap();
             assert_eq!(requests[0].1["model"], expected_model);
             if provider == JevProvider::Openrouter {

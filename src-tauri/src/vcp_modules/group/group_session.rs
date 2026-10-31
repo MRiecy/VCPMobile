@@ -710,32 +710,53 @@ mod tests {
 
     #[tokio::test]
     async fn late_cancelled_voice_input_cannot_replace_a_committed_typed_input() {
-        let session = GroupSession::new("turn".into(), CancellationToken::new(), "user_message", false);
+        let session = GroupSession::new(
+            "turn".into(),
+            CancellationToken::new(),
+            "user_message",
+            false,
+        );
         let voice_cancel = CancellationToken::new();
         let voice_finished = Arc::new(AtomicUsize::new(0));
         let typed_finished = Arc::new(AtomicUsize::new(0));
         let voice = scope("voice", voice_cancel.clone(), voice_finished.clone());
         let typed = scope("typed", CancellationToken::new(), typed_finished.clone());
-        let slow_voice = session.reserve_with_cancellation(voice_cancel.clone()).unwrap();
+        let slow_voice = session
+            .reserve_with_cancellation(voice_cancel.clone())
+            .unwrap();
         let later_typed = session.reserve().unwrap();
 
         // The text submitted after hangup can finish persistence/member reads
         // while the earlier voice submission still owns its reservation.
-        later_typed.commit(typed.clone(), &["typed-member".into()]).unwrap();
+        later_typed
+            .commit(typed.clone(), &["typed-member".into()])
+            .unwrap();
         voice_cancel.cancel();
-        slow_voice.commit(voice.clone(), &["voice-member".into()]).unwrap();
+        slow_voice
+            .commit(voice.clone(), &["voice-member".into()])
+            .unwrap();
         assert_eq!(voice.wait().await.unwrap()["status"], "cancelled");
         assert_eq!(voice_finished.load(Ordering::SeqCst), 1);
         assert_eq!(typed_finished.load(Ordering::SeqCst), 0);
         assert!(!session.latest_scope_cancelled());
-        assert_eq!(session.snapshot().unwrap().queued_agent_ids, ["typed-member"]);
+        assert_eq!(
+            session.snapshot().unwrap().queued_agent_ids,
+            ["typed-member"]
+        );
 
-        let (member, selected_scope) = session.next_speaker(session.snapshot().unwrap().revision)
-            .unwrap().unwrap();
+        let (member, selected_scope) = session
+            .next_speaker(session.snapshot().unwrap().revision)
+            .unwrap()
+            .unwrap();
         assert_eq!(member, "typed-member");
         assert!(Arc::ptr_eq(selected_scope.as_ref().unwrap(), &typed));
-        session.speaker_finished(true, Ok(serde_json::json!({"status":"completed"}))).unwrap();
-        let next = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        session
+            .speaker_finished(true, Ok(serde_json::json!({"status":"completed"})))
+            .unwrap();
+        let next = session
+            .decision_context(session.snapshot().unwrap().revision)
+            .unwrap()
+            .unwrap();
         // A late cancellation watcher belonging to the retired origin must not
         // preempt the newer input's arbitration or change its revision.
         session.finish_cancelled_scope(&voice);
@@ -748,18 +769,40 @@ mod tests {
 
     #[tokio::test]
     async fn late_valid_input_keeps_newer_scope_and_invitation_priority() {
-        let session = GroupSession::new("turn".into(), CancellationToken::new(), "user_message", false);
-        let earlier_scope = scope("earlier", CancellationToken::new(), Arc::new(AtomicUsize::new(0)));
-        let newer_scope = scope("newer", CancellationToken::new(), Arc::new(AtomicUsize::new(0)));
+        let session = GroupSession::new(
+            "turn".into(),
+            CancellationToken::new(),
+            "user_message",
+            false,
+        );
+        let earlier_scope = scope(
+            "earlier",
+            CancellationToken::new(),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let newer_scope = scope(
+            "newer",
+            CancellationToken::new(),
+            Arc::new(AtomicUsize::new(0)),
+        );
         let earlier = session.reserve().unwrap();
         let newer = session.reserve().unwrap();
-        newer.commit(newer_scope.clone(), &["new".into(), "shared".into()]).unwrap();
-        earlier.commit(earlier_scope.clone(), &["old".into(), "shared".into()]).unwrap();
+        newer
+            .commit(newer_scope.clone(), &["new".into(), "shared".into()])
+            .unwrap();
+        earlier
+            .commit(earlier_scope.clone(), &["old".into(), "shared".into()])
+            .unwrap();
 
         assert_eq!(earlier_scope.wait().await.unwrap()["status"], "completed");
-        assert_eq!(session.snapshot().unwrap().queued_agent_ids, ["new", "shared", "old"]);
-        let (_, selected_scope) = session.next_speaker(session.snapshot().unwrap().revision)
-            .unwrap().unwrap();
+        assert_eq!(
+            session.snapshot().unwrap().queued_agent_ids,
+            ["new", "shared", "old"]
+        );
+        let (_, selected_scope) = session
+            .next_speaker(session.snapshot().unwrap().revision)
+            .unwrap()
+            .unwrap();
         assert!(Arc::ptr_eq(selected_scope.as_ref().unwrap(), &newer_scope));
         session.close(None);
     }
@@ -772,26 +815,49 @@ mod tests {
         let input = session.reserve().unwrap();
         assert!(first.cancellation.is_cancelled());
         assert!(!root.is_cancelled());
-        assert!(!session.accept_decision(first.revision, &[], Some("end_option_selected".into())).unwrap());
+        assert!(!session
+            .accept_decision(first.revision, &[], Some("end_option_selected".into()))
+            .unwrap());
         session.decision_finished();
         drop(input);
 
-        let second = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        let second = session
+            .decision_context(session.snapshot().unwrap().revision)
+            .unwrap()
+            .unwrap();
         assert!(!second.cancellation.is_cancelled());
         session.enqueue(&["manual".into()]).unwrap();
         assert!(second.cancellation.is_cancelled());
         assert!(!root.is_cancelled());
         session.decision_finished();
-        assert_eq!(session.next_speaker(session.snapshot().unwrap().revision).unwrap().unwrap().0, "manual");
-        session.speaker_finished(true, Ok(serde_json::json!({"status":"completed"}))).unwrap();
+        assert_eq!(
+            session
+                .next_speaker(session.snapshot().unwrap().revision)
+                .unwrap()
+                .unwrap()
+                .0,
+            "manual"
+        );
+        session
+            .speaker_finished(true, Ok(serde_json::json!({"status":"completed"})))
+            .unwrap();
 
-        let third = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        let third = session
+            .decision_context(session.snapshot().unwrap().revision)
+            .unwrap()
+            .unwrap();
         session.invalidate();
         assert!(third.cancellation.is_cancelled());
         session.decision_finished();
-        let fourth = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        let fourth = session
+            .decision_context(session.snapshot().unwrap().revision)
+            .unwrap()
+            .unwrap();
         assert!(!fourth.cancellation.is_cancelled());
-        assert_eq!(fourth.rounds, 0, "preempted decisions consume no autonomous budget");
+        assert_eq!(
+            fourth.rounds, 0,
+            "preempted decisions consume no autonomous budget"
+        );
         root.cancel();
         assert!(fourth.cancellation.is_cancelled());
     }

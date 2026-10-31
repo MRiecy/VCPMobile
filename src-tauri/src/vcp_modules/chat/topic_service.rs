@@ -276,7 +276,8 @@ pub async fn delete_topic(
     }
 
     // 仲裁阶段可能尚未创建活动消息，不能只靠下方 active_messages 取消。
-    if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+    if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
+    {
         turns.cancel(&key);
     }
     for message_key in deletion.active_messages {
@@ -874,7 +875,9 @@ pub async fn regenerate_topic_response(
                 GroupChatMode::InviteOnly => {
                     return Err("邀请发言群组不能使用自动重新生成，请直接邀请成员发言".to_string())
                 }
-                GroupChatMode::Jev => return Err("JEV 群聊暂不支持重新生成，请继续群聊或邀请成员发言".into()),
+                GroupChatMode::Jev => {
+                    return Err("JEV 群聊暂不支持重新生成，请继续群聊或邀请成员发言".into())
+                }
             }
 
             let has_live_member: bool = sqlx::query_scalar(
@@ -911,7 +914,9 @@ pub async fn regenerate_topic_response(
     )
     .await
     {
-        log::warn!("[TopicService] Regeneration truncation committed; narration cleanup failed: {error}");
+        log::warn!(
+            "[TopicService] Regeneration truncation committed; narration cleanup failed: {error}"
+        );
     }
     for msg_id in &deletion.active_ids {
         crate::vcp_modules::vcp_client::discard_deleted_generation(

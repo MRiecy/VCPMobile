@@ -8,8 +8,7 @@ use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
-    ActiveRequestLease, ActiveRequests, ChatConnectionSnapshot, StreamEvent,
-    VcpRequestPayload,
+    ActiveRequestLease, ActiveRequests, ChatConnectionSnapshot, StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -48,13 +47,18 @@ impl PreparedAgentRequest {
             TopicKey::new("agent", agent_id, topic_id),
             format!("msg_{}", uuid::Uuid::new_v4()),
         );
-        let (lease, cancellation_token) =
-            ActiveRequestLease::try_acquire_with_cancellation(
-                requests.0.clone(), key.clone(), cancellation_token,
-            )?;
+        let (lease, cancellation_token) = ActiveRequestLease::try_acquire_with_cancellation(
+            requests.0.clone(),
+            key.clone(),
+            cancellation_token,
+        )?;
         lease.set_origin_user_message(origin_user_message_id)?;
         lease.bind_output(app, channel)?;
-        Ok(Self { key, lease, cancellation_token })
+        Ok(Self {
+            key,
+            lease,
+            cancellation_token,
+        })
     }
 }
 
@@ -144,7 +148,11 @@ pub(crate) async fn process_prepared_agent_chat_message(
     let topic_key = TopicKey::new("agent", &agent_id, &topic_id);
     let user_message = payload.user_message;
 
-    let PreparedAgentRequest { key: request_key, lease: _request_lease, cancellation_token } = request;
+    let PreparedAgentRequest {
+        key: request_key,
+        lease: _request_lease,
+        cancellation_token,
+    } = request;
     let thinking_id = request_key.msg_id.clone();
 
     if cancellation_token.is_cancelled() {

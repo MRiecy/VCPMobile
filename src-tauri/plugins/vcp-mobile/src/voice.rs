@@ -1,10 +1,13 @@
 //! Native audio control and shared VAD decisions. PCM and inference stay in the
 //! native capture owner; this module receives bounded frame summaries only.
 
-mod vad;
 mod native_audio;
+mod vad;
 
-pub use native_audio::{append_playback, end_playback_segment, export_segment, finish_playback, release_segments, start_playback, stop_playback, ExportedVoiceSegment};
+pub use native_audio::{
+    append_playback, end_playback_segment, export_segment, finish_playback, release_segments,
+    start_playback, stop_playback, ExportedVoiceSegment,
+};
 pub use vad::{VoiceVadConfig, VoiceVadSensitivity};
 
 use serde::{Deserialize, Serialize};
@@ -157,10 +160,7 @@ impl Sessions {
         Some(epoch)
     }
 
-    fn consume_frame(
-        &mut self,
-        frame: VoiceFrame,
-    ) -> Option<VoiceAudioEvent> {
+    fn consume_frame(&mut self, frame: VoiceFrame) -> Option<VoiceAudioEvent> {
         let session = self.current.as_mut()?;
         if session.id != frame.session_id {
             return None;
@@ -231,14 +231,12 @@ async fn native_result_call<R: Runtime, T: serde::de::DeserializeOwned + Send + 
         // Keep the native receiver alive even if a frontend invocation is dropped.
         // A separate stop command can cancel a permission/model-start operation.
         tauri::async_runtime::spawn_blocking(move || {
-            let allowed = expected
-                .as_ref()
-                .is_none_or(|(id, generation)| {
-                    app.state::<VoiceAudioState>()
-                        .0
-                        .lock()
-                        .is_ok_and(|sessions| sessions.owns(id, *generation))
-                });
+            let allowed = expected.as_ref().is_none_or(|(id, generation)| {
+                app.state::<VoiceAudioState>()
+                    .0
+                    .lock()
+                    .is_ok_and(|sessions| sessions.owns(id, *generation))
+            });
             if !allowed {
                 return Err("cancelled: voice audio session is no longer active".into());
             }
@@ -257,28 +255,67 @@ async fn native_result_call<R: Runtime, T: serde::de::DeserializeOwned + Send + 
 }
 
 /// Rust call coordination owns admission; this is not a frontend command.
-pub async fn begin_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> Result<(), String> {
+pub async fn begin_voice_call<R: Runtime>(
+    app: AppHandle<R>,
+    call_id: String,
+) -> Result<(), String> {
     validate_session(&call_id)?;
-    native_call(app, "beginVoiceCall", serde_json::json!({ "callId": call_id }), None).await
+    native_call(
+        app,
+        "beginVoiceCall",
+        serde_json::json!({ "callId": call_id }),
+        None,
+    )
+    .await
 }
 
 pub async fn end_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> Result<(), String> {
     validate_session(&call_id)?;
-    native_call(app, "endVoiceCall", serde_json::json!({ "callId": call_id }), None).await
+    native_call(
+        app,
+        "endVoiceCall",
+        serde_json::json!({ "callId": call_id }),
+        None,
+    )
+    .await
 }
 
 /// A document grants capture admission only; it never owns the logical call.
-pub async fn connect_voice_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
-    native_call(app, "connectVoiceDocument", serde_json::json!({ "documentId": document_id }), None).await
+pub async fn connect_voice_document<R: Runtime>(
+    app: AppHandle<R>,
+    document_id: String,
+) -> Result<(), String> {
+    native_call(
+        app,
+        "connectVoiceDocument",
+        serde_json::json!({ "documentId": document_id }),
+        None,
+    )
+    .await
 }
 
-pub async fn invalidate_voice_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
-    native_call(app, "invalidateVoiceDocument", serde_json::json!({ "documentId": document_id }), None).await
+pub async fn invalidate_voice_document<R: Runtime>(
+    app: AppHandle<R>,
+    document_id: String,
+) -> Result<(), String> {
+    native_call(
+        app,
+        "invalidateVoiceDocument",
+        serde_json::json!({ "documentId": document_id }),
+        None,
+    )
+    .await
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum VoiceInputKind { Builtin, Bluetooth, Wired, Usb, Other }
+pub enum VoiceInputKind {
+    Builtin,
+    Bluetooth,
+    Wired,
+    Usb,
+    Other,
+}
 
 #[derive(Deserialize, Serialize)]
 pub struct VoiceInputDevice {
@@ -297,7 +334,9 @@ pub struct VoiceInputDevices {
     pub active_id: Option<String>,
 }
 
-pub async fn list_voice_input_devices<R: Runtime>(app: AppHandle<R>) -> Result<VoiceInputDevices, String> {
+pub async fn list_voice_input_devices<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<VoiceInputDevices, String> {
     native_result_call(app, "listVoiceInputDevices", serde_json::json!({}), None).await
 }
 
@@ -399,7 +438,10 @@ pub async fn stop_voice_audio<R: Runtime>(
 
 /// Called by the existing process-wide native event subscription. No PCM enters
 /// this boundary, and no native invocation is made synchronously on its thread.
-pub fn handle_native_event<R: Runtime>(app: &AppHandle<R>, event: NativeVoiceAudioEvent) -> Option<VoiceAudioEvent> {
+pub fn handle_native_event<R: Runtime>(
+    app: &AppHandle<R>,
+    event: NativeVoiceAudioEvent,
+) -> Option<VoiceAudioEvent> {
     let event = {
         let state = app.state::<VoiceAudioState>();
         let Ok(mut sessions) = state.0.lock() else {

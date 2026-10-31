@@ -83,8 +83,10 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:init_db_done");
     let attachment_cleanup = async {
         crate::vcp_modules::file_manager::reconcile_attachment_storage(&handle, &db_state).await?;
-        crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &db_state).await
-    }.await;
+        crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &db_state)
+            .await
+    }
+    .await;
     match attachment_cleanup {
         Ok(report) if report.reclaimed > 0 || report.ghost_files > 0 => {
             info!(
@@ -193,12 +195,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             let settings_state = h.state::<SettingsState>();
             let _runtime_guard = settings_state.lock_runtime_reconcile().await;
             if let Ok(latest) = read_config(h.clone(), h.state()).await {
-                if let Err(error) = reconnect_log_connections(
-                    &h,
-                    latest.log.url.clone(),
-                    latest.log.key.clone(),
-                )
-                .await
+                if let Err(error) =
+                    reconnect_log_connections(&h, latest.log.url.clone(), latest.log.key.clone())
+                        .await
                 {
                     log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
                 }

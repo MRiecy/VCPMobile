@@ -464,7 +464,10 @@ mod tests {
         drop(image);
         assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
 
-        let changed = AttachmentCasFile { size_bytes: size + 1, ..file };
+        let changed = AttachmentCasFile {
+            size_bytes: size + 1,
+            ..file
+        };
         assert!(borrow_avif_display(&changed).is_err());
     }
 

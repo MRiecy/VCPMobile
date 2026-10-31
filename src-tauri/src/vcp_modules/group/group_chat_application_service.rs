@@ -5,15 +5,18 @@ use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigS
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
+use crate::vcp_modules::group::group_session::{
+    GroupInputReservation, GroupReplyScope, GroupSession, ScopeCancellation,
+};
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
-use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::group_speaking_policy::{
-    build_jev_request, determine_naturerandom_speakers, determine_sequential_speakers,
-    append_jev_history, fallback_jev_decision, parse_jev_decision, GroupMemberHistoryStats,
+    append_jev_history, build_jev_request, determine_naturerandom_speakers,
+    determine_sequential_speakers, fallback_jev_decision, parse_jev_decision,
+    GroupMemberHistoryStats,
 };
-use crate::vcp_modules::group::group_session::{GroupSession, GroupReplyScope, GroupInputReservation, ScopeCancellation};
+use crate::vcp_modules::group_types::GroupChatMode;
+use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
@@ -24,8 +27,8 @@ use crate::vcp_modules::vcp_client::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime, State};
@@ -168,7 +171,9 @@ async fn run_group_speaker_turn<R: Runtime>(
         .as_ref()
         .map(|ip| ip.replace("{{VCPChatAgentName}}", &agent_name));
 
-    let history_start = group_context_limit(group_config_inner).map(|limit| full_history_for_context.len().saturating_sub(limit)).unwrap_or(0);
+    let history_start = group_context_limit(group_config_inner)
+        .map(|limit| full_history_for_context.len().saturating_sub(limit))
+        .unwrap_or(0);
     let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
         app_handle.state::<DbState>().inner(),
         &full_history_for_context[history_start..],
@@ -183,7 +188,11 @@ async fn run_group_speaker_turn<R: Runtime>(
 
     // Preparation may await IO; a stop received during it must not start the
     // next speaker or create another upstream request.
-    if params.group_turn.is_cancelled() || params.reply_scope.is_some_and(|scope| scope.cancellation.is_cancelled()) {
+    if params.group_turn.is_cancelled()
+        || params
+            .reply_scope
+            .is_some_and(|scope| scope.cancellation.is_cancelled())
+    {
         return Ok(GroupSpeakerOutcome::Cancelled);
     }
 
@@ -208,13 +217,18 @@ async fn run_group_speaker_turn<R: Runtime>(
         transport_request_id: Some(message_transport_request_id(&request_key)),
     };
 
-    let scope_cancellation = ScopeCancellation::new(params.group_turn.child_token(), params.reply_scope);
+    let scope_cancellation =
+        ScopeCancellation::new(params.group_turn.child_token(), params.reply_scope);
     let (_request_lease, cancellation_token) = ActiveRequestLease::try_acquire_with_cancellation(
         params.active_requests.0.clone(),
         request_key.clone(),
         scope_cancellation.token.clone(),
     )?;
-    if let Some(origin) = params.reply_scope.map(|scope| scope.origin.clone()).or_else(|| params.group_turn.origin_user_message()) {
+    if let Some(origin) = params
+        .reply_scope
+        .map(|scope| scope.origin.clone())
+        .or_else(|| params.group_turn.origin_user_message())
+    {
         _request_lease.set_origin_user_message(&origin)?;
     }
     let db_state = app_handle.state::<DbState>();
@@ -372,9 +386,24 @@ pub async fn internal_process_group_chat_message(
     if let Some(session) = active_group_turns.session(&topic_key) {
         let reservation = session.reserve()?;
         if append_user_msg {
-            message_service::append_single_message(app_handle.clone(), &db_state.pool, &params.group_id, "group", params.topic_id.clone(), params.user_message.clone()).await?;
+            message_service::append_single_message(
+                app_handle.clone(),
+                &db_state.pool,
+                &params.group_id,
+                "group",
+                params.topic_id.clone(),
+                params.user_message.clone(),
+            )
+            .await?;
         }
-        submit_group_session_input(&app_handle, reservation, &params.user_message, None, CancellationToken::new()).await?;
+        submit_group_session_input(
+            &app_handle,
+            reservation,
+            &params.user_message,
+            None,
+            CancellationToken::new(),
+        )
+        .await?;
         return Ok(json!({"status":"accepted"}));
     }
     let group_turn = active_group_turns.try_acquire(topic_key)?;
@@ -462,18 +491,46 @@ pub(crate) async fn process_prepared_group_chat_message(
         GroupChatMode::Jev => {
             let session = group_turn.start_session("user_message", false)?;
             let reservation = session.reserve()?;
-            let scope = submit_group_session_input(&app_handle, reservation, &user_message, reply_policy.clone(), voice_cancellation.unwrap_or_else(|| group_turn.child_token())).await?;
-            spawn_jev_session(app_handle.clone(), group_turn, session, group_id, topic_id, connection);
-            if reply_policy.is_some() { return scope.wait().await; }
+            let scope = submit_group_session_input(
+                &app_handle,
+                reservation,
+                &user_message,
+                reply_policy.clone(),
+                voice_cancellation.unwrap_or_else(|| group_turn.child_token()),
+            )
+            .await?;
+            spawn_jev_session(
+                app_handle.clone(),
+                group_turn,
+                session,
+                group_id,
+                topic_id,
+                connection,
+            );
+            if reply_policy.is_some() {
+                return scope.wait().await;
+            }
             return Ok(json!({"status":"accepted"}));
         }
-        GroupChatMode::Sequential => determine_sequential_speakers(&active_member_configs, &group_config),
+        GroupChatMode::Sequential => {
+            determine_sequential_speakers(&active_member_configs, &group_config)
+        }
         GroupChatMode::NaturalRandom => {
             // 八条历史和当前用户消息，不加载 UI 渲染块或大体积提取文本。
             let recent_history_for_decision = message_service::load_chat_text_history_for_context(
-                &app_handle, &topic_key, Some(9), None, false,
-            ).await?;
-            determine_naturerandom_speakers(&active_member_configs, &recent_history_for_decision, &group_config, &user_message)
+                &app_handle,
+                &topic_key,
+                Some(9),
+                None,
+                false,
+            )
+            .await?;
+            determine_naturerandom_speakers(
+                &active_member_configs,
+                &recent_history_for_decision,
+                &group_config,
+                &user_message,
+            )
         }
         GroupChatMode::InviteOnly => {
             return Ok(json!({"status":"no_ai_response", "reason":"invite_only"}));
@@ -498,7 +555,15 @@ pub(crate) async fn process_prepared_group_chat_message(
     .await?;
 
     // 5. 串行异步调度 (约束：群聊内部必须串行)
-    let static_scope = voice_cancellation.map(|cancellation| GroupReplyScope::new(user_message.id.clone(), cancellation, reply_policy.clone(), || {}, || {}));
+    let static_scope = voice_cancellation.map(|cancellation| {
+        GroupReplyScope::new(
+            user_message.id.clone(),
+            cancellation,
+            reply_policy.clone(),
+            || {},
+            || {},
+        )
+    });
     let turn_params = GroupSpeakerTurnParams {
         app_handle: &app_handle,
         db_pool: &db_state.pool,
@@ -555,17 +620,29 @@ async fn load_group_member_history_stats(
     .fetch_all(pool)
     .await
     .map_err(|error| error.to_string())?;
-    Ok(rows.into_iter().map(|(id, speech_count, last_speech_distance)| {
-        (id, GroupMemberHistoryStats { speech_count, last_speech_distance })
-    }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(id, speech_count, last_speech_distance)| {
+            (
+                id,
+                GroupMemberHistoryStats {
+                    speech_count,
+                    last_speech_distance,
+                },
+            )
+        })
+        .collect())
 }
 
 fn extract_group_mentions(content: &str, members: &[(String, String)]) -> Vec<String> {
     let mut names = std::collections::BTreeSet::new();
-    let mut candidates = members.iter().filter_map(|(id, name)| {
-        let name = name.trim().to_lowercase();
-        (!name.is_empty() && names.insert(name.clone())).then_some((name, id.as_str()))
-    }).collect::<Vec<_>>();
+    let mut candidates = members
+        .iter()
+        .filter_map(|(id, name)| {
+            let name = name.trim().to_lowercase();
+            (!name.is_empty() && names.insert(name.clone())).then_some((name, id.as_str()))
+        })
+        .collect::<Vec<_>>();
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -578,7 +655,10 @@ fn extract_group_mentions(content: &str, members: &[(String, String)]) -> Vec<St
     let mut mentions = Vec::new();
     while let Some(relative) = text[offset..].find('@') {
         let start = offset + relative + 1;
-        if let Some((name, id)) = candidates.iter().find(|(name, _)| text[start..].starts_with(name)) {
+        if let Some((name, id)) = candidates
+            .iter()
+            .find(|(name, _)| text[start..].starts_with(name))
+        {
             if seen.insert(*id) {
                 mentions.push((*id).to_owned());
             }
@@ -829,18 +909,24 @@ async fn run_jev_session(
         let history_stats = load_group_member_history_stats(&db.pool, &key).await?;
         let settings = read_config(app.clone(), app.state::<SettingsState>()).await?;
         let mut request = build_jev_request(&members, &config, &runtime, &history_stats)?;
-        let history_budget = crate::vcp_modules::group::jev_client::history_byte_budget(
-            &settings.jev, &request,
-        ).map_err(|error| error.to_string())?;
+        let history_budget =
+            crate::vcp_modules::group::jev_client::history_byte_budget(&settings.jev, &request)
+                .map_err(|error| error.to_string())?;
         let history = message_service::load_chat_plain_text_history_for_context(
             &db.pool,
             &key,
             config.local_settings.mode_settings.jev.history_window as usize,
             history_budget,
-        ).await?;
+        )
+        .await?;
         let preparation_cancellation = runtime.cancellation.clone();
         let preparation = tokio::task::spawn_blocking(move || {
-            append_jev_history(&mut request, history, history_budget, &preparation_cancellation)?;
+            append_jev_history(
+                &mut request,
+                history,
+                history_budget,
+                &preparation_cancellation,
+            )?;
             Ok::<_, String>(request)
         });
         let prepared = tokio::select! {
@@ -856,8 +942,10 @@ async fn run_jev_session(
             session.decision_finished();
             continue;
         };
-        let request = Arc::new(prepared.map_err(|error| format!("Jev 上下文装配任务失败：{error}"))??);
-        let cancellation = ScopeCancellation::new(runtime.cancellation.clone(), runtime.scope.as_ref());
+        let request =
+            Arc::new(prepared.map_err(|error| format!("Jev 上下文装配任务失败：{error}"))??);
+        let cancellation =
+            ScopeCancellation::new(runtime.cancellation.clone(), runtime.scope.as_ref());
         let response = crate::vcp_modules::group::jev_client::decide(
             &settings.jev,
             request.clone(),
@@ -1012,9 +1100,14 @@ mod group_turn_tests {
             ("alpha".into(), "Alpha".into()),
             ("alpha-beta".into(), "AlphaBeta".into()),
         ];
-        assert_eq!(extract_group_mentions("@小明2，请回应 @ALPHABETA；再请 @小明。@小明2", &members),
-            ["long", "alpha-beta", "short"]);
-        assert_eq!(extract_group_mentions("@AlphaBeta @Alpha", &members), ["alpha-beta", "alpha"]);
+        assert_eq!(
+            extract_group_mentions("@小明2，请回应 @ALPHABETA；再请 @小明。@小明2", &members),
+            ["long", "alpha-beta", "short"]
+        );
+        assert_eq!(
+            extract_group_mentions("@AlphaBeta @Alpha", &members),
+            ["alpha-beta", "alpha"]
+        );
     }
 
     #[test]
@@ -1025,16 +1118,27 @@ mod group_turn_tests {
             ("blank".into(), "  ".into()),
             ("unicode".into(), "小助手🤖".into()),
         ];
-        assert_eq!(extract_group_mentions("＠Nova @unknown @小助手🤖 @nova @NOVA", &members),
-            ["unicode", "first"]);
+        assert_eq!(
+            extract_group_mentions("＠Nova @unknown @小助手🤖 @nova @NOVA", &members),
+            ["unicode", "first"]
+        );
         assert!(extract_group_mentions("普通正文 @", &members).is_empty());
     }
 
     #[test]
     fn blank_jev_navigator_uses_default_in_request_without_overwriting_saved_value() {
-        let members = vec![AgentConfig { id: "a".into(), name: "A".into(), ..Default::default() }];
+        let members = vec![AgentConfig {
+            id: "a".into(),
+            name: "A".into(),
+            ..Default::default()
+        }];
         let mut group = GroupConfig::default();
-        let session = GroupSession::new("navigator".into(), CancellationToken::new(), "user_message", false);
+        let session = GroupSession::new(
+            "navigator".into(),
+            CancellationToken::new(),
+            "user_message",
+            false,
+        );
         let runtime = session.decision_context(0).unwrap().unwrap();
         for saved in ["", " \t\n", "  Custom routing instructions  "] {
             group.local_settings.mode_settings.jev.navigator_prompt = saved.into();
@@ -1043,9 +1147,17 @@ mod group_turn_tests {
             let body = serde_json::to_value(request).unwrap();
             let expected = if saved.trim().is_empty() {
                 crate::vcp_modules::group_types::JevModeSettings::default().navigator_prompt
-            } else { saved.to_owned() };
-            assert_eq!(body["questions"]["speaker_routing"]["instructions"], expected);
-            assert_eq!(group.local_settings.mode_settings.jev.navigator_prompt, saved);
+            } else {
+                saved.to_owned()
+            };
+            assert_eq!(
+                body["questions"]["speaker_routing"]["instructions"],
+                expected
+            );
+            assert_eq!(
+                group.local_settings.mode_settings.jev.navigator_prompt,
+                saved
+            );
         }
     }
 
@@ -1085,12 +1197,10 @@ mod group_turn_tests {
         }
         sqlx::query("INSERT INTO active_generations (owner_type,owner_id,topic_id,msg_id,created_at) VALUES ('group','group','topic','active',1)")
             .execute(&pool).await.unwrap();
-        let stats = load_group_member_history_stats(
-            &pool,
-            &TopicKey::new("group", "group", "topic"),
-        )
-        .await
-        .unwrap();
+        let stats =
+            load_group_member_history_stats(&pool, &TopicKey::new("group", "group", "topic"))
+                .await
+                .unwrap();
         assert_eq!(stats["a"].speech_count, 2);
         assert_eq!(stats["a"].last_speech_distance, 3);
         assert_eq!(stats["b"].speech_count, 1);
@@ -1098,8 +1208,14 @@ mod group_turn_tests {
         let group: GroupConfig = serde_json::from_value(json!({"id":"group"})).unwrap();
         let members: Vec<AgentConfig> = serde_json::from_value(json!([
             {"id":"a","name":"A"}, {"id":"never","name":"Never"}
-        ])).unwrap();
-        let session = GroupSession::new("stats".into(), CancellationToken::new(), "user_message", false);
+        ]))
+        .unwrap();
+        let session = GroupSession::new(
+            "stats".into(),
+            CancellationToken::new(),
+            "user_message",
+            false,
+        );
         let runtime = session.decision_context(0).unwrap().unwrap();
         // Even an empty/restricted text window must not erase full-history facts.
         let request = build_jev_request(&members, &group, &runtime, &stats).unwrap();
@@ -1112,11 +1228,20 @@ mod group_turn_tests {
     #[tokio::test]
     async fn jev_http_decision_selects_real_speaker_and_durably_commits_reply() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1).connect("sqlite::memory:").await.unwrap();
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
-            .execute(&pool).await.unwrap();
-        sqlx::raw_sql(include_str!("../../../migrations/0102_stream_stop_intent.sql"))
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0102_stream_stop_intent.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::raw_sql(
             "INSERT INTO agents (owner_type,agent_id,name,model,updated_at) VALUES ('agent','member','Member','test',1);
              INSERT INTO groups (owner_type,group_id,name,mode,updated_at) VALUES ('group','group','Group','sequential',1);
@@ -1133,19 +1258,26 @@ mod group_turn_tests {
                     let count = socket.read(&mut buffer).await.unwrap();
                     assert_ne!(count, 0);
                     bytes.extend_from_slice(&buffer[..count]);
-                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") { break end + 4; }
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break end + 4;
+                    }
                 };
                 let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
-                let length: usize = headers.lines().find_map(|line| {
-                    let (key, value) = line.split_once(':')?;
-                    key.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().unwrap())
-                }).unwrap();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().unwrap())
+                    })
+                    .unwrap();
                 while bytes.len() < header_end + length {
                     let count = socket.read(&mut buffer).await.unwrap();
                     assert_ne!(count, 0);
                     bytes.extend_from_slice(&buffer[..count]);
                 }
-                let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
                 let response = if stage == 0 {
                     assert!(headers.starts_with("POST /decision "));
                     assert_eq!(body["questions"]["speaker_routing"]["type"], "choice");
@@ -1158,18 +1290,36 @@ mod group_turn_tests {
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).as_bytes()).await.unwrap();
             }
         });
-        let group: GroupConfig = serde_json::from_value(json!({"id":"group","members":["member"],"chatMode":"jev"})).unwrap();
-        let members: Vec<AgentConfig> = serde_json::from_value(json!([{"id":"member","name":"Member","model":"test","streamOutput":false}])).unwrap();
-        let session = GroupSession::new("fixture".into(), CancellationToken::new(), "user_message", false);
+        let group: GroupConfig =
+            serde_json::from_value(json!({"id":"group","members":["member"],"chatMode":"jev"}))
+                .unwrap();
+        let members: Vec<AgentConfig> = serde_json::from_value(
+            json!([{"id":"member","name":"Member","model":"test","streamOutput":false}]),
+        )
+        .unwrap();
+        let session = GroupSession::new(
+            "fixture".into(),
+            CancellationToken::new(),
+            "user_message",
+            false,
+        );
         let runtime = session.decision_context(0).unwrap().unwrap();
-        let request = Arc::new(build_jev_request(&members, &group, &runtime, &BTreeMap::new()).unwrap());
+        let request =
+            Arc::new(build_jev_request(&members, &group, &runtime, &BTreeMap::new()).unwrap());
         let mut config = crate::vcp_modules::infra::settings_manager::types::JevConfig::default();
         config.enabled = true;
         config.typesafe.api_url = format!("{endpoint}/decision");
         config.typesafe.api_key = "fixture-key".into();
         config.max_retries = 0;
-        let response = crate::vcp_modules::group::jev_client::decide(&config, request.clone(), CancellationToken::new()).await.unwrap();
-        let (ids, reason) = parse_jev_decision(&response, &request, &members, &group, false).unwrap();
+        let response = crate::vcp_modules::group::jev_client::decide(
+            &config,
+            request.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let (ids, reason) =
+            parse_jev_decision(&response, &request, &members, &group, false).unwrap();
         assert_eq!(ids, ["member"]);
         assert!(reason.is_none());
         let app = tauri::test::mock_app();
@@ -1177,18 +1327,41 @@ mod group_turn_tests {
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
         let turns = app.state::<ActiveGroupTurns>();
-        let turn = turns.try_acquire(TopicKey::new("group", "group", "topic")).unwrap();
-        let connection = ChatConnectionSnapshot { endpoint_url: format!("{endpoint}/chat"), api_key: String::new() };
+        let turn = turns
+            .try_acquire(TopicKey::new("group", "group", "topic"))
+            .unwrap();
+        let connection = ChatConnectionSnapshot {
+            endpoint_url: format!("{endpoint}/chat"),
+            api_key: String::new(),
+        };
         let requests = app.state::<ActiveRequests>();
         let params = GroupSpeakerTurnParams {
-            app_handle: app.handle(), db_pool: &pool, active_requests: &requests, group_turn: &turn,
-            group_config: &group, active_member_configs: &members, group_id: "group", topic_id: "topic",
-            connection: &connection, stream_channel: &None, reply_policy: None, reply_scope: None,
+            app_handle: app.handle(),
+            db_pool: &pool,
+            active_requests: &requests,
+            group_turn: &turn,
+            group_config: &group,
+            active_member_configs: &members,
+            group_id: "group",
+            topic_id: "topic",
+            connection: &connection,
+            stream_channel: &None,
+            reply_policy: None,
+            reply_scope: None,
         };
         let mut history = Vec::new();
         let speaker = members.iter().find(|member| member.id == ids[0]).unwrap();
-        assert_eq!(run_group_speaker_turn(&params, speaker, &mut history).await.unwrap(), GroupSpeakerOutcome::Settled);
-        let saved: (String, String) = sqlx::query_as("SELECT agent_id, content FROM messages WHERE role='assistant'").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            run_group_speaker_turn(&params, speaker, &mut history)
+                .await
+                .unwrap(),
+            GroupSpeakerOutcome::Settled
+        );
+        let saved: (String, String) =
+            sqlx::query_as("SELECT agent_id, content FROM messages WHERE role='assistant'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(saved, ("member".into(), "selected member reply".into()));
         assert_eq!(history.len(), 1);
         server.await.unwrap();
@@ -1423,9 +1596,19 @@ pub async fn invite_group_member_to_speak(
         payload.agent_ids
     );
     let topic_key = TopicKey::new("group", &payload.group_id, &payload.topic_id);
-    let group_config = read_group_config(app_handle.clone(), group_state.clone(), payload.group_id.clone()).await?;
+    let group_config = read_group_config(
+        app_handle.clone(),
+        group_state.clone(),
+        payload.group_id.clone(),
+    )
+    .await?;
     if group_config.effective_mode() == GroupChatMode::Jev {
-        if payload.agent_ids.is_empty() || payload.agent_ids.iter().any(|id| !group_config.members.contains(id)) {
+        if payload.agent_ids.is_empty()
+            || payload
+                .agent_ids
+                .iter()
+                .any(|id| !group_config.members.contains(id))
+        {
             return Err("请选择当前群组中的成员".into());
         }
         if let Some(session) = active_group_turns.session(&topic_key) {
@@ -1439,7 +1622,14 @@ pub async fn invite_group_member_to_speak(
         turn.bind_output(&app_handle, stream_channel)?;
         let settings = read_config(app_handle.clone(), settings_state).await?;
         let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
-        spawn_jev_session(app_handle, turn, session, payload.group_id, payload.topic_id, connection);
+        spawn_jev_session(
+            app_handle,
+            turn,
+            session,
+            payload.group_id,
+            payload.topic_id,
+            connection,
+        );
         return Ok(json!({"status":"accepted"}));
     }
     let group_turn = active_group_turns.try_acquire(topic_key.clone())?;

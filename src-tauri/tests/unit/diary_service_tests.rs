@@ -152,12 +152,19 @@ async fn admin_requests_preserve_proxy_prefix_and_send_basic_auth() {
     let folders_route = get(move |uri: Uri, headers: HeaderMap| {
         let paths = paths_for_route.clone();
         async move {
-            paths.lock().expect("capture path").push(uri.path().to_string());
+            paths
+                .lock()
+                .expect("capture path")
+                .push(uri.path().to_string());
             let authorized = headers
                 .get(reqwest::header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 == Some("Basic dXNlcjpwYXNz")
-                && headers.get_all(reqwest::header::AUTHORIZATION).iter().count() == 1
+                && headers
+                    .get_all(reqwest::header::AUTHORIZATION)
+                    .iter()
+                    .count()
+                    == 1
                 && uri.query().is_none();
             if authorized {
                 (
@@ -183,8 +190,10 @@ async fn admin_requests_preserve_proxy_prefix_and_send_basic_auth() {
             .await
             .unwrap_or_else(|error| panic!("{}: {error}", settings.server.url));
         assert_eq!(folders.folders, vec!["Nova 的知识", "项目簇"]);
-        assert_eq!(captured_paths.lock().expect("captured paths").pop(),
-            Some(format!("{expected_prefix}/admin_api/dailynotes/folders")));
+        assert_eq!(
+            captured_paths.lock().expect("captured paths").pop(),
+            Some(format!("{expected_prefix}/admin_api/dailynotes/folders"))
+        );
     }
     server.abort();
 }
@@ -205,7 +214,11 @@ async fn human_tool_uses_bearer_and_official_escape_fields() {
                 .get(reqwest::header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 == Some("Bearer test-bearer")
-                && headers.get_all(reqwest::header::AUTHORIZATION).iter().count() == 1
+                && headers
+                    .get_all(reqwest::header::AUTHORIZATION)
+                    .iter()
+                    .count()
+                    == 1
                 && uri.query().is_none();
             if authorized {
                 (
@@ -245,8 +258,10 @@ async fn human_tool_uses_bearer_and_official_escape_fields() {
             .unwrap_or_else(|error| panic!("{}: {error}", settings.server.url));
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].key.file, "a.txt");
-        assert_eq!(*captured_path.lock().expect("captured path"),
-            format!("{expected_prefix}/v1/human/tool"));
+        assert_eq!(
+            *captured_path.lock().expect("captured path"),
+            format!("{expected_prefix}/v1/human/tool")
+        );
         let request_body = captured_body.lock().expect("captured body");
         assert!(request_body.starts_with(TOOL_REQUEST_START));
         assert!(request_body.contains("tool_name:「始ESCAPE」LightMemo「末ESCAPE」"));
@@ -271,10 +286,15 @@ async fn unknown_raw_service_address_is_rejected_before_any_http_request() {
     let mut settings = test_settings(&base);
     settings.server.url = format!("{base}/custom-chat-endpoint");
     settings.server.endpoint_mode = crate::vcp_modules::settings_manager::ChatEndpointMode::Raw;
-    let admin_error = service.list_folders(&settings).await.expect_err("opaque Raw endpoint");
+    let admin_error = service
+        .list_folders(&settings)
+        .await
+        .expect_err("opaque Raw endpoint");
     assert_eq!(admin_error.code, DiaryErrorCode::InvalidRequest);
-    let tool_error = service.request_human_tool(&settings, "test body".into(), None)
-        .await.expect_err("opaque Raw endpoint");
+    let tool_error = service
+        .request_human_tool(&settings, "test body".into(), None)
+        .await
+        .expect_err("opaque Raw endpoint");
     assert_eq!(tool_error.code, DiaryErrorCode::InvalidRequest);
     assert_eq!(requests.load(AtomicOrdering::SeqCst), 0);
     server.abort();
@@ -285,8 +305,14 @@ fn shared_endpoint_errors_keep_diary_error_categories() {
     for (address, code) in [
         ("", DiaryErrorCode::ConfigMissing),
         ("example.invalid", DiaryErrorCode::InvalidRequest),
-        ("https://example.invalid/v1#section", DiaryErrorCode::InvalidRequest),
-        ("https://example.invalid/v1\n", DiaryErrorCode::InvalidRequest),
+        (
+            "https://example.invalid/v1#section",
+            DiaryErrorCode::InvalidRequest,
+        ),
+        (
+            "https://example.invalid/v1\n",
+            DiaryErrorCode::InvalidRequest,
+        ),
     ] {
         let mut settings = test_settings("https://example.invalid");
         settings.server.url = address.into();

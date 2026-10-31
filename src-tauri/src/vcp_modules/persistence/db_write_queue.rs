@@ -680,8 +680,13 @@ mod tests {
         let tx = conn.transaction().expect("begin message transaction");
         match tasks.pop().expect("coalesced task") {
             DbWriteTask::TopicMessages { key, writes } => {
-                DbWriteQueue::rusqlite_upsert_messages_batch(&tx, &key, writes, std::path::Path::new("attachments"))
-                    .expect("write coalesced messages");
+                DbWriteQueue::rusqlite_upsert_messages_batch(
+                    &tx,
+                    &key,
+                    writes,
+                    std::path::Path::new("attachments"),
+                )
+                .expect("write coalesced messages");
             }
             task => panic!("unexpected coalesced task: {task:?}"),
         }
@@ -706,19 +711,42 @@ mod tests {
     #[test]
     fn sync_message_batch_rejects_overflow_before_writing_any_rows() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql")).unwrap();
+        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .unwrap();
         conn.execute_batch("INSERT INTO agents(owner_type,agent_id,name,model,updated_at) VALUES ('agent','owner','Owner','',1); INSERT INTO topics(owner_type,owner_id,topic_id,title,created_at,updated_at) VALUES ('agent','owner','topic','Topic',1,1);").unwrap();
         for bad_timestamp in [false, true] {
-            let DbWriteTask::TopicMessages { key, mut writes } = rich_message_task("topic", 0, 2) else { unreachable!() };
-            if bad_timestamp { writes[1].message.timestamp = u64::MAX; }
-            else { writes[1].message.attachments.as_mut().unwrap()[0].size = u64::MAX; }
+            let DbWriteTask::TopicMessages { key, mut writes } = rich_message_task("topic", 0, 2)
+            else {
+                unreachable!()
+            };
+            if bad_timestamp {
+                writes[1].message.timestamp = u64::MAX;
+            } else {
+                writes[1].message.attachments.as_mut().unwrap()[0].size = u64::MAX;
+            }
             let tx = conn.transaction().unwrap();
-            let error = DbWriteQueue::rusqlite_upsert_messages_batch(&tx, &key, writes, std::path::Path::new("attachments")).unwrap_err();
+            let error = DbWriteQueue::rusqlite_upsert_messages_batch(
+                &tx,
+                &key,
+                writes,
+                std::path::Path::new("attachments"),
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("SQLite integer range"));
             // All metadata is checked before the batch can mutate any side table.
             tx.commit().unwrap();
-            for table in ["messages", "attachments", "message_attachments", "render_cache", "messages_fts"] {
-                let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+            for table in [
+                "messages",
+                "attachments",
+                "message_attachments",
+                "render_cache",
+                "messages_fts",
+            ] {
+                let count: i64 = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
                 assert_eq!(count, 0, "{table}");
             }
         }
@@ -859,9 +887,13 @@ mod tests {
     #[test]
     fn sync_agent_upsert_preserves_device_voice_and_excludes_it_from_the_dto() {
         let mut connection = rusqlite::Connection::open_in_memory().expect("database");
-        connection.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+        connection
+            .execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
             .expect("shared schema");
-        connection.execute_batch(include_str!("../../../migrations/0105_agent_voice_config.sql"))
+        connection
+            .execute_batch(include_str!(
+                "../../../migrations/0105_agent_voice_config.sql"
+            ))
             .expect("local voice schema");
         let mut agent = crate::vcp_modules::agent_service::create_default_config("a");
         agent.voice.enabled = true;
@@ -874,14 +906,20 @@ mod tests {
         agent.name = "remote name".into();
         agent.model = "remote model".into();
         let dto = AgentSyncDTO::from(&agent);
-        assert!(serde_json::to_value(&dto).expect("DTO").get("voice").is_none());
+        assert!(serde_json::to_value(&dto)
+            .expect("DTO")
+            .get("voice")
+            .is_none());
         let tx = connection.transaction().expect("transaction");
         DbWriteQueue::rusqlite_upsert_agent(&tx, "a", &dto).expect("production sync writer");
         tx.commit().expect("commit");
-        let (stored, name): (String, String) = connection.query_row(
-            "SELECT voice_config,name FROM agents WHERE agent_id='a'", [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).expect("read");
+        let (stored, name): (String, String) = connection
+            .query_row(
+                "SELECT voice_config,name FROM agents WHERE agent_id='a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read");
         assert_eq!(stored, voice);
         assert_eq!(name, "remote name");
     }
@@ -1966,13 +2004,19 @@ impl DbWriteQueue {
         }
 
         for write in &writes {
-            i64::try_from(write.message.timestamp).map_err(|_| Self::sync_contract_error(format!(
-                "Message {}/{} timestamp exceeds the SQLite integer range", key.topic_id, write.message.id,
-            )))?;
+            i64::try_from(write.message.timestamp).map_err(|_| {
+                Self::sync_contract_error(format!(
+                    "Message {}/{} timestamp exceeds the SQLite integer range",
+                    key.topic_id, write.message.id,
+                ))
+            })?;
             for attachment in write.message.attachments.iter().flatten() {
-                i64::try_from(attachment.size).map_err(|_| Self::sync_contract_error(format!(
-                    "Attachment on message {}/{} exceeds the SQLite integer range", key.topic_id, write.message.id,
-                )))?;
+                i64::try_from(attachment.size).map_err(|_| {
+                    Self::sync_contract_error(format!(
+                        "Attachment on message {}/{} exceeds the SQLite integer range",
+                        key.topic_id, write.message.id,
+                    ))
+                })?;
             }
             let updated_at = write.message.updated_at.unwrap_or(write.message.timestamp);
             if updated_at > (1_u64 << 53) - 1 {
@@ -2293,30 +2337,42 @@ impl DbWriteQueue {
                             [&hash],
                             |row| Ok((row.get(0)?, row.get(1)?)),
                         )?;
-                        let size = u64::try_from(size).map_err(|_| Self::sync_contract_error("Attachment size is invalid"))?;
-                        let (current_path, verified_path) = match crate::vcp_modules::file_manager::current_attachment_path(
-                            attachments_root, &hash, &stored_path,
-                        ) {
-                            Ok(path) => {
-                                let current_path = path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
-                                let verified = crate::vcp_modules::file_manager::resolve_existing_attachment_path(
+                        let size = u64::try_from(size)
+                            .map_err(|_| Self::sync_contract_error("Attachment size is invalid"))?;
+                        let (current_path, verified_path) =
+                            match crate::vcp_modules::file_manager::current_attachment_path(
+                                attachments_root,
+                                &hash,
+                                &stored_path,
+                            ) {
+                                Ok(path) => {
+                                    let current_path = path
+                                        .map(|path| path.to_string_lossy().into_owned())
+                                        .unwrap_or_default();
+                                    let verified = crate::vcp_modules::file_manager::resolve_existing_attachment_path(
                                     attachments_root, &hash, &stored_path, size,
                                 ).unwrap_or_else(|error| {
                                     log::warn!("[DbWriteQueue] Local attachment {hash} remains unavailable: {error}");
                                     None
                                 });
-                                (current_path, verified)
-                            }
-                            Err(error) => {
-                                log::warn!("[DbWriteQueue] Keeping unresolved local attachment identity {hash}: {error}");
-                                (stored_path.clone(), None)
-                            }
-                        };
+                                    (current_path, verified)
+                                }
+                                Err(error) => {
+                                    log::warn!("[DbWriteQueue] Keeping unresolved local attachment identity {hash}: {error}");
+                                    (stored_path.clone(), None)
+                                }
+                            };
                         if current_path != stored_path {
-                            tx.execute("UPDATE attachments SET internal_path = ? WHERE hash = ?", [&current_path, &hash])?;
+                            tx.execute(
+                                "UPDATE attachments SET internal_path = ? WHERE hash = ?",
+                                [&current_path, &hash],
+                            )?;
                         }
                         let readiness = match verified_path {
-                            Some(path) => (format!("file://{}", path.to_string_lossy()), "ready".to_string()),
+                            Some(path) => (
+                                format!("file://{}", path.to_string_lossy()),
+                                "ready".to_string(),
+                            ),
                             None => (String::new(), "desktop_only".to_string()),
                         };
                         readiness_by_hash.insert(hash.clone(), readiness.clone());
@@ -2480,8 +2536,9 @@ impl DbWriteQueue {
         att: &crate::vcp_modules::chat_manager::Attachment,
         timestamp: i64,
     ) -> rusqlite::Result<()> {
-        let size = i64::try_from(att.size)
-            .map_err(|_| Self::sync_contract_error("Attachment size exceeds the SQLite integer range"))?;
+        let size = i64::try_from(att.size).map_err(|_| {
+            Self::sync_contract_error("Attachment size exceeds the SQLite integer range")
+        })?;
         let image_frames = att
             .image_frames
             .as_ref()

@@ -10,11 +10,11 @@ use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::group_chat_application_service::{
     process_prepared_group_chat_message, GroupChatParams,
 };
 use crate::vcp_modules::group_service::GroupManagerState;
+use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::message_service::{self, MessageWriteResultDto};
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::TopicKey;
@@ -60,9 +60,9 @@ pub(crate) async fn prepare_voice_submission(
         ..Default::default()
     };
     let owner = if target.owner_type == "group" {
-        let turn = acquire_voice_group_turn(
-            &app.state::<ActiveGroupTurns>(), &target, &cancellation,
-        ).await?;
+        let turn =
+            acquire_voice_group_turn(&app.state::<ActiveGroupTurns>(), &target, &cancellation)
+                .await?;
         turn.set_origin_user_message(&message.id)?;
         turn.bind_optional_output(app, None)?;
         PreparedChatOwner::Group(turn)
@@ -127,7 +127,12 @@ impl PreparedVoiceSubmission {
         on_persisted: impl FnOnce(ChatMessage, MessageWriteResultDto),
     ) -> Result<Value, String> {
         let Self {
-            app, target, mut message, cancellation, owner, reply_policy,
+            app,
+            target,
+            mut message,
+            cancellation,
+            owner,
+            reply_policy,
         } = self;
         if cancellation.is_cancelled() {
             return Ok(json!({ "status": "cancelled" }));
@@ -233,7 +238,10 @@ mod tests {
         };
         drop(admission);
         cancellation.cancel();
-        assert!(!next.is_cancelled(), "the group and voice origin have separate lifetimes");
+        assert!(
+            !next.is_cancelled(),
+            "the group and voice origin have separate lifetimes"
+        );
         assert!(turns.try_acquire(target.clone()).is_err());
         drop(next);
         assert!(turns.try_acquire(target).is_ok());
@@ -252,7 +260,10 @@ mod tests {
         assert!(futures_util::poll!(&mut admission).is_pending());
         assert!(!competing.is_cancelled());
         drop(competing);
-        assert!(matches!(futures_util::poll!(&mut admission), std::task::Poll::Ready(Ok(_))));
+        assert!(matches!(
+            futures_util::poll!(&mut admission),
+            std::task::Poll::Ready(Ok(_))
+        ));
     }
 
     #[tokio::test(start_paused = true)]
@@ -295,7 +306,9 @@ mod tests {
         let old = turns.try_acquire(target.clone()).unwrap();
         let cancellation = CancellationToken::new();
         cancellation.cancel();
-        assert!(acquire_voice_group_turn(&turns, &target, &cancellation).await.is_err());
+        assert!(acquire_voice_group_turn(&turns, &target, &cancellation)
+            .await
+            .is_err());
         assert!(!old.is_cancelled());
     }
 
@@ -338,7 +351,10 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let may_generate = persist_voice_message(
-            app.handle(), &target, &mut message, &cancellation,
+            app.handle(),
+            &target,
+            &mut message,
+            &cancellation,
             |_, _| panic!("cancelled admission must not report a commit"),
         )
         .await
@@ -359,7 +375,10 @@ mod tests {
         let cancellation = CancellationToken::new();
         let mut committed = None;
         let mut append = Box::pin(persist_voice_message(
-            app.handle(), &target, &mut message, &cancellation,
+            app.handle(),
+            &target,
+            &mut message,
+            &cancellation,
             |message, result| committed = Some((message, result)),
         ));
         // Enter the real append operation while its writer is occupied. Once
@@ -369,13 +388,15 @@ mod tests {
         blocker.commit().await.unwrap();
         assert!(!append.await.unwrap());
         let (reported, result) = committed.expect("commit callback is not cancelled");
-        let row: (String, String, i64) = sqlx::query_as(
-            "SELECT msg_id, content, timestamp FROM messages WHERE role = 'user'",
-        )
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-        assert_eq!(row, (reported.id, reported.content, reported.timestamp as i64));
+        let row: (String, String, i64) =
+            sqlx::query_as("SELECT msg_id, content, timestamp FROM messages WHERE role = 'user'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (reported.id, reported.content, reported.timestamp as i64)
+        );
         assert_eq!(reported.blocks, Some(json!(&result.blocks)));
         let mut connection = db.pool.acquire().await.unwrap();
         let activity = crate::vcp_modules::sync_hash::HashAggregator::load_topic_activity(
@@ -393,7 +414,10 @@ mod tests {
         let (app, target, mut message) = fixture().await;
         let cancellation = CancellationToken::new();
         let may_generate = persist_voice_message(
-            app.handle(), &target, &mut message, &cancellation,
+            app.handle(),
+            &target,
+            &mut message,
+            &cancellation,
             |_, _| cancellation.cancel(),
         )
         .await

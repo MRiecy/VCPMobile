@@ -1099,11 +1099,15 @@ mod tests {
         for invalid in ["none", "", "unknown-preset"] {
             config.voice = invalid.into();
             assert!(prepare_synthesis(&config, "正文", None, None)
-                .err().expect("invalid builtin").contains("音色配置无效"));
+                .err()
+                .expect("invalid builtin")
+                .contains("音色配置无效"));
         }
         config.tts_mode = VoiceTtsMode::Clone;
         assert!(prepare_synthesis(&config, "正文", None, None)
-            .err().expect("unselected clone").contains("未选择朗读音色"));
+            .err()
+            .expect("unselected clone")
+            .contains("未选择朗读音色"));
     }
 
     #[test]
@@ -1122,18 +1126,12 @@ mod tests {
             "https://voice.example/v1/chat/completions"
         );
         assert_eq!(request.identity.text, text);
-        assert_eq!(
-            body["messages"][1]["content"],
-            request.identity.text
-        );
+        assert_eq!(body["messages"][1]["content"], request.identity.text);
         assert_eq!(
             body["messages"][0]["content"],
             request.identity.guidance.as_deref().unwrap()
         );
-        assert_eq!(
-            body["model"],
-            request.identity.model.as_deref().unwrap()
-        );
+        assert_eq!(body["model"], request.identity.model.as_deref().unwrap());
         assert_eq!(
             body["audio"]["voice"],
             request.identity.voice.as_deref().unwrap()

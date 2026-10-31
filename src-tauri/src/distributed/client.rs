@@ -488,13 +488,13 @@ impl DistributedClient {
             .and_then(|endpoint| {
                 endpoint
                     .map(|endpoint| {
-                        stable_remote_identity(&endpoint.base, &device_name).map(|remote_identity| {
-                            ConnectionConfig {
+                        stable_remote_identity(&endpoint.base, &device_name).map(
+                            |remote_identity| ConnectionConfig {
                                 url: endpoint.url,
                                 device_name,
                                 remote_identity,
-                            }
-                        })
+                            },
+                        )
                     })
                     .transpose()
             });
@@ -1460,7 +1460,8 @@ mod tests {
             1,
             "old-server".to_string(),
             "old-client".to_string(),
-        ).unwrap());
+        )
+        .unwrap());
         assert_eq!(status.state, ConnectionState::Disconnecting);
         assert!(!status.connected);
         assert_eq!(status.session_id, 2);
@@ -1475,8 +1476,12 @@ mod tests {
         };
         for (server_id, client_id) in [("", "client"), ("server", ""), ("", "")] {
             assert!(DistributedClient::commit_connection_ack(
-                &mut status, 3, server_id.to_string(), client_id.to_string(),
-            ).is_err());
+                &mut status,
+                3,
+                server_id.to_string(),
+                client_id.to_string(),
+            )
+            .is_err());
             assert_eq!(status.state, ConnectionState::Connecting);
             assert!(!status.connected);
             assert_eq!(status.server_id, None);
@@ -1484,8 +1489,12 @@ mod tests {
             assert_eq!(status.registered_tools, 0);
         }
         assert!(DistributedClient::commit_connection_ack(
-            &mut status, 3, "server".into(), "client".into(),
-        ).unwrap());
+            &mut status,
+            3,
+            "server".into(),
+            "client".into(),
+        )
+        .unwrap());
         assert_eq!(status.state, ConnectionState::Connected);
         assert!(status.connected);
         assert_eq!(status.server_id.as_deref(), Some("server"));

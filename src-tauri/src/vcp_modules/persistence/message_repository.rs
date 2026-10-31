@@ -36,13 +36,19 @@ pub(crate) async fn read_narration_author(
     .await
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "朗读消息已不存在".to_string())?;
-    if row.try_get::<String, _>("role").map_err(|error| error.to_string())? != "assistant" {
+    if row
+        .try_get::<String, _>("role")
+        .map_err(|error| error.to_string())?
+        != "assistant"
+    {
         return Ok(None);
     }
     if key.topic.owner_type == "agent" {
         return Ok(Some(key.topic.owner_id.clone()));
     }
-    let author = row.try_get::<Option<String>, _>("agent_id").map_err(|error| error.to_string())?
+    let author = row
+        .try_get::<Option<String>, _>("agent_id")
+        .map_err(|error| error.to_string())?
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "群聊消息缺少发言助手，无法确定朗读音色".to_string())?;
     Ok(Some(author))
@@ -54,8 +60,11 @@ mod narration_author_tests {
 
     #[tokio::test]
     async fn narration_uses_persisted_speaker_and_complete_message_identity() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect("sqlite::memory:").await.expect("database");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("database");
         sqlx::query(
             "CREATE TABLE messages (owner_type TEXT, owner_id TEXT, topic_id TEXT,
                 msg_id TEXT, role TEXT, agent_id TEXT, deleted_at INTEGER);
@@ -67,22 +76,52 @@ mod narration_author_tests {
                 ('group','room','topic','bad-role',x'ff',NULL,NULL),
                 ('group','room','topic','bad-author','assistant',x'ff',NULL),
                 ('group','room','topic','gone','assistant','speaker-b',1);",
-        ).execute(&pool).await.expect("seed messages");
+        )
+        .execute(&pool)
+        .await
+        .expect("seed messages");
         let group = TopicKey::new("group", "room", "topic");
-        assert_eq!(read_narration_author(&pool, &MessageKey::new(group.clone(), "same"))
-            .await.expect("group speaker"), Some("speaker-b".into()));
-        assert_eq!(read_narration_author(&pool, &MessageKey::new(TopicKey::new("agent", "solo", "topic"), "same"))
-            .await.expect("solo speaker"), Some("solo".into()));
-        assert_eq!(read_narration_author(&pool, &MessageKey::new(group.clone(), "user"))
-            .await.expect("user"), None);
-        assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), "unknown"))
-            .await.expect_err("missing speaker").contains("发言助手"));
+        assert_eq!(
+            read_narration_author(&pool, &MessageKey::new(group.clone(), "same"))
+                .await
+                .expect("group speaker"),
+            Some("speaker-b".into())
+        );
+        assert_eq!(
+            read_narration_author(
+                &pool,
+                &MessageKey::new(TopicKey::new("agent", "solo", "topic"), "same")
+            )
+            .await
+            .expect("solo speaker"),
+            Some("solo".into())
+        );
+        assert_eq!(
+            read_narration_author(&pool, &MessageKey::new(group.clone(), "user"))
+                .await
+                .expect("user"),
+            None
+        );
+        assert!(
+            read_narration_author(&pool, &MessageKey::new(group.clone(), "unknown"))
+                .await
+                .expect_err("missing speaker")
+                .contains("发言助手")
+        );
         for id in ["bad-role", "bad-author"] {
-            assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), id)).await.is_err());
+            assert!(
+                read_narration_author(&pool, &MessageKey::new(group.clone(), id))
+                    .await
+                    .is_err()
+            );
         }
         for id in ["gone", "missing"] {
-            assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), id))
-                .await.expect_err("missing message").contains("不存在"));
+            assert!(
+                read_narration_author(&pool, &MessageKey::new(group.clone(), id))
+                    .await
+                    .expect_err("missing message")
+                    .contains("不存在")
+            );
         }
     }
 }
@@ -240,7 +279,9 @@ impl MessageRenderCompiler {
             .map_err(|e| format!("zstd compress failed: {}", e))?;
         serde_json::to_writer(&mut encoder, blocks)
             .map_err(|e| format!("json serialize failed: {}", e))?;
-        encoder.finish().map_err(|e| format!("zstd compress failed: {}", e))
+        encoder
+            .finish()
+            .map_err(|e| format!("zstd compress failed: {}", e))
     }
 
     /// Deserializes compressed binary back to AST blocks (JSON + zstd)
@@ -470,7 +511,10 @@ mod render_compression_tests {
             let restored = MessageRenderCompiler::deserialize(frame).expect("cache compatibility");
             assert_eq!(serde_json::to_vec(&restored).unwrap(), expected_json);
         }
-        assert!(MessageRenderCompiler::deserialize(&streamed_frame[..streamed_frame.len() / 2]).is_err());
+        assert!(
+            MessageRenderCompiler::deserialize(&streamed_frame[..streamed_frame.len() / 2])
+                .is_err()
+        );
     }
 }
 
@@ -1127,16 +1171,35 @@ mod tombstone_tests {
     async fn overflowing_message_metadata_rolls_back_the_sqlx_write() {
         use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
         let pool = test_pool().await;
-        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql")).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO agents(owner_type,agent_id,name,model,updated_at) VALUES ('agent','owner','Owner','',1); INSERT INTO topics(owner_type,owner_id,topic_id,title,created_at,updated_at) VALUES ('agent','owner','topic','Topic',1,1)")
             .execute(&pool).await.unwrap();
         let key = TopicKey::new("agent", "owner", "topic");
         for bad_timestamp in [false, true] {
-            let valid = ChatMessage { id: "valid".into(), role: "user".into(), content: "keep".into(), timestamp: 1, updated_at: Some(1), ..Default::default() };
+            let valid = ChatMessage {
+                id: "valid".into(),
+                role: "user".into(),
+                content: "keep".into(),
+                timestamp: 1,
+                updated_at: Some(1),
+                ..Default::default()
+            };
             let invalid = ChatMessage {
-                id: "invalid".into(), role: "user".into(), content: "invalid".into(),
-                timestamp: if bad_timestamp { u64::MAX } else { 1 }, updated_at: Some(1),
-                attachments: (!bad_timestamp).then(|| vec![Attachment { size: u64::MAX, hash: Some("a".repeat(64)), ..Default::default() }]),
+                id: "invalid".into(),
+                role: "user".into(),
+                content: "invalid".into(),
+                timestamp: if bad_timestamp { u64::MAX } else { 1 },
+                updated_at: Some(1),
+                attachments: (!bad_timestamp).then(|| {
+                    vec![Attachment {
+                        size: u64::MAX,
+                        hash: Some("a".repeat(64)),
+                        ..Default::default()
+                    }]
+                }),
                 ..Default::default()
             };
             let result: Result<(), String> = async {
@@ -1144,11 +1207,22 @@ mod tombstone_tests {
                 MessageRepository::upsert_message(&mut tx, &valid, &key, &[], true).await?;
                 MessageRepository::upsert_message(&mut tx, &invalid, &key, &[], true).await?;
                 tx.commit().await.map_err(|error| error.to_string())
-            }.await;
+            }
+            .await;
             assert!(result.unwrap_err().contains("SQLite integer range"));
-            for table in ["messages", "attachments", "message_attachments", "render_cache", "messages_fts"] {
-                let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
-                    .fetch_one(&pool).await.unwrap();
+            for table in [
+                "messages",
+                "attachments",
+                "message_attachments",
+                "render_cache",
+                "messages_fts",
+            ] {
+                let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT COUNT(*) FROM {table}"
+                )))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
                 assert_eq!(count, 0, "{table}");
             }
         }

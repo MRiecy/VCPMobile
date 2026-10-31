@@ -94,7 +94,11 @@ mod permission_result_tests {
 
     #[test]
     fn malformed_native_permission_results_are_not_reported_as_denied_or_unsupported() {
-        for invalid in [json!({}), json!({"success":null}), json!({"success":"false"})] {
+        for invalid in [
+            json!({}),
+            json!({"success":null}),
+            json!({"success":"false"}),
+        ] {
             assert!(serde_json::from_value::<PermissionPageResult>(invalid).is_err());
         }
         for invalid in [json!({}), json!({"allowed":null}), json!({"allowed":0})] {
@@ -103,10 +107,23 @@ mod permission_result_tests {
         for invalid in [json!({}), json!({"status":null}), json!({"status":false})] {
             assert!(serde_json::from_value::<AutoStartPermissionResult>(invalid).is_err());
         }
-        assert!(!serde_json::from_value::<PermissionPageResult>(json!({"success":false})).unwrap().success);
-        assert!(!serde_json::from_value::<InstallPackagesPermissionResult>(json!({"allowed":false})).unwrap().allowed);
+        assert!(
+            !serde_json::from_value::<PermissionPageResult>(json!({"success":false}))
+                .unwrap()
+                .success
+        );
+        assert!(
+            !serde_json::from_value::<InstallPackagesPermissionResult>(json!({"allowed":false}))
+                .unwrap()
+                .allowed
+        );
         for status in ["true", "false", "unsupported"] {
-            assert_eq!(serde_json::from_value::<AutoStartPermissionResult>(json!({"status":status})).unwrap().status, status);
+            assert_eq!(
+                serde_json::from_value::<AutoStartPermissionResult>(json!({"status":status}))
+                    .unwrap()
+                    .status,
+                status
+            );
         }
     }
 }
@@ -921,7 +938,10 @@ pub fn can_install_packages<R: Runtime>(app: AppHandle<R>) -> Result<bool, Strin
         let plugin_handle = state.mobile_plugin_handle()?;
 
         let result = plugin_handle
-            .run_mobile_plugin::<InstallPackagesPermissionResult>("canInstallPackages", serde_json::json!({}))
+            .run_mobile_plugin::<InstallPackagesPermissionResult>(
+                "canInstallPackages",
+                serde_json::json!({}),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
         return Ok(result.allowed);
     }

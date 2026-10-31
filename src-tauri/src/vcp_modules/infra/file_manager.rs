@@ -257,7 +257,9 @@ pub(crate) fn current_attachment_path(
         return Ok(None);
     }
     let stored = Path::new(stored_path);
-    let name = stored.file_name().ok_or("attachment CAS filename is missing")?;
+    let name = stored
+        .file_name()
+        .ok_or("attachment CAS filename is missing")?;
     if stored.file_stem().and_then(|stem| stem.to_str()) != Some(hash) {
         return Err("attachment CAS filename does not match its hash".to_string());
     }
@@ -288,20 +290,30 @@ fn current_thumbnail_path(root: &Path, hash: &str, stored: Option<&str>) -> Opti
         return None;
     }
     let mut names = Vec::new();
-    if let Some(name) = stored.and_then(|path| Path::new(path.strip_prefix("file://").unwrap_or(path)).file_name()) {
+    if let Some(name) =
+        stored.and_then(|path| Path::new(path.strip_prefix("file://").unwrap_or(path)).file_name())
+    {
         names.push(name.to_owned());
     }
     for extension in ["webp", "jpg", "png"] {
-        names.push(std::ffi::OsString::from(format!("{hash}_thumb.{extension}")));
+        names.push(std::ffi::OsString::from(format!(
+            "{hash}_thumb.{extension}"
+        )));
     }
     let stem = format!("{hash}_thumb");
     names.into_iter().find_map(|name| {
         let path = root.join(name);
         if path.file_stem().and_then(|value| value.to_str()) != Some(stem.as_str())
-            || !matches!(path.extension().and_then(|extension| extension.to_str()), Some("webp" | "jpg" | "png")) {
+            || !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("webp" | "jpg" | "png")
+            )
+        {
             return None;
         }
-        validated_direct_file(root, &path, path.file_name()?).ok().flatten()
+        validated_direct_file(root, &path, path.file_name()?)
+            .ok()
+            .flatten()
             .map(|path| path.to_string_lossy().into_owned())
     })
 }
@@ -323,14 +335,24 @@ fn project_attachment_paths(
 ) -> Result<AttachmentPathProjection, String> {
     let path = current_attachment_path(attachments_root, hash, stored_path)?;
     let existing = resolve_existing_attachment_path(attachments_root, hash, stored_path, size)?;
-    let internal_path = path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
-    let src = existing.as_ref().map(|path| format!("file://{}", path.to_string_lossy())).unwrap_or_default();
+    let internal_path = path
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let src = existing
+        .as_ref()
+        .map(|path| format!("file://{}", path.to_string_lossy()))
+        .unwrap_or_default();
     Ok(AttachmentPathProjection {
         internal_path,
         src,
-        status: if existing.is_some() { "ready" } else { "desktop_only" },
+        status: if existing.is_some() {
+            "ready"
+        } else {
+            "desktop_only"
+        },
         // Derived cache failures cannot invalidate an otherwise valid original.
-        thumbnail_path: thumbnails_root.and_then(|root| current_thumbnail_path(root, hash, thumbnail_path)),
+        thumbnail_path: thumbnails_root
+            .and_then(|root| current_thumbnail_path(root, hash, thumbnail_path)),
     })
 }
 
@@ -340,12 +362,17 @@ pub(crate) async fn refresh_attachment_paths<R: tauri::Runtime>(
     app: &AppHandle<R>,
     attachment: &mut crate::vcp_modules::chat_manager::Attachment,
 ) {
-    let Some(hash) = attachment.hash.clone() else { return; };
+    let Some(hash) = attachment.hash.clone() else {
+        return;
+    };
     if attachment.internal_path.is_empty()
-        && url::Url::parse(&attachment.src).is_ok_and(|url| matches!(url.scheme(), "http" | "https")) {
+        && url::Url::parse(&attachment.src)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+    {
         return;
     }
-    let unavailable = |attachment: &mut crate::vcp_modules::chat_manager::Attachment, error: &str| {
+    let unavailable = |attachment: &mut crate::vcp_modules::chat_manager::Attachment,
+                       error: &str| {
         log::warn!("Attachment {hash} local projection unavailable: {error}");
         attachment.src.clear();
         attachment.status = Some("desktop_only".to_string());
@@ -353,7 +380,10 @@ pub(crate) async fn refresh_attachment_paths<R: tauri::Runtime>(
     };
     let attachments_root = match get_attachments_root_dir(app) {
         Ok(root) => root,
-        Err(error) => { unavailable(attachment, &error); return; }
+        Err(error) => {
+            unavailable(attachment, &error);
+            return;
+        }
     };
     let thumbnails_root = get_thumbnails_root_dir(app).ok();
     let size = attachment.size;
@@ -362,7 +392,14 @@ pub(crate) async fn refresh_attachment_paths<R: tauri::Runtime>(
     let lookup_hash = hash.clone();
     let projection = tokio::task::spawn_blocking(move || {
         let hash = lookup_hash;
-        match project_attachment_paths(&attachments_root, thumbnails_root.as_deref(), &hash, size, &stored, thumbnail.as_deref()) {
+        match project_attachment_paths(
+            &attachments_root,
+            thumbnails_root.as_deref(),
+            &hash,
+            size,
+            &stored,
+            thumbnail.as_deref(),
+        ) {
             Ok(projection) => projection,
             Err(error) => {
                 // A damaged/missing local attachment must not hide the rest of
@@ -370,18 +407,26 @@ pub(crate) async fn refresh_attachment_paths<R: tauri::Runtime>(
                 log::warn!("Attachment {hash} is unavailable in the current container: {error}");
                 AttachmentPathProjection {
                     internal_path: current_attachment_path(&attachments_root, &hash, &stored)
-                        .ok().flatten().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
+                        .ok()
+                        .flatten()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
                     src: String::new(),
                     status: "desktop_only",
-                    thumbnail_path: thumbnails_root.as_deref()
+                    thumbnail_path: thumbnails_root
+                        .as_deref()
                         .and_then(|root| current_thumbnail_path(root, &hash, thumbnail.as_deref())),
                 }
             }
         }
-    }).await;
+    })
+    .await;
     let projection = match projection {
         Ok(projection) => projection,
-        Err(error) => { unavailable(attachment, &error.to_string()); return; }
+        Err(error) => {
+            unavailable(attachment, &error.to_string());
+            return;
+        }
     };
     attachment.internal_path = projection.internal_path;
     attachment.src = projection.src;
@@ -403,7 +448,8 @@ pub(crate) async fn reconcile_attachment_storage<R: tauri::Runtime>(
         db,
         get_attachments_root_dir(app)?,
         get_thumbnails_root_dir(app)?,
-    ).await
+    )
+    .await
 }
 
 async fn reconcile_attachment_storage_at<R: tauri::Runtime>(
@@ -421,39 +467,76 @@ async fn reconcile_attachment_storage_at<R: tauri::Runtime>(
         .bind(ATTACHMENT_STORAGE_ROOTS_KEY)
         .bind(&roots)
     };
-    if roots_match().fetch_one(&db.pool).await.map_err(|e| e.to_string())? {
+    if roots_match()
+        .fetch_one(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         return Ok(());
     }
 
     // Serialize root changes with concurrent imports and draft updates.
     let mut tx = db.write_transaction("file.attachment.relocate").await?;
-    if roots_match().fetch_one(&mut *tx).await.map_err(|e| e.to_string())? {
+    if roots_match()
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?
+    {
         return tx.commit().await;
     }
     type Row = (String, i64, String, Option<String>);
-    let rows: Vec<Row> = sqlx::query_as("SELECT hash, size, internal_path, thumbnail_path FROM attachments")
-        .fetch_all(&mut *tx).await.map_err(|error| error.to_string())?;
+    let rows: Vec<Row> =
+        sqlx::query_as("SELECT hash, size, internal_path, thumbnail_path FROM attachments")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
     let projections = tokio::task::spawn_blocking(move || {
-        rows.into_iter().map(|(hash, size, stored, thumbnail)| {
-            let size = u64::try_from(size).map_err(|_| "attachment CAS size metadata is invalid".to_string())?;
-            let projection = project_attachment_paths(&attachments_root, Some(&thumbnails_root), &hash, size, &stored, thumbnail.as_deref())?;
-            Ok((hash, projection))
-        }).collect::<Result<Vec<_>, String>>()
-    }).await.map_err(|error| format!("attachment relocation task failed: {error}"))??;
+        rows.into_iter()
+            .map(|(hash, size, stored, thumbnail)| {
+                let size = u64::try_from(size)
+                    .map_err(|_| "attachment CAS size metadata is invalid".to_string())?;
+                let projection = project_attachment_paths(
+                    &attachments_root,
+                    Some(&thumbnails_root),
+                    &hash,
+                    size,
+                    &stored,
+                    thumbnail.as_deref(),
+                )?;
+                Ok((hash, projection))
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })
+    .await
+    .map_err(|error| format!("attachment relocation task failed: {error}"))??;
     for (hash, projection) in projections {
-        sqlx::query("UPDATE attachments SET internal_path = ?, thumbnail_path = ?
-                     WHERE hash = ? AND (internal_path IS NOT ? OR thumbnail_path IS NOT ?)")
-            .bind(&projection.internal_path).bind(&projection.thumbnail_path).bind(&hash)
-            .bind(&projection.internal_path).bind(&projection.thumbnail_path)
-            .execute(&mut *tx).await.map_err(|error| error.to_string())?;
-        sqlx::query("UPDATE message_attachments SET src = ?, status = ?
+        sqlx::query(
+            "UPDATE attachments SET internal_path = ?, thumbnail_path = ?
+                     WHERE hash = ? AND (internal_path IS NOT ? OR thumbnail_path IS NOT ?)",
+        )
+        .bind(&projection.internal_path)
+        .bind(&projection.thumbnail_path)
+        .bind(&hash)
+        .bind(&projection.internal_path)
+        .bind(&projection.thumbnail_path)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+        sqlx::query(
+            "UPDATE message_attachments SET src = ?, status = ?
                      WHERE hash = ? AND status IN ('ready', 'desktop_only')
                        AND (? <> '' OR (src NOT LIKE 'http://%' AND src NOT LIKE 'https://%'))
-                       AND (src IS NOT ? OR status IS NOT ?)")
-            .bind(&projection.src).bind(projection.status).bind(&hash)
-            .bind(&projection.internal_path)
-            .bind(&projection.src).bind(projection.status)
-            .execute(&mut *tx).await.map_err(|error| error.to_string())?;
+                       AND (src IS NOT ? OR status IS NOT ?)",
+        )
+        .bind(&projection.src)
+        .bind(projection.status)
+        .bind(&hash)
+        .bind(&projection.internal_path)
+        .bind(&projection.src)
+        .bind(projection.status)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
     }
     super::share_inbox::reconcile_current_share_paths(app, &mut tx).await?;
     sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
@@ -488,8 +571,12 @@ pub(crate) async fn resolve_attachment_cas_file<R: tauri::Runtime>(
     let lookup_hash = hash.to_string();
     let path = tokio::task::spawn_blocking(move || {
         resolve_existing_attachment_path(&attachments_root, &lookup_hash, &record.2, size_bytes)?
-            .ok_or_else(|| "attachment CAS file is not available in the current container".to_string())
-    }).await.map_err(|error| format!("attachment CAS lookup task failed: {error}"))??;
+            .ok_or_else(|| {
+                "attachment CAS file is not available in the current container".to_string()
+            })
+    })
+    .await
+    .map_err(|error| format!("attachment CAS lookup task failed: {error}"))??;
     Ok(AttachmentCasFile {
         path,
         mime_type,
@@ -847,10 +934,17 @@ async fn register_attachment_with_operation<R: tauri::Runtime>(
     let attachments_root = get_attachments_root_dir(app_handle)?;
     let registration_hash = hash.clone();
     let internal_path = tokio::task::spawn_blocking(move || {
-        resolve_existing_attachment_path(&attachments_root, &registration_hash, &internal_path, size)?
-            .map(|path| path.to_string_lossy().into_owned())
-            .ok_or_else(|| "待注册附件不在当前 CAS 目录".to_string())
-    }).await.map_err(|error| format!("附件注册路径检查失败: {error}"))??;
+        resolve_existing_attachment_path(
+            &attachments_root,
+            &registration_hash,
+            &internal_path,
+            size,
+        )?
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or_else(|| "待注册附件不在当前 CAS 目录".to_string())
+    })
+    .await
+    .map_err(|error| format!("附件注册路径检查失败: {error}"))??;
 
     if let Ok(existing) = resolve_attachment_cas_file(app_handle, pool, &hash).await {
         if existing.size_bytes != size {
@@ -902,8 +996,12 @@ async fn register_attachment_with_operation<R: tauri::Runtime>(
         let thumbnail_hash = hash.clone();
         let old_thumbnail = existing_metadata.1;
         let cached_thumbnail = tokio::task::spawn_blocking(move || {
-            thumbnail_root.and_then(|root| current_thumbnail_path(&root, &thumbnail_hash, old_thumbnail.as_deref()))
-        }).await.unwrap_or(None);
+            thumbnail_root.and_then(|root| {
+                current_thumbnail_path(&root, &thumbnail_hash, old_thumbnail.as_deref())
+            })
+        })
+        .await
+        .unwrap_or(None);
         let thumbnail_path = match cached_thumbnail {
             Some(path) => Some(path),
             None if existing.mime_type.starts_with("image/") => {
@@ -1611,7 +1709,12 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
         }
 
         // 这些目录只有当前进程的临时资源；Share Inbox 在 App Group，不在本清理范围。
-        for name in ["image-work", "media-work", "temporary-exports", "rendered-input"] {
+        for name in [
+            "image-work",
+            "media-work",
+            "temporary-exports",
+            "rendered-input",
+        ] {
             let path = cache_dir.join(name);
             if path.is_dir() {
                 let _ = fs::remove_dir_all(path);
@@ -1871,7 +1974,8 @@ pub(crate) async fn delete_attachment_physical(
         return Err(invalid_delete_target("附件哈希格式无效"));
     }
     let attachment_path = match current_attachment_path(attachments_root, hash, internal_path)
-        .map_err(invalid_delete_target)? {
+        .map_err(invalid_delete_target)?
+    {
         Some(path) => validated_attachment_file(attachments_root, hash, &path)?,
         None => None,
     };
@@ -1947,7 +2051,10 @@ mod security_boundary_tests {
         fs::write(attachments.join(&name), b"data").unwrap();
 
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1).connect("sqlite::memory:").await.unwrap();
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::raw_sql(
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER);
              CREATE TABLE attachments (hash TEXT PRIMARY KEY, size INTEGER, internal_path TEXT, thumbnail_path TEXT);
@@ -1955,17 +2062,31 @@ mod security_boundary_tests {
              CREATE TABLE current_share (singleton INTEGER PRIMARY KEY, record TEXT);",
         ).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO attachments VALUES (?, 4, ?, NULL)")
-            .bind(&hash).bind(format!("/old/{name}")).execute(&pool).await.unwrap();
+            .bind(&hash)
+            .bind(format!("/old/{name}"))
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO message_attachments VALUES (?, '', 'desktop_only')")
-            .bind(&hash).execute(&pool).await.unwrap();
+            .bind(&hash)
+            .execute(&pool)
+            .await
+            .unwrap();
         let db = DbState::new(pool, temp.path().join("test.db"));
         let app = tauri::test::mock_app();
         let reconcile = |files: &std::path::Path, thumbs: &std::path::Path| {
-            super::reconcile_attachment_storage_at(app.handle(), &db, files.to_owned(), thumbs.to_owned())
+            super::reconcile_attachment_storage_at(
+                app.handle(),
+                &db,
+                files.to_owned(),
+                thumbs.to_owned(),
+            )
         };
-        let read = || sqlx::query_as::<_, (String, String, String)>(
+        let read = || {
+            sqlx::query_as::<_, (String, String, String)>(
             "SELECT internal_path, src, status FROM attachments JOIN message_attachments USING (hash)",
-        ).fetch_one(&db.pool);
+        ).fetch_one(&db.pool)
+        };
 
         reconcile(&attachments, &thumbnails).await.unwrap();
         let initial = read().await.unwrap();
@@ -1978,19 +2099,29 @@ mod security_boundary_tests {
         let new_thumbs = temp.path().join("new-cache").join("thumbnails");
         fs::remove_file(attachments.join(&name)).unwrap();
         sqlx::query("INSERT INTO current_share VALUES (1, 'invalid draft')")
-            .execute(&db.pool).await.unwrap();
+            .execute(&db.pool)
+            .await
+            .unwrap();
         reconcile(&attachments, &thumbnails).await.unwrap();
         assert!(reconcile(&attachments, &new_thumbs).await.is_err());
         assert_eq!(read().await.unwrap(), initial);
         sqlx::query("UPDATE current_share SET record = ?")
             .bind(r#"{"generation":3,"deliveryId":"keep","state":"draft","revision":5}"#)
-            .execute(&db.pool).await.unwrap();
+            .execute(&db.pool)
+            .await
+            .unwrap();
         reconcile(&attachments, &new_thumbs).await.unwrap();
-        assert_eq!(read().await.unwrap(), (initial.0, String::new(), "desktop_only".into()));
+        assert_eq!(
+            read().await.unwrap(),
+            (initial.0, String::new(), "desktop_only".into())
+        );
 
         let new_files = temp.path().join("new-container").join("attachments");
         reconcile(&new_files, &new_thumbs).await.unwrap();
-        assert_eq!(read().await.unwrap().0, new_files.join(&name).to_string_lossy());
+        assert_eq!(
+            read().await.unwrap().0,
+            new_files.join(&name).to_string_lossy()
+        );
     }
 
     #[test]

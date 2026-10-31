@@ -1,9 +1,8 @@
+use super::vcp_http_endpoint::{
+    resolve_model_discovery_endpoint, ChatRequestPurpose, MODEL_DISCOVERY_UNAVAILABLE,
+};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
-use super::vcp_http_endpoint::{
-    resolve_model_discovery_endpoint, ChatRequestPurpose,
-    MODEL_DISCOVERY_UNAVAILABLE,
-};
 use crate::vcp_modules::vcp_client::freeze_chat_connection;
 use futures_util::future::join_all;
 use reqwest::Client;
@@ -70,14 +69,18 @@ async fn read_cached_models(pool: &sqlx::SqlitePool) -> Result<Vec<ModelInfo>, S
         .fetch_optional(pool)
         .await
         .map_err(|error| error.to_string())?;
-    let Some(row) = row else { return Ok(Vec::new()); };
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
     // A disposable discovery cache can miss, but a storage failure is not a miss.
     let raw: Option<String> = match row.try_get("value") {
         Ok(value) => value,
         Err(sqlx::Error::ColumnDecode { .. }) => None,
         Err(error) => return Err(error.to_string()),
     };
-    Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default())
+    Ok(raw
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default())
 }
 
 #[tauri::command]
@@ -201,9 +204,7 @@ pub async fn get_hot_models<R: Runtime>(
     Ok(models)
 }
 
-pub async fn export_favorite_models(
-    db: &DbState,
-) -> Result<Vec<String>, String> {
+pub async fn export_favorite_models(db: &DbState) -> Result<Vec<String>, String> {
     let rows = sqlx::query("SELECT model_id FROM model_favorites ORDER BY created_at DESC")
         .fetch_all(&db.pool)
         .await
@@ -557,26 +558,46 @@ mod cache_tests {
 
     #[tokio::test]
     async fn malformed_discovery_cache_is_a_miss_but_database_failures_are_not() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(read_cached_models(&pool).await.unwrap().is_empty());
         sqlx::query("INSERT INTO settings VALUES ('cached_models', ?)")
-            .bind(r#"[{"id":"valid-model"}]"#).execute(&pool).await.unwrap();
+            .bind(r#"[{"id":"valid-model"}]"#)
+            .execute(&pool)
+            .await
+            .unwrap();
         let cached = read_cached_models(&pool).await.unwrap();
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].id, "valid-model");
         assert_eq!(cached[0].created, 0);
         assert_eq!(cached[0].object, "");
         assert_eq!(cached[0].owned_by, "");
-        for raw in ["{", "null", "{}", "[false]", r#"[{"id":"model","created":"wrong"}]"#] {
+        for raw in [
+            "{",
+            "null",
+            "{}",
+            "[false]",
+            r#"[{"id":"model","created":"wrong"}]"#,
+        ] {
             sqlx::query("UPDATE settings SET value=? WHERE key='cached_models'")
-                .bind(raw).execute(&pool).await.unwrap();
+                .bind(raw)
+                .execute(&pool)
+                .await
+                .unwrap();
             assert!(read_cached_models(&pool).await.unwrap().is_empty(), "{raw}");
         }
         sqlx::query("UPDATE settings SET value=? WHERE key='cached_models'")
-            .bind(br#"[{"id":"not-a-text-cache"}]"#.as_slice()).execute(&pool).await.unwrap();
+            .bind(br#"[{"id":"not-a-text-cache"}]"#.as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(read_cached_models(&pool).await.unwrap().is_empty());
         for statement in [
             "UPDATE settings SET value=NULL WHERE key='cached_models'",
@@ -585,7 +606,10 @@ mod cache_tests {
             sqlx::query(statement).execute(&pool).await.unwrap();
             assert!(read_cached_models(&pool).await.unwrap().is_empty());
         }
-        sqlx::query("DROP TABLE settings").execute(&pool).await.unwrap();
+        sqlx::query("DROP TABLE settings")
+            .execute(&pool)
+            .await
+            .unwrap();
         assert!(read_cached_models(&pool).await.is_err());
     }
 
@@ -597,10 +621,12 @@ mod cache_tests {
             .await
             .unwrap();
 
-        sqlx::query("CREATE TABLE model_favorites (model_id TEXT PRIMARY KEY, created_at BIGINT NOT NULL)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "CREATE TABLE model_favorites (model_id TEXT PRIMARY KEY, created_at BIGINT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let models = vec![
             "gemini-2.5-flash".to_string(),

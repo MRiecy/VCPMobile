@@ -134,8 +134,7 @@ pub fn invalidate_sync_entity_caches(app_handle: &AppHandle) {
     {
         state.invalidate_cache();
     }
-    if let Some(turns) =
-        app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
+    if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>()
     {
         // 同步写绕过群业务入口；已在途的裁决不能继续使用失效的成员/历史快照。
         turns.notify_all_groups_changed();

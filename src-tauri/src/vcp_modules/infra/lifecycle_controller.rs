@@ -371,12 +371,13 @@ async fn reconcile_foreground_services(
         if let Ok(settings) = read_config(app.clone(), app.state()).await {
             if was_log_disconnected {
                 log::info!("[Lifecycle] App returned to foreground. Reconciling VCPLog/Info.");
-                if let Err(error) = crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(
-                    app,
-                    settings.log.url.clone(),
-                    settings.log.key.clone(),
-                )
-                .await
+                if let Err(error) =
+                    crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(
+                        app,
+                        settings.log.url.clone(),
+                        settings.log.key.clone(),
+                    )
+                    .await
                 {
                     log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
                 }

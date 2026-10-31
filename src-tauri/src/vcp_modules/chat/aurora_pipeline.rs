@@ -731,23 +731,24 @@ impl AuroraBuffer {
         let raw_new_tail_start = self.parser.tail_start();
         let speculative_thought = speculative_thought_tail(&raw_new_tail, raw_tail_type);
         let speculative_guidance = speculative_voice_guidance_tail(&raw_new_tail, raw_tail_type);
-        let (new_tail, new_tail_start, next_thought_theme, next_plain_block_type) = match speculative_thought {
-            Some(projection) => (
-                projection.content.to_string(),
-                raw_new_tail_start.saturating_add(projection.content_offset),
-                Some(projection.theme),
-                Some(TailBlockType::Thought),
-            ),
-            None => match speculative_guidance {
-                Some((content, offset)) => (
-                    content.to_string(),
-                    raw_new_tail_start.saturating_add(offset),
-                    None,
-                    Some(TailBlockType::VoiceGuidance),
+        let (new_tail, new_tail_start, next_thought_theme, next_plain_block_type) =
+            match speculative_thought {
+                Some(projection) => (
+                    projection.content.to_string(),
+                    raw_new_tail_start.saturating_add(projection.content_offset),
+                    Some(projection.theme),
+                    Some(TailBlockType::Thought),
                 ),
-                None => (raw_new_tail, raw_new_tail_start, None, None),
-            },
-        };
+                None => match speculative_guidance {
+                    Some((content, offset)) => (
+                        content.to_string(),
+                        raw_new_tail_start.saturating_add(offset),
+                        None,
+                        Some(TailBlockType::VoiceGuidance),
+                    ),
+                    None => (raw_new_tail, raw_new_tail_start, None, None),
+                },
+            };
         let previous_tail_block_type = self
             .tail_projection
             .as_ref()
@@ -757,7 +758,10 @@ impl AuroraBuffer {
             .as_ref()
             .and_then(|projection| projection.thought_theme.as_deref());
         let previous_plain_block_type = previous_tail_block_type.filter(|block_type| {
-            matches!(block_type, TailBlockType::Thought | TailBlockType::VoiceGuidance)
+            matches!(
+                block_type,
+                TailBlockType::Thought | TailBlockType::VoiceGuidance
+            )
         });
         // O(1) tail 等价判定：full_text 严格只增不减（next_tail_fingerprint 内有
         // debug_assert 守护该不变量），同一 tail 起点 + 同一长度即同一内容，
@@ -1203,21 +1207,30 @@ mod tests {
             block_type: TailBlockType::VoiceGuidance, thought_theme: None, ..
         }) if content == "**轻声**"));
         assert!(buffer.prev_tail_ast.is_empty());
-        assert!(matches!(buffer.current_tail_wire_block(), Some(StreamBlock::VoiceGuidance {
+        assert!(
+            matches!(buffer.current_tail_wire_block(), Some(StreamBlock::VoiceGuidance {
             ref content, is_complete: false, ..
-        }) if content == "**轻声**"));
+        }) if content == "**轻声**")
+        );
         buffer.commit_delivery(commit);
 
         buffer.append_chunk("</voice_guidance>\n正文");
         assert_eq!(buffer.process_queue(), (true, true));
         let (closed, _) = buffer.prepare_delta_update().unwrap();
-        assert!(matches!(closed.stable_append, Some(StableAppend { ref blocks, .. })
+        assert!(
+            matches!(closed.stable_append, Some(StableAppend { ref blocks, .. })
             if matches!(blocks.as_slice(), [StreamBlock::VoiceGuidance {
                 content, is_complete: true, ..
-            }] if content == "**轻声**")));
-        assert!(matches!(closed.tail_op, Some(TailTextOp::Replace {
-            block_type: TailBlockType::Markdown, mode: TailRenderMode::Ast, ..
-        })));
+            }] if content == "**轻声**"))
+        );
+        assert!(matches!(
+            closed.tail_op,
+            Some(TailTextOp::Replace {
+                block_type: TailBlockType::Markdown,
+                mode: TailRenderMode::Ast,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1227,9 +1240,11 @@ mod tests {
         assert!(snapshot.stable_blocks.is_empty());
         assert_eq!(snapshot.tail_mode, Some(TailRenderMode::Plain));
         assert!(snapshot.tail_snapshot.is_empty());
-        assert!(matches!(snapshot.tail_block, Some(StreamBlock::VoiceGuidance {
+        assert!(
+            matches!(snapshot.tail_block, Some(StreamBlock::VoiceGuidance {
             ref content, is_complete: false, ..
-        }) if content == "轻声 **慢读**"));
+        }) if content == "轻声 **慢读**")
+        );
 
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk(raw);

@@ -1141,8 +1141,7 @@ mod tests {
         cleanup_stale_installer_apks_at, parse_sha256_sidecar, remove_canonical_legacy_dir,
         select_apk_asset, select_checksum_asset, select_latest_version_release,
         stage_installer_apk_in_updates, validate_installer_path_in_updates,
-        validate_release_asset_url, GitHubAsset, GitHubRelease,
-        APK_FILENAME, STALE_INSTALLER_AGE,
+        validate_release_asset_url, GitHubAsset, GitHubRelease, APK_FILENAME, STALE_INSTALLER_AGE,
     };
 
     fn asset(name: &str) -> GitHubAsset {

@@ -5,12 +5,10 @@ use crate::vcp_modules::agent_types::{
     AgentConfig, AgentListItem, AgentLocalPreferences, AgentLocalSettingsPatch,
 };
 use crate::vcp_modules::db_manager::DbState;
-use sqlx::SqliteConnection;
-use std::collections::BTreeMap;
-use crate::vcp_modules::persistence::agent_repository;
 use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::group::group_types::GroupListItem;
 use crate::vcp_modules::infra::utils::desktop_compatible_id_base;
+use crate::vcp_modules::persistence::agent_repository;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -18,6 +16,8 @@ use crate::vcp_modules::sync_types::{DeleteTarget, OwnerType, SYNC_TOMBSTONE_HAS
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use sqlx::SqliteConnection;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as CacheCommitMutex};
@@ -129,7 +129,8 @@ async fn read_agent_config_locked<R: Runtime>(
     let repair_app = app_handle.clone();
     agent_repository::normalize_agent_configs(&db_state, Some(agent_id), move || {
         repair_app.state::<AgentConfigState>().invalidate_cache();
-    }).await?;
+    })
+    .await?;
     let cache_generation = state.current_cache_generation();
     let pool = &db_state.pool;
 
@@ -202,10 +203,13 @@ pub async fn save_agent_config(
         let db = app_handle.state::<DbState>();
         agent_repository::save_agent_edit(&db, &agent, &baseline).await?;
         state.caches.remove(&agent.id);
-        let mut canonical = read_agent_config_locked(&app_handle, &state, &agent.id, Some(false)).await?;
+        let mut canonical =
+            read_agent_config_locked(&app_handle, &state, &agent.id, Some(false)).await?;
         canonical.system_prompt.clear();
         Ok(canonical)
-    }).await.map_err(|error| format!("助手设置保存任务异常：{error}"))?
+    })
+    .await
+    .map_err(|error| format!("助手设置保存任务异常：{error}"))?
 }
 
 #[tauri::command]
@@ -218,7 +222,8 @@ pub async fn get_agents(
     let repair_app = app_handle.clone();
     agent_repository::normalize_agent_configs(&db_state, None, move || {
         repair_app.state::<AgentConfigState>().invalidate_cache();
-    }).await?;
+    })
+    .await?;
     let pool = &db_state.pool;
 
     let start_agents = std::time::Instant::now();
@@ -270,31 +275,48 @@ pub async fn update_agent_config<R: Runtime>(
     agent_id: String,
     updates: serde_json::Value,
 ) -> Result<AgentConfig, String> {
-    let updates = updates.as_object().cloned()
+    let updates = updates
+        .as_object()
+        .cloned()
         .ok_or_else(|| "助手配置补丁必须为对象".to_string())?;
     tokio::spawn(async move {
         let state = app_handle.state::<AgentConfigState>();
         let mutex = state.acquire_lock(&agent_id).await;
         let _lock = mutex.lock().await;
         state.caches.remove(&agent_id);
-        let baseline = read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await?;
+        let baseline =
+            read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await?;
         let mut value = serde_json::to_value(&baseline).map_err(|error| error.to_string())?;
         let object = value.as_object_mut().ok_or("助手配置序列化失败")?;
         for (field, value) in updates {
-            if !matches!(field.as_str(), "name" | "mobileSystemPrompt" | "model" | "temperature"
-                | "contextTokenLimit" | "maxOutputTokens" | "streamOutput" | "useTemperature" | "voice")
-            {
+            if !matches!(
+                field.as_str(),
+                "name"
+                    | "mobileSystemPrompt"
+                    | "model"
+                    | "temperature"
+                    | "contextTokenLimit"
+                    | "maxOutputTokens"
+                    | "streamOutput"
+                    | "useTemperature"
+                    | "voice"
+            ) {
                 return Err(format!("此助手字段不可编辑：{field}"));
             }
             object.insert(field, value);
         }
-        let draft: AgentConfig = serde_json::from_value(value).map_err(|error| error.to_string())?;
-        agent_repository::save_agent_edit(&app_handle.state::<DbState>(), &draft, &baseline).await?;
+        let draft: AgentConfig =
+            serde_json::from_value(value).map_err(|error| error.to_string())?;
+        agent_repository::save_agent_edit(&app_handle.state::<DbState>(), &draft, &baseline)
+            .await?;
         state.caches.remove(&agent_id);
-        let mut canonical = read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await?;
+        let mut canonical =
+            read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await?;
         canonical.system_prompt.clear();
         Ok(canonical)
-    }).await.map_err(|error| format!("助手设置保存任务异常：{error}"))?
+    })
+    .await
+    .map_err(|error| format!("助手设置保存任务异常：{error}"))?
 }
 
 /// 删除 Agent
@@ -601,11 +623,13 @@ pub async fn get_assistants_snapshot(
     let repair_app = app_handle.clone();
     agent_repository::normalize_agent_configs(&db_state, None, move || {
         repair_app.state::<AgentConfigState>().invalidate_cache();
-    }).await?;
+    })
+    .await?;
     let repair_app = app_handle.clone();
     crate::vcp_modules::group_service::normalize_group_configurations(&db_state, None, move || {
         repair_app.state::<GroupManagerState>().invalidate_cache();
-    }).await?;
+    })
+    .await?;
     build_assistants_snapshot(&db_state.pool).await
 }
 
@@ -630,9 +654,20 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
         use sqlx::Row;
         let agent_id: String = row.try_get("agent_id").map_err(|error| error.to_string())?;
         let defaults = AgentConfig::default();
-        let avatar_calculated_color = row.try_get::<Option<String>, _>("dominant_color").ok().flatten();
-        let model = row.try_get::<Option<String>, _>("model").ok().flatten().unwrap_or(defaults.model);
-        let name = row.try_get::<Option<String>, _>("name").ok().flatten().unwrap_or(defaults.name);
+        let avatar_calculated_color = row
+            .try_get::<Option<String>, _>("dominant_color")
+            .ok()
+            .flatten();
+        let model = row
+            .try_get::<Option<String>, _>("model")
+            .ok()
+            .flatten()
+            .unwrap_or(defaults.model);
+        let name = row
+            .try_get::<Option<String>, _>("name")
+            .ok()
+            .flatten()
+            .unwrap_or(defaults.name);
 
         agents_list.push(AgentListItem {
             id: agent_id,
@@ -680,10 +715,15 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     for row in group_rows {
         use sqlx::Row;
         let group_id: String = row.try_get("group_id").map_err(|error| error.to_string())?;
-        let avatar_calculated_color = row.try_get::<Option<String>, _>("dominant_color").ok().flatten();
+        let avatar_calculated_color = row
+            .try_get::<Option<String>, _>("dominant_color")
+            .ok()
+            .flatten();
         let name = match row.try_get::<Option<String>, _>("name") {
             Ok(Some(value)) => value,
-            Ok(None) | Err(sqlx::Error::ColumnDecode { .. }) => crate::vcp_modules::group_types::GroupConfig::default().name,
+            Ok(None) | Err(sqlx::Error::ColumnDecode { .. }) => {
+                crate::vcp_modules::group_types::GroupConfig::default().name
+            }
             Err(error) => return Err(error.to_string()),
         };
 
@@ -692,9 +732,8 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
             Err(sqlx::Error::ColumnDecode { .. }) => None,
             Err(error) => return Err(error.to_string()),
         };
-        let local_settings = crate::vcp_modules::group_types::parse_group_local_settings(
-            settings_json.as_deref(),
-        );
+        let local_settings =
+            crate::vcp_modules::group_types::parse_group_local_settings(settings_json.as_deref());
         let mode = local_settings.effective_mode();
         let members = group_members.remove(&group_id).unwrap_or_default();
         groups_list.push(GroupListItem {
@@ -774,9 +813,7 @@ pub async fn export_agent_local_settings(
     let mut preferences = BTreeMap::new();
     for row in rows {
         let agent_id: String = row.try_get("agent_id").map_err(|e| e.to_string())?;
-        let mobile_system_prompt: String = row
-            .try_get("mobile_system_prompt")
-            .unwrap_or_default();
+        let mobile_system_prompt: String = row.try_get("mobile_system_prompt").unwrap_or_default();
         let use_temperature = match row.try_get::<i64, _>("use_temperature") {
             Ok(val) => val != 0,
             Err(_) => false,
@@ -861,9 +898,7 @@ pub async fn import_agent_local_settings(
         }
 
         let current = AgentLocalPreferences {
-            mobile_system_prompt: row
-                .try_get("mobile_system_prompt")
-                .unwrap_or_default(),
+            mobile_system_prompt: row.try_get("mobile_system_prompt").unwrap_or_default(),
             use_temperature: match row.try_get::<i64, _>("use_temperature") {
                 Ok(val) => val != 0,
                 Err(_) => false,
@@ -971,17 +1006,40 @@ mod cache_generation_tests {
             .execute(&pool)
             .await
             .expect("set mobile mode");
-        let snapshot = build_assistants_snapshot(&pool).await.expect("local snapshot");
-        assert_eq!(snapshot.groups.iter().find(|g| g.id == "g1").expect("g1").mode, GroupChatMode::Jev);
-        let shared_mode: String = sqlx::query_scalar("SELECT mode FROM groups WHERE group_id = 'g1'")
-            .fetch_one(&pool)
+        let snapshot = build_assistants_snapshot(&pool)
             .await
-            .expect("shared mode");
+            .expect("local snapshot");
+        assert_eq!(
+            snapshot
+                .groups
+                .iter()
+                .find(|g| g.id == "g1")
+                .expect("g1")
+                .mode,
+            GroupChatMode::Jev
+        );
+        let shared_mode: String =
+            sqlx::query_scalar("SELECT mode FROM groups WHERE group_id = 'g1'")
+                .fetch_one(&pool)
+                .await
+                .expect("shared mode");
         assert_eq!(shared_mode, "invite_only");
         sqlx::query("UPDATE groups SET mode = 'naturerandom' WHERE group_id = 'g1'")
-            .execute(&pool).await.expect("change shared mode");
-        let snapshot = build_assistants_snapshot(&pool).await.expect("snapshot after remote edit");
-        assert_eq!(snapshot.groups.iter().find(|group| group.id == "g1").expect("g1").mode, GroupChatMode::Jev);
+            .execute(&pool)
+            .await
+            .expect("change shared mode");
+        let snapshot = build_assistants_snapshot(&pool)
+            .await
+            .expect("snapshot after remote edit");
+        assert_eq!(
+            snapshot
+                .groups
+                .iter()
+                .find(|group| group.id == "g1")
+                .expect("g1")
+                .mode,
+            GroupChatMode::Jev
+        );
     }
 
     #[tokio::test]
@@ -1034,15 +1092,21 @@ mod cache_generation_tests {
         .unwrap();
 
         let mut patch_map = serde_json::Map::new();
-        patch_map.insert("mobileSystemPrompt".into(), serde_json::json!("全新移动端提示词"));
+        patch_map.insert(
+            "mobileSystemPrompt".into(),
+            serde_json::json!("全新移动端提示词"),
+        );
         patch_map.insert("useTemperature".into(), serde_json::json!(true));
-        patch_map.insert("voice".into(), serde_json::json!({
-            "enabled": true,
-            "mode": "builtin",
-            "voice": "Mia",
-            "stream": true,
-            "cloneSampleId": ""
-        }));
+        patch_map.insert(
+            "voice".into(),
+            serde_json::json!({
+                "enabled": true,
+                "mode": "builtin",
+                "voice": "Mia",
+                "stream": true,
+                "cloneSampleId": ""
+            }),
+        );
 
         let mut prefs = BTreeMap::new();
         prefs.insert("a1".to_string(), AgentLocalSettingsPatch(patch_map));
@@ -1060,11 +1124,26 @@ mod cache_generation_tests {
             .await
             .unwrap();
 
-        assert_eq!(row.get::<String, _>("mobile_system_prompt"), "全新移动端提示词");
+        assert_eq!(
+            row.get::<String, _>("mobile_system_prompt"),
+            "全新移动端提示词"
+        );
         assert_eq!(row.get::<i64, _>("use_temperature"), 1);
-        assert_eq!(row.get::<String, _>("config_hash"), original_hash, "【铁律】config_hash 严禁修改");
-        assert_eq!(row.get::<String, _>("content_hash"), original_content_hash, "【铁律】content_hash 严禁修改");
-        assert_eq!(row.get::<i64, _>("updated_at"), original_updated_at, "【铁律】updated_at 严禁修改");
+        assert_eq!(
+            row.get::<String, _>("config_hash"),
+            original_hash,
+            "【铁律】config_hash 严禁修改"
+        );
+        assert_eq!(
+            row.get::<String, _>("content_hash"),
+            original_content_hash,
+            "【铁律】content_hash 严禁修改"
+        );
+        assert_eq!(
+            row.get::<i64, _>("updated_at"),
+            original_updated_at,
+            "【铁律】updated_at 严禁修改"
+        );
     }
 
     #[tokio::test]
@@ -1114,11 +1193,17 @@ mod cache_generation_tests {
         // 1. 空机缺失的 agent
         let mut patch1 = serde_json::Map::new();
         patch1.insert("mobileSystemPrompt".into(), serde_json::json!("未同步"));
-        prefs.insert("missing_agent_1".to_string(), AgentLocalSettingsPatch(patch1));
+        prefs.insert(
+            "missing_agent_1".to_string(),
+            AgentLocalSettingsPatch(patch1),
+        );
 
         // 2. 墓碑 agent
         let mut patch2 = serde_json::Map::new();
-        patch2.insert("mobileSystemPrompt".into(), serde_json::json!("试图修改墓碑"));
+        patch2.insert(
+            "mobileSystemPrompt".into(),
+            serde_json::json!("试图修改墓碑"),
+        );
         prefs.insert("tombstone_1".to_string(), AgentLocalSettingsPatch(patch2));
 
         let mut tx = pool.begin().await.unwrap();
@@ -1129,10 +1214,12 @@ mod cache_generation_tests {
         assert!(missing, "发现本地缺失的 agent，必须返回 missing = true");
 
         // 验证墓碑未被篡改
-        let tomb_prompt: String = sqlx::query_scalar("SELECT mobile_system_prompt FROM agents WHERE agent_id = 'tombstone_1'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let tomb_prompt: String = sqlx::query_scalar(
+            "SELECT mobile_system_prompt FROM agents WHERE agent_id = 'tombstone_1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(tomb_prompt, "墓碑旧词", "墓碑实体绝不应被修改");
     }
 }

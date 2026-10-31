@@ -429,7 +429,10 @@ mod voice_policy_tests {
             .await
             .unwrap();
             assert_eq!(&messages[..messages.len() - 1], ordinary.as_slice());
-            assert_eq!(messages.last().unwrap(), &json!({"role":"user", "content":rules}));
+            assert_eq!(
+                messages.last().unwrap(),
+                &json!({"role":"user", "content":rules})
+            );
         }
     }
 

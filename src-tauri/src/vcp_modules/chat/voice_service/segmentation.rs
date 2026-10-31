@@ -126,7 +126,10 @@ impl ReplyBuffer {
 
     pub(super) fn update(&mut self, text: String, finished: bool) -> Result<(), String> {
         if text.len() > MAX_TEXT_BYTES {
-            return Err(format!("语音回复超过 {} KiB，已停止本次朗读。", MAX_TEXT_BYTES / 1024));
+            return Err(format!(
+                "语音回复超过 {} KiB，已停止本次朗读。",
+                MAX_TEXT_BYTES / 1024
+            ));
         }
         if !text.starts_with(&self.text[..self.emitted_bytes]) {
             return Err("已开始朗读的回复正文发生变化，已停止本次朗读。".into());
@@ -147,7 +150,10 @@ impl ReplyBuffer {
     /// use `update` to validate the already emitted prefix before replacing it.
     pub(super) fn append(&mut self, suffix: &str, finished: bool) -> Result<(), String> {
         if self.text.len().saturating_add(suffix.len()) > MAX_TEXT_BYTES {
-            return Err(format!("语音回复超过 {} KiB，已停止本次朗读。", MAX_TEXT_BYTES / 1024));
+            return Err(format!(
+                "语音回复超过 {} KiB，已停止本次朗读。",
+                MAX_TEXT_BYTES / 1024
+            ));
         }
         if self.finished && (!suffix.is_empty() || !finished) {
             return Err("已结束的语音回复不能继续追加。".into());

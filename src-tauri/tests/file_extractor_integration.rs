@@ -255,9 +255,9 @@ fn office_main_parts_can_move_without_changing_text() {
                 );
                 assert!(before.contains("蒙特卡罗模拟原理与方法"));
             }
-            "pptx" => assert!(
-                before.contains("实验1：解析模型示例") || before.contains("线性预测模型")
-            ),
+            "pptx" => {
+                assert!(before.contains("实验1：解析模型示例") || before.contains("线性预测模型"))
+            }
             _ => {}
         }
         let directory = old.rsplit_once('/').unwrap().0;

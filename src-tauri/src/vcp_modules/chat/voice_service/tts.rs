@@ -3,14 +3,15 @@ use super::{
     audio_codec::{self, PCM_PACKET_BYTES},
     cache::{self, TtsCache},
     chat_feed::{ChatFeed, MessageSpeech, SpeechPiece},
-    network, pipeline::{self, PacketConsumer, SegmentBuffer, SegmentSource}, samples,
+    network,
+    pipeline::{self, PacketConsumer, SegmentBuffer, SegmentSource},
+    samples,
     segmentation::{ReplyBuffer, ReplyPiece},
     VoiceReplyPolicy, VoiceServiceConfig, VoiceServiceStart,
 };
 use crate::vcp_modules::{
     settings_manager::{
-        Settings, VoiceConfig, VoiceConnectionConfig, VoiceTtsConfig,
-        VoiceTtsMode,
+        Settings, VoiceConfig, VoiceConnectionConfig, VoiceTtsConfig, VoiceTtsMode,
     },
     topic_types::{MessageKey, TopicKey},
     vcp_client::StreamEvent,
@@ -86,8 +87,10 @@ impl BubbleSource {
     async fn author<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Option<String>, String> {
         let db = app.state::<crate::vcp_modules::db_manager::DbState>();
         crate::vcp_modules::persistence::message_repository::read_narration_author(
-            &db.pool, &MessageKey::new(self.topic.clone(), self.message_id.clone()),
-        ).await
+            &db.pool,
+            &MessageKey::new(self.topic.clone(), self.message_id.clone()),
+        )
+        .await
     }
 
     async fn read<R: Runtime>(&self, app: &AppHandle<R>) -> Result<String, String> {
@@ -97,7 +100,8 @@ impl BubbleSource {
             self.topic.owner_type.clone(),
             self.topic.topic_id.clone(),
             self.message_id.clone(),
-        ).await
+        )
+        .await
     }
 }
 
@@ -112,7 +116,11 @@ enum NarrationKind {
 impl NarrationKind {
     fn startup_frames(&self) -> u32 {
         // PCM16 mono at 24 kHz: calls reserve 120 ms, media reserves 240 ms.
-        if matches!(self, Self::Chat) { 2_880 } else { 5_760 }
+        if matches!(self, Self::Chat) {
+            2_880
+        } else {
+            5_760
+        }
     }
 
     fn validate_admission(&self, call_active: bool) -> Result<(), String> {
@@ -120,7 +128,9 @@ impl NarrationKind {
             Self::Bubble(_) if call_active => {
                 Err("语音通话进行中，请先结束通话再单独朗读气泡。".into())
             }
-            Self::Preview | Self::SamplePreview if call_active => Err("通话结束后可试听声音。".into()),
+            Self::Preview | Self::SamplePreview if call_active => {
+                Err("通话结束后可试听声音。".into())
+            }
             _ => Ok(()),
         }
     }
@@ -183,7 +193,12 @@ impl Registry {
     }
 
     fn playing_job(&self, id: &str) -> Option<&Arc<TtsJob>> {
-        let job = self.current.as_ref().filter(|slot| slot.id == id)?.job.as_ref()?;
+        let job = self
+            .current
+            .as_ref()
+            .filter(|slot| slot.id == id)?
+            .job
+            .as_ref()?;
         if !job.player_started.load(Ordering::Acquire)
             || job.cancel.is_cancelled()
             || job.terminal.load(Ordering::Acquire)
@@ -227,48 +242,73 @@ impl Registry {
 
 /// Called while the voice document admission lock is held. Independent audio
 /// belongs to its document; chat narration belongs to its surviving call.
-pub(super) fn adopt_document<R: Runtime>(app: &AppHandle<R>, document_id: &str) -> Result<Option<String>, String> {
-    let document = document_id.parse::<u64>().map_err(|_| "语音页面标识无效。")?;
+pub(super) fn adopt_document<R: Runtime>(
+    app: &AppHandle<R>,
+    document_id: &str,
+) -> Result<Option<String>, String> {
+    let document = document_id
+        .parse::<u64>()
+        .map_err(|_| "语音页面标识无效。")?;
     let state = app.state::<TtsServiceState>();
     let mut registry = state.0.lock().map_err(|error| error.to_string())?;
     registry.document = document;
     registry.document_ready = false;
-    let previous = registry.current.as_ref()
+    let previous = registry
+        .current
+        .as_ref()
         .filter(|slot| !matches!(&slot.kind, NarrationKind::Chat))
         .map(|slot| slot.id.clone());
-    if let Some(id) = &previous { registry.stop(id); }
+    if let Some(id) = &previous {
+        registry.stop(id);
+    }
     Ok(previous)
 }
 
 #[tauri::command]
-pub async fn connect_tts_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
-    let document = document_id.parse::<u64>().map_err(|_| "朗读页面标识无效。")?;
+pub async fn connect_tts_document<R: Runtime>(
+    app: AppHandle<R>,
+    document_id: String,
+) -> Result<(), String> {
+    let document = document_id
+        .parse::<u64>()
+        .map_err(|_| "朗读页面标识无效。")?;
     let state = app.state::<TtsServiceState>();
     // Playback has its own physical-stop barrier. It must not delay capture
     // document adoption or restoration of the call's observable snapshot.
     let _connection = state.1.lock().await;
-    let previous = app.state::<super::document::VoiceDocumentState>().with_current(&document_id, || {
-        let mut registry = state.0.lock().map_err(|error| error.to_string())?;
-        if document != registry.document {
-            return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
-        }
-        if registry.document_ready { return Ok(None); }
-        let previous = registry.current.as_ref()
-            .filter(|slot| !matches!(&slot.kind, NarrationKind::Chat))
-            .map(|slot| slot.id.clone());
-        if let Some(id) = &previous { registry.stop(id); }
-        Ok(previous)
-    })?;
-    if let Some(id) = previous { stop_tts(app.clone(), id).await?; }
+    let previous = app
+        .state::<super::document::VoiceDocumentState>()
+        .with_current(&document_id, || {
+            let mut registry = state.0.lock().map_err(|error| error.to_string())?;
+            if document != registry.document {
+                return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
+            }
+            if registry.document_ready {
+                return Ok(None);
+            }
+            let previous = registry
+                .current
+                .as_ref()
+                .filter(|slot| !matches!(&slot.kind, NarrationKind::Chat))
+                .map(|slot| slot.id.clone());
+            if let Some(id) = &previous {
+                registry.stop(id);
+            }
+            Ok(previous)
+        })?;
+    if let Some(id) = previous {
+        stop_tts(app.clone(), id).await?;
+    }
     // A replacement may be adopted while this resource cleanup awaits native.
-    app.state::<super::document::VoiceDocumentState>().with_current(&document_id, || {
-        let mut registry = state.0.lock().map_err(|error| error.to_string())?;
-        if registry.document != document {
-            return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
-        }
-        registry.document_ready = true;
-        Ok(())
-    })
+    app.state::<super::document::VoiceDocumentState>()
+        .with_current(&document_id, || {
+            let mut registry = state.0.lock().map_err(|error| error.to_string())?;
+            if registry.document != document {
+                return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
+            }
+            registry.document_ready = true;
+            Ok(())
+        })
 }
 
 pub(super) struct PreparedNarration {
@@ -324,19 +364,25 @@ async fn prepare_voice<R: Runtime>(
     cancel: &CancellationToken,
 ) -> Result<PreparedVoice, String> {
     let sample = if config.tts_mode == VoiceTtsMode::Clone {
-        let sample = if config.clone_sample_id.is_empty() { None } else {
+        let sample = if config.clone_sample_id.is_empty() {
+            None
+        } else {
             samples::prepare_clone_sample(app, &config.clone_sample_id, cancel).await?
         };
         // A missing local asset resolves to an empty selection in this job only.
         // The clone model mode and the persisted Agent/global handle stay intact.
-        if sample.is_none() { config.clone_sample_id.clear(); }
+        if sample.is_none() {
+            config.clone_sample_id.clear();
+        }
         sample
     } else {
         None
     };
     // An empty selection leaves the model mode intact. The consumer decides on a
     // skipped group member or an explicit error for independent narration.
-    if config.has_selected_voice() { config.validate_tts()?; }
+    if config.has_selected_voice() {
+        config.validate_tts()?;
+    }
     Ok(PreparedVoice { config, sample })
 }
 
@@ -410,8 +456,14 @@ pub async fn preview_voice_clone_sample<R: Runtime>(
     sample_id: String,
 ) -> Result<VoiceServiceStart, String> {
     let started = start_narration(
-        app.clone(), tts_id.clone(), None, NarrationSource::Sample(sample_id), None, Some(document_id),
-    ).await?;
+        app.clone(),
+        tts_id.clone(),
+        None,
+        NarrationSource::Sample(sample_id),
+        None,
+        Some(document_id),
+    )
+    .await?;
     if super::call::is_active(&app)? {
         stop_tts(app, tts_id).await?;
         return Err("通话结束后可试听声音。".into());
@@ -448,10 +500,17 @@ pub(crate) async fn stop_bubble_for_messages<R: Runtime>(
     let Some(state) = app.try_state::<TtsServiceState>() else {
         return Ok(());
     };
-    let id = state.0.lock().map_err(|error| error.to_string())?
-        .current.as_ref().filter(|slot| matches!(&slot.kind,
+    let id = state
+        .0
+        .lock()
+        .map_err(|error| error.to_string())?
+        .current
+        .as_ref()
+        .filter(|slot| {
+            matches!(&slot.kind,
             NarrationKind::Bubble(source) if &source.topic == topic
-                && message_ids.contains(&source.message_id)))
+                && message_ids.contains(&source.message_id))
+        })
         .map(|slot| slot.id.clone());
     if let Some(id) = id {
         stop_tts(app.clone(), id).await?;
@@ -494,7 +553,9 @@ pub fn handle_playback_event<R: Runtime>(
     app: &AppHandle<R>,
     event: tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent,
 ) {
-    let Some(state) = app.try_state::<TtsServiceState>() else { return };
+    let Some(state) = app.try_state::<TtsServiceState>() else {
+        return;
+    };
     let Ok(registry) = state.0.lock() else { return };
     use tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent;
     match event {
@@ -505,7 +566,10 @@ pub fn handle_playback_event<R: Runtime>(
                 }
             }
         }
-        NativeVoicePlaybackEvent::Message { playback_id, message_id } => {
+        NativeVoicePlaybackEvent::Message {
+            playback_id,
+            message_id,
+        } => {
             if registry.playing_job(&playback_id).is_some() {
                 super::call::tts_status(app, &playback_id, "speaking", None, message_id);
             }
@@ -628,7 +692,15 @@ pub async fn start_tts_session<R: Runtime>(
     origin_user_message_id: Option<String>,
     bubble_source: Option<BubbleSource>,
 ) -> Result<VoiceServiceStart, String> {
-    start_narration(app, tts_id, origin_user_message_id, NarrationSource::Stored, bubble_source, Some(document_id)).await
+    start_narration(
+        app,
+        tts_id,
+        origin_user_message_id,
+        NarrationSource::Stored,
+        bubble_source,
+        Some(document_id),
+    )
+    .await
 }
 
 pub(super) async fn start_prepared_narration<R: Runtime>(
@@ -677,8 +749,12 @@ async fn start_narration<R: Runtime>(
     } else if origin_user_message_id.is_some() {
         NarrationKind::Chat
     } else {
-        let source = bubble_source.filter(|source| source.topic.is_valid()
-            && !source.message_id.is_empty() && source.message_id.len() <= 128)
+        let source = bubble_source
+            .filter(|source| {
+                source.topic.is_valid()
+                    && !source.message_id.is_empty()
+                    && source.message_id.len() <= 128
+            })
             .ok_or("朗读来源消息无效。")?;
         source.read(&app).await?;
         NarrationKind::Bubble(source)
@@ -700,7 +776,8 @@ async fn start_narration<R: Runtime>(
         // Admission and document replacement take locks in the same order.
         // An old command delayed before polling must not acquire a new slot.
         let document = document_id.as_deref().ok_or("语音页面标识无效。")?;
-        app.state::<super::document::VoiceDocumentState>().with_current(document, reserve)?
+        app.state::<super::document::VoiceDocumentState>()
+            .with_current(document, reserve)?
     };
     let work = origin_user_message_id
         .is_none()
@@ -713,8 +790,10 @@ async fn start_narration<R: Runtime>(
                 (Ok(mut prepared), NarrationKind::Bubble(source)) => {
                     let voice = async {
                         let agent_id = source.author(&app).await?;
-                        prepare_speaker(&app, &prepared.policy.config, agent_id.as_deref(), &cancel).await
-                    }.await;
+                        prepare_speaker(&app, &prepared.policy.config, agent_id.as_deref(), &cancel)
+                            .await
+                    }
+                    .await;
                     match voice {
                         Ok(voice) => {
                             Arc::make_mut(&mut prepared.policy).config = voice.config;
@@ -732,13 +811,23 @@ async fn start_narration<R: Runtime>(
             match prepare_voice(&app, policy.config.clone(), &cancel).await {
                 Ok(voice) => {
                     Arc::make_mut(&mut policy).config = voice.config;
-                    Ok(PreparedNarration { policy, sample: Ok(voice.sample) })
+                    Ok(PreparedNarration {
+                        policy,
+                        sample: Ok(voice.sample),
+                    })
                 }
                 Err(error) => Err(error),
             }
         }
         NarrationSource::Sample(sample_id) => {
-            match samples::read_clone_sample_audio(&app, &sample_id, samples::MAX_STORED_SAMPLE_BYTES, &cancel).await {
+            match samples::read_clone_sample_audio(
+                &app,
+                &sample_id,
+                samples::MAX_STORED_SAMPLE_BYTES,
+                &cancel,
+            )
+            .await
+            {
                 Ok(Some((_, bytes))) => {
                     sample_audio = Some(bytes);
                     Ok(PreparedNarration {
@@ -834,11 +923,15 @@ pub async fn submit_tts_text<R: Runtime>(
     let source = {
         let state = app.state::<TtsServiceState>();
         let registry = state.0.lock().map_err(|error| error.to_string())?;
-        registry.current.as_ref().filter(|slot| slot.id == tts_id)
+        registry
+            .current
+            .as_ref()
+            .filter(|slot| slot.id == tts_id)
             .and_then(|slot| match &slot.kind {
                 NarrationKind::Bubble(source) => Some(source.clone()),
                 _ => None,
-            }).ok_or("此任务不接收气泡朗读文本。")?
+            })
+            .ok_or("此任务不接收气泡朗读文本。")?
     };
     let updated = async {
         // Reading may finish after an edit/delete. Only the persisted source
@@ -849,9 +942,13 @@ pub async fn submit_tts_text<R: Runtime>(
         if narration.cancel.is_cancelled() {
             return Err(network::CANCELLED.into());
         }
-        narration.input.lock().map_err(|error| error.to_string())?
+        narration
+            .input
+            .lock()
+            .map_err(|error| error.to_string())?
             .submit_bubble(&text, finished)
-    }.await;
+    }
+    .await;
     if let Err(error) = updated {
         fail(&app, &narration, error.clone());
         stop_tts(app, tts_id).await?;
@@ -869,7 +966,11 @@ fn submit_preview_text<R: Runtime>(
     let narration = job(app, tts_id)
         .filter(|job| !job.cancel.is_cancelled())
         .ok_or_else(|| network::CANCELLED.to_string())?;
-    narration.input.lock().map_err(|error| error.to_string())?.submit_preview(text)?;
+    narration
+        .input
+        .lock()
+        .map_err(|error| error.to_string())?
+        .submit_preview(text)?;
     wake(app, &narration);
     Ok(())
 }
@@ -960,7 +1061,9 @@ pub fn feed_chat_event<R: Runtime>(app: &AppHandle<R>, event: &StreamEvent) {
     let Some(narration) = narration else {
         return;
     };
-    let result = narration.input.lock()
+    let result = narration
+        .input
+        .lock()
         .map_err(|_| "朗读状态已失效。".to_string())
         .and_then(|mut input| match &mut *input {
             NarrationInput::Chat(feed) => feed.accept(event),
@@ -1007,16 +1110,27 @@ async fn speak_inner<R: Runtime>(
     let (preview, sample_audio) = {
         let mut input = narration.input.lock().map_err(|error| error.to_string())?;
         match &mut *input {
-            NarrationInput::Sample(audio) => (false, Some(audio.take().ok_or("原声试听已经结束。")?)),
+            NarrationInput::Sample(audio) => {
+                (false, Some(audio.take().ok_or("原声试听已经结束。")?))
+            }
             NarrationInput::Preview(_) => (true, None),
             _ => (false, None),
         }
     };
     let mut source = NarrationReader {
-        app, narration, speech_queue: VecDeque::new(), chat_finished: false,
-        current_voice: None, last_spoken_voice: None,
+        app,
+        narration,
+        speech_queue: VecDeque::new(),
+        chat_finished: false,
+        current_voice: None,
+        last_spoken_voice: None,
     };
-    let mut player = NativeConsumer { app, narration, started: false, message_marker: None };
+    let mut player = NativeConsumer {
+        app,
+        narration,
+        started: false,
+        message_marker: None,
+    };
     if let Some(audio) = sample_audio {
         audio_codec::decode_stream(audio.into(), &narration.cancel, &mut player).await?;
         return player.finish().await;
@@ -1034,31 +1148,48 @@ async fn speak_inner<R: Runtime>(
             // the mutex only serializes this one direct synthesize callback.
             let player = tokio::sync::Mutex::new(&mut player);
             network::synthesize(
-                &narration.config, &piece.text, None, narration.sample.as_ref(),
-                &narration.cancel, |pcm| {
+                &narration.config,
+                &piece.text,
+                None,
+                narration.sample.as_ref(),
+                &narration.cancel,
+                |pcm| {
                     let player = &player;
                     async move { player.lock().await.append(pcm, &narration.cancel).await }
                 },
-            ).await?;
+            )
+            .await?;
             player.lock().await.end_segment(&narration.cancel).await?;
         }
     } else {
         let cache = match crate::vcp_modules::file_manager::get_tts_cache_root_dir(app) {
             Ok(root) => match TtsCache::open(root).await {
                 Ok(cache) => Some(cache),
-                Err(error) => { log::warn!("[VoiceTts] cache unavailable: {error}"); None }
+                Err(error) => {
+                    log::warn!("[VoiceTts] cache unavailable: {error}");
+                    None
+                }
             },
-            Err(error) => { log::warn!("[VoiceTts] cache path unavailable: {error}"); None }
-        };
-        pipeline::run(&narration.cancel, source, |piece, segment, cancel| {
-            // Waiting for stable text is not synthesis. Announce only the
-            // first actual piece; later prefetch must not overwrite speaking.
-            if !synthesis_announced {
-                synthesis_announced = true;
-                emit(app, narration, "status", "synthesizing", None);
+            Err(error) => {
+                log::warn!("[VoiceTts] cache path unavailable: {error}");
+                None
             }
-            prepare_segment(narration, cache.as_ref(), piece, segment, cancel)
-        }, &mut player).await?;
+        };
+        pipeline::run(
+            &narration.cancel,
+            source,
+            |piece, segment, cancel| {
+                // Waiting for stable text is not synthesis. Announce only the
+                // first actual piece; later prefetch must not overwrite speaking.
+                if !synthesis_announced {
+                    synthesis_announced = true;
+                    emit(app, narration, "status", "synthesizing", None);
+                }
+                prepare_segment(narration, cache.as_ref(), piece, segment, cancel)
+            },
+            &mut player,
+        )
+        .await?;
     }
     player.finish().await
 }
@@ -1090,11 +1221,17 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
 
     async fn next(&mut self, cancel: &CancellationToken) -> Result<Option<NarrationPiece>, String> {
         loop {
-            if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
+            if cancel.is_cancelled() {
+                return Err(network::CANCELLED.into());
+            }
             let notified = self.narration.ready.notified();
             let mut speaker = None;
             let (piece, guidance, notice) = {
-                let mut input = self.narration.input.lock().map_err(|error| error.to_string())?;
+                let mut input = self
+                    .narration
+                    .input
+                    .lock()
+                    .map_err(|error| error.to_string())?;
                 match &mut *input {
                     NarrationInput::Chat(feed) => {
                         if let Some(update) = feed.take_update()? {
@@ -1104,10 +1241,16 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                         if let Some(piece) = self.speech_queue.pop_front() {
                             log::debug!("[VoiceTts] preparing message={}", piece.message_id);
                             speaker = Some((piece.message_id, piece.agent_id, feed.is_group()));
-                            (ReplyPiece::Text(piece.text), piece.instruction, piece.notice)
+                            (
+                                ReplyPiece::Text(piece.text),
+                                piece.instruction,
+                                piece.notice,
+                            )
                         } else if self.chat_finished {
                             (ReplyPiece::Finished, None, false)
-                        } else { (ReplyPiece::Wait, None, false) }
+                        } else {
+                            (ReplyPiece::Wait, None, false)
+                        }
                     }
                     NarrationInput::Bubble(message) => message.next_piece(),
                     NarrationInput::Preview(reply) => (reply.next(), None, false),
@@ -1128,30 +1271,76 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                                 // may reach its cap before any ordinary piece.
                                 // Its independently selected voice still owns
                                 // the explanation even without prior playback.
-                                let current = if let Some((_, voice)) = self.current_voice.as_ref()
-                                    .filter(|(id, _)| id == message_id) {
+                                let current = if let Some((_, voice)) = self
+                                    .current_voice
+                                    .as_ref()
+                                    .filter(|(id, _)| id == message_id)
+                                {
                                     voice.clone()
                                 } else {
-                                    Arc::new(prepare_speaker(self.app, &self.narration.config, agent_id.as_deref(), cancel).await?)
+                                    Arc::new(
+                                        prepare_speaker(
+                                            self.app,
+                                            &self.narration.config,
+                                            agent_id.as_deref(),
+                                            cancel,
+                                        )
+                                        .await?,
+                                    )
                                 };
-                                let voice = if current.config.has_selected_voice() { current } else {
-                                    Arc::new(prepare_voice(self.app, self.narration.config.clone(), cancel).await?)
+                                let voice = if current.config.has_selected_voice() {
+                                    current
+                                } else {
+                                    Arc::new(
+                                        prepare_voice(
+                                            self.app,
+                                            self.narration.config.clone(),
+                                            cancel,
+                                        )
+                                        .await?,
+                                    )
                                 };
-                                if !voice.config.has_selected_voice() { continue; }
+                                if !voice.config.has_selected_voice() {
+                                    continue;
+                                }
                                 self.last_spoken_voice = Some((message_id.clone(), voice.clone()));
                                 Some(voice)
                             }
-                        } else { None };
-                        return Ok(Some(NarrationPiece { text, guidance: None, voice }));
+                        } else {
+                            None
+                        };
+                        return Ok(Some(NarrationPiece {
+                            text,
+                            guidance: None,
+                            voice,
+                        }));
                     }
                     let voice = if let Some((message_id, agent_id, group)) = speaker {
-                        if self.current_voice.as_ref().is_none_or(|(id, _)| id != &message_id) {
-                            let agent_id = agent_id.as_deref().ok_or("无法确定回复的发言者，已停止朗读。")?;
-                            let voice = prepare_speaker(self.app, &self.narration.config, Some(agent_id), cancel).await?;
+                        if self
+                            .current_voice
+                            .as_ref()
+                            .is_none_or(|(id, _)| id != &message_id)
+                        {
+                            let agent_id = agent_id
+                                .as_deref()
+                                .ok_or("无法确定回复的发言者，已停止朗读。")?;
+                            let voice = prepare_speaker(
+                                self.app,
+                                &self.narration.config,
+                                Some(agent_id),
+                                cancel,
+                            )
+                            .await?;
                             self.current_voice = Some((message_id, Arc::new(voice)));
                         }
-                        if self.current_voice.as_ref().is_some_and(|(_, voice)| !voice.config.has_selected_voice()) {
-                            if group { continue; }
+                        if self
+                            .current_voice
+                            .as_ref()
+                            .is_some_and(|(_, voice)| !voice.config.has_selected_voice())
+                        {
+                            if group {
+                                continue;
+                            }
                             return Err("当前未选择朗读音色，请先选择音色。".into());
                         }
                         self.last_spoken_voice.clone_from(&self.current_voice);
@@ -1159,7 +1348,11 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                     } else {
                         None
                     };
-                    return Ok(Some(NarrationPiece { text, guidance, voice }));
+                    return Ok(Some(NarrationPiece {
+                        text,
+                        guidance,
+                        voice,
+                    }));
                 }
                 ReplyPiece::Finished => return Ok(None),
                 ReplyPiece::Wait => tokio::select! {
@@ -1179,37 +1372,57 @@ async fn prepare_segment(
     segment: Arc<SegmentBuffer>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
-    let config = piece.voice.as_ref().map_or(&narration.config, |voice| &voice.config);
-    let sample = piece.voice.as_ref().map_or(narration.sample.as_ref(), |voice| voice.sample.as_ref());
+    let config = piece
+        .voice
+        .as_ref()
+        .map_or(&narration.config, |voice| &voice.config);
+    let sample = piece
+        .voice
+        .as_ref()
+        .map_or(narration.sample.as_ref(), |voice| voice.sample.as_ref());
     // Preparation validates the identity and shares reference audio. The large
     // JSON body is materialized only if synthesis is needed after this lookup.
-    let request = network::prepare_synthesis(config, &piece.text, piece.guidance.as_deref(), sample)?;
+    let request =
+        network::prepare_synthesis(config, &piece.text, piece.guidance.as_deref(), sample)?;
     let key = cache::segment_key(&request.identity);
     if let Some(cache) = cache {
         match cache.lookup(&key, &cancel).await {
             Ok(Some(pcm)) => {
-                log::debug!("[VoiceTts] cache hit job={} key={key} pcm_bytes={}", narration.id, pcm.len());
+                log::debug!(
+                    "[VoiceTts] cache hit job={} key={key} pcm_bytes={}",
+                    narration.id,
+                    pcm.len()
+                );
                 segment.push(pcm)?;
                 return segment.finish();
             }
-            Ok(None) => {},
+            Ok(None) => {}
             Err(_) if cancel.is_cancelled() => return Err(network::CANCELLED.into()),
             Err(error) => log::warn!("[VoiceTts] cache lookup failed: {error}"),
         }
     }
-    log::debug!("[VoiceTts] network synthesis job={} key={key} cache_enabled={}", narration.id, cache.is_some());
+    log::debug!(
+        "[VoiceTts] network synthesis job={} key={key} cache_enabled={}",
+        narration.id,
+        cache.is_some()
+    );
     let audio = network::synthesize_prepared(config, &request, &cancel, |pcm| {
         std::future::ready(if cancel.is_cancelled() {
             Err(network::CANCELLED.into())
-        } else { segment.push(pcm) })
-    }).await?;
+        } else {
+            segment.push(pcm)
+        })
+    })
+    .await?;
     // The consumer can hand over the segment as soon as its last PCM packet is
     // accepted; cache publication is owned and awaited separately by producer.
     segment.finish()?;
     if let Some(cache) = cache {
         let encoded = match audio {
             network::SynthesizedAudio::Encoded { format, bytes } => Ok((format, bytes)),
-            network::SynthesizedAudio::StreamedPcm => segment.wav(&cancel).await
+            network::SynthesizedAudio::StreamedPcm => segment
+                .wav(&cancel)
+                .await
                 .map(|bytes| (super::audio_codec::ContainerFormat::Wav, bytes.into())),
         };
         let committed = match encoded {
@@ -1217,7 +1430,9 @@ async fn prepare_segment(
             Err(error) => Err(error),
         };
         if let Err(error) = committed {
-            if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
+            if cancel.is_cancelled() {
+                return Err(network::CANCELLED.into());
+            }
             log::warn!("[VoiceTts] segment cache write failed; playback continues: {error}");
         } else {
             log::debug!("[VoiceTts] cache stored job={} key={key}", narration.id);
@@ -1234,7 +1449,9 @@ struct NativeConsumer<'a, R: Runtime> {
 }
 
 impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
-    fn mark_message(&mut self, message_id: String) { self.message_marker = Some(message_id); }
+    fn mark_message(&mut self, message_id: String) {
+        self.message_marker = Some(message_id);
+    }
 
     async fn append(&mut self, pcm: Vec<u8>, cancel: &CancellationToken) -> Result<(), String> {
         if !self.started {
@@ -1245,23 +1462,44 @@ impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
                 let registry = state.0.lock().map_err(|error| error.to_string())?;
                 registry.admit_player(self.narration)?;
             }
-            playback_call(cancel, tauri_plugin_vcp_mobile::voice::start_playback(
-                self.app.clone(), self.narration.id.clone(), self.narration.startup_frames)).await?;
+            playback_call(
+                cancel,
+                tauri_plugin_vcp_mobile::voice::start_playback(
+                    self.app.clone(),
+                    self.narration.id.clone(),
+                    self.narration.startup_frames,
+                ),
+            )
+            .await?;
             self.started = true;
         }
         // Preview may deliver a complete decoded response here. Bound each
         // native handoff without splitting and rebuilding the PCM upstream.
         for packet in pcm.chunks(PCM_PACKET_BYTES) {
-            playback_call(cancel, tauri_plugin_vcp_mobile::voice::append_playback(
-                self.app.clone(), self.narration.id.clone(), STANDARD.encode(packet), self.message_marker.take())).await?;
+            playback_call(
+                cancel,
+                tauri_plugin_vcp_mobile::voice::append_playback(
+                    self.app.clone(),
+                    self.narration.id.clone(),
+                    STANDARD.encode(packet),
+                    self.message_marker.take(),
+                ),
+            )
+            .await?;
         }
         Ok(())
     }
 
     async fn end_segment(&mut self, cancel: &CancellationToken) -> Result<(), String> {
         if self.started {
-            playback_call(cancel, tauri_plugin_vcp_mobile::voice::end_playback_segment(
-                self.app.clone(), self.narration.id.clone())).await?;
+            playback_call(
+                cancel,
+                tauri_plugin_vcp_mobile::voice::end_playback_segment(
+                    self.app.clone(),
+                    self.narration.id.clone(),
+                ),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1270,9 +1508,17 @@ impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
 impl<R: Runtime> NativeConsumer<'_, R> {
     async fn finish(&mut self) -> Result<(), String> {
         if self.started {
-            playback_call(&self.narration.cancel, tauri_plugin_vcp_mobile::voice::finish_playback(
-                self.app.clone(), self.narration.id.clone())).await?;
-            self.narration.player_started.store(false, Ordering::Release);
+            playback_call(
+                &self.narration.cancel,
+                tauri_plugin_vcp_mobile::voice::finish_playback(
+                    self.app.clone(),
+                    self.narration.id.clone(),
+                ),
+            )
+            .await?;
+            self.narration
+                .player_started
+                .store(false, Ordering::Release);
         }
         Ok(())
     }
@@ -1283,13 +1529,20 @@ mod tests {
     use super::*;
 
     fn allocate_document<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
-        if app.try_state::<super::super::document::VoiceDocumentState>().is_none() {
+        if app
+            .try_state::<super::super::document::VoiceDocumentState>()
+            .is_none()
+        {
             app.manage(super::super::document::VoiceDocumentState::default());
         }
-        app.state::<super::super::document::VoiceDocumentState>().allocate()
+        app.state::<super::super::document::VoiceDocumentState>()
+            .allocate()
     }
 
-    async fn connect_playback_document<R: Runtime>(app: AppHandle<R>, document: String) -> Result<(), String> {
+    async fn connect_playback_document<R: Runtime>(
+        app: AppHandle<R>,
+        document: String,
+    ) -> Result<(), String> {
         // Exercise real voice admission and the independent playback barrier;
         // these tests do not pretend the host has a native microphone bridge.
         super::super::document::adopt_document(&app, &document)?;
@@ -1299,22 +1552,33 @@ mod tests {
         install_kind(registry, id, NarrationKind::Chat)
     }
     fn bubble_source() -> BubbleSource {
-        BubbleSource { topic: TopicKey::new("agent", "a", "t"), message_id: "message".into() }
+        BubbleSource {
+            topic: TopicKey::new("agent", "a", "t"),
+            message_id: "message".into(),
+        }
     }
 
     #[tokio::test]
     async fn new_documents_retire_every_independent_kind_but_leave_chat_owned_audio() {
-        for kind in [NarrationKind::Bubble(bubble_source()), NarrationKind::Preview,
-            NarrationKind::SamplePreview, NarrationKind::Chat] {
+        for kind in [
+            NarrationKind::Bubble(bubble_source()),
+            NarrationKind::Preview,
+            NarrationKind::SamplePreview,
+            NarrationKind::Chat,
+        ] {
             let app = tauri::test::mock_app();
             app.manage(TtsServiceState::default());
             let old_document = allocate_document(app.handle().clone()).unwrap();
-            connect_playback_document(app.handle().clone(), old_document.clone()).await.unwrap();
+            connect_playback_document(app.handle().clone(), old_document.clone())
+                .await
+                .unwrap();
             let state = app.state::<TtsServiceState>();
             let is_chat = matches!(&kind, NarrationKind::Chat);
             let old = install_kind(&mut state.0.lock().unwrap(), "old", kind);
             let next = allocate_document(app.handle().clone()).unwrap();
-            connect_playback_document(app.handle().clone(), next.clone()).await.unwrap();
+            connect_playback_document(app.handle().clone(), next.clone())
+                .await
+                .unwrap();
             assert_eq!(old.cancel.is_cancelled(), !is_chat);
             let registry = state.0.lock().unwrap();
             assert_eq!(registry.current.is_some(), is_chat);
@@ -1329,10 +1593,21 @@ mod tests {
         app.manage(TtsServiceState::default());
         let old = allocate_document(app.handle().clone()).unwrap();
         let current = allocate_document(app.handle().clone()).unwrap();
-        connect_playback_document(app.handle().clone(), current.clone()).await.unwrap();
-        assert!(connect_playback_document(app.handle().clone(), old.clone()).await.is_err());
-        let error = preview_voice_clone_sample(app.handle().clone(), "late-sample".into(), old,
-            "sample-that-must-never-be-read".into()).await.err().unwrap();
+        connect_playback_document(app.handle().clone(), current.clone())
+            .await
+            .unwrap();
+        assert!(connect_playback_document(app.handle().clone(), old.clone())
+            .await
+            .is_err());
+        let error = preview_voice_clone_sample(
+            app.handle().clone(),
+            "late-sample".into(),
+            old,
+            "sample-that-must-never-be-read".into(),
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(error.starts_with("cancelled:"));
         // A late allocation alone is harmless until its still-live caller connects.
         let _unused = allocate_document(app.handle().clone()).unwrap();
@@ -1347,7 +1622,9 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
         let first = allocate_document(app.handle().clone()).unwrap();
-        connect_playback_document(app.handle().clone(), first).await.unwrap();
+        connect_playback_document(app.handle().clone(), first)
+            .await
+            .unwrap();
         let state = app.state::<TtsServiceState>();
         let old = install_kind(&mut state.0.lock().unwrap(), "old", NarrationKind::Preview);
         // Hold the same barrier as an existing in-flight native stop.
@@ -1356,21 +1633,45 @@ mod tests {
         let connect = connect_playback_document(app.handle().clone(), next.clone());
         let retry = connect_playback_document(app.handle().clone(), next.clone());
         tokio::pin!(connect, retry);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut connect).await.is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut connect)
+                .await
+                .is_err()
+        );
         assert!(old.cancel.is_cancelled());
         // Identity is already usable by the independent capture owner even
         // while this playback-specific stop receipt remains outstanding.
-        assert!(app.state::<super::super::document::VoiceDocumentState>()
-            .with_current(&next, || Ok(())).is_ok());
-        assert!(state.0.lock().unwrap().validate_document(Some(&next)).is_err());
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut retry).await.is_err());
+        assert!(app
+            .state::<super::super::document::VoiceDocumentState>()
+            .with_current(&next, || Ok(()))
+            .is_ok());
+        assert!(state
+            .0
+            .lock()
+            .unwrap()
+            .validate_document(Some(&next))
+            .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut retry)
+                .await
+                .is_err()
+        );
         drop(stopping);
         connect.await.unwrap();
         retry.await.unwrap();
-        let fresh = install_kind(&mut state.0.lock().unwrap(), "fresh", NarrationKind::SamplePreview);
-        connect_playback_document(app.handle().clone(), next).await.unwrap();
+        let fresh = install_kind(
+            &mut state.0.lock().unwrap(),
+            "fresh",
+            NarrationKind::SamplePreview,
+        );
+        connect_playback_document(app.handle().clone(), next)
+            .await
+            .unwrap();
         assert!(!fresh.cancel.is_cancelled());
-        assert_eq!(state.0.lock().unwrap().current.as_ref().unwrap().id, "fresh");
+        assert_eq!(
+            state.0.lock().unwrap().current.as_ref().unwrap().id,
+            "fresh"
+        );
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1379,7 +1680,9 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
         let first = allocate_document(app.handle().clone()).unwrap();
-        connect_playback_document(app.handle().clone(), first).await.unwrap();
+        connect_playback_document(app.handle().clone(), first)
+            .await
+            .unwrap();
         let state = app.state::<TtsServiceState>();
         let old = install_kind(&mut state.0.lock().unwrap(), "old", NarrationKind::Preview);
         state.0.lock().unwrap().admit_player(&old).unwrap();
@@ -1387,10 +1690,17 @@ mod tests {
         // Host has no native sink: both attempts must propagate its real failure,
         // rather than a repeated document connection bypassing the release.
         for _ in 0..2 {
-            assert!(connect_playback_document(app.handle().clone(), next.clone()).await.is_err());
+            assert!(
+                connect_playback_document(app.handle().clone(), next.clone())
+                    .await
+                    .is_err()
+            );
             let registry = state.0.lock().unwrap();
             assert!(registry.validate_document(Some(&next)).is_err());
-            assert!(Arc::ptr_eq(registry.current.as_ref().unwrap().job.as_ref().unwrap(), &old));
+            assert!(Arc::ptr_eq(
+                registry.current.as_ref().unwrap().job.as_ref().unwrap(),
+                &old
+            ));
             assert!(old.cancel.is_cancelled());
             assert!(old.player_started.load(Ordering::Acquire));
         }
@@ -1401,15 +1711,37 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
         let document = allocate_document(app.handle().clone()).unwrap();
-        connect_playback_document(app.handle().clone(), document.clone()).await.unwrap();
+        connect_playback_document(app.handle().clone(), document.clone())
+            .await
+            .unwrap();
         app.state::<super::super::document::VoiceDocumentState>()
-            .invalidate(Some(&document)).unwrap();
-        assert!(connect_tts_document(app.handle().clone(), document.clone()).await.is_err());
-        assert!(connect_playback_document(app.handle().clone(), document.clone()).await.is_err());
-        let error = preview_voice_clone_sample(app.handle().clone(), "late-invalidated".into(), document,
-            "sample-that-must-never-be-read".into()).await.err().unwrap();
+            .invalidate(Some(&document))
+            .unwrap();
+        assert!(connect_tts_document(app.handle().clone(), document.clone())
+            .await
+            .is_err());
+        assert!(
+            connect_playback_document(app.handle().clone(), document.clone())
+                .await
+                .is_err()
+        );
+        let error = preview_voice_clone_sample(
+            app.handle().clone(),
+            "late-invalidated".into(),
+            document,
+            "sample-that-must-never-be-read".into(),
+        )
+        .await
+        .err()
+        .unwrap();
         assert!(error.starts_with("cancelled:"));
-        assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
+        assert!(app
+            .state::<TtsServiceState>()
+            .0
+            .lock()
+            .unwrap()
+            .current
+            .is_none());
     }
 
     #[tokio::test]
@@ -1417,20 +1749,41 @@ mod tests {
         for stop_after_body in [false, true] {
             let app = tauri::test::mock_app();
             let mut registry = Registry::default();
-            let narration = install_kind(&mut registry, "truncated", NarrationKind::Bubble(bubble_source()));
+            let narration = install_kind(
+                &mut registry,
+                "truncated",
+                NarrationKind::Bubble(bubble_source()),
+            );
             let mut speech = MessageSpeech::new();
-            speech.update(&format!("正在朗读。\n\n{}", " ".repeat(network::MAX_TEXT_BYTES)), true).unwrap();
+            speech
+                .update(
+                    &format!("正在朗读。\n\n{}", " ".repeat(network::MAX_TEXT_BYTES)),
+                    true,
+                )
+                .unwrap();
             *narration.input.lock().unwrap() = NarrationInput::Bubble(speech);
             let mut reader = NarrationReader {
-                app: app.handle(), narration: &narration, speech_queue: VecDeque::new(),
-                chat_finished: false, current_voice: None, last_spoken_voice: None,
+                app: app.handle(),
+                narration: &narration,
+                speech_queue: VecDeque::new(),
+                chat_finished: false,
+                current_voice: None,
+                last_spoken_voice: None,
             };
-            assert_eq!(reader.next(&narration.cancel).await.unwrap().unwrap().text, "正在朗读。");
+            assert_eq!(
+                reader.next(&narration.cancel).await.unwrap().unwrap().text,
+                "正在朗读。"
+            );
             if stop_after_body {
                 registry.stop(&narration.id);
-                assert!(matches!(reader.next(&narration.cancel).await, Err(error) if error == network::CANCELLED));
+                assert!(
+                    matches!(reader.next(&narration.cancel).await, Err(error) if error == network::CANCELLED)
+                );
             } else {
-                assert_eq!(reader.next(&narration.cancel).await.unwrap().unwrap().text, "语音内容过长，剩余内容已截断");
+                assert_eq!(
+                    reader.next(&narration.cancel).await.unwrap().unwrap().text,
+                    "语音内容过长，剩余内容已截断"
+                );
                 assert!(reader.next(&narration.cancel).await.unwrap().is_none());
                 assert!(!narration.cancel.is_cancelled());
                 // Ending text admission is not playback completion. The speak
@@ -1497,11 +1850,17 @@ mod tests {
     #[test]
     fn unconfigured_or_cancelled_pending_setup_does_not_keep_a_busy_slot() {
         let mut registry = Registry::default();
-        let pending = registry.reserve("unconfigured".into(), NarrationKind::Chat).unwrap();
+        let pending = registry
+            .reserve("unconfigured".into(), NarrationKind::Chat)
+            .unwrap();
         assert!(registry.stop("unconfigured").is_none());
         assert!(pending.is_cancelled());
-        registry.reserve("next".into(), NarrationKind::Chat).unwrap();
-        assert!(registry.reserve("unconfigured".into(), NarrationKind::Chat).is_err());
+        registry
+            .reserve("next".into(), NarrationKind::Chat)
+            .unwrap();
+        assert!(registry
+            .reserve("unconfigured".into(), NarrationKind::Chat)
+            .is_err());
     }
 
     #[test]
@@ -1515,11 +1874,19 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let observed = events.clone();
         app.listen(TTS_EVENT, move |event| {
-            observed.lock().unwrap().push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+            observed
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
         });
-        let started = |id: &str| handle_playback_event(app.handle(), NativeVoicePlaybackEvent::Started {
-            playback_id: id.into(),
-        });
+        let started = |id: &str| {
+            handle_playback_event(
+                app.handle(),
+                NativeVoicePlaybackEvent::Started {
+                    playback_id: id.into(),
+                },
+            )
+        };
         started("old"); // No native output has been admitted yet.
         assert!(events.lock().unwrap().is_empty());
         state.0.lock().unwrap().admit_player(&old).unwrap();
@@ -1530,7 +1897,11 @@ mod tests {
         assert_eq!(events.lock().unwrap()[0]["stage"], "speaking");
         state.0.lock().unwrap().stop("old");
         state.0.lock().unwrap().complete("old");
-        let current = install_kind(&mut state.0.lock().unwrap(), "sample", NarrationKind::SamplePreview);
+        let current = install_kind(
+            &mut state.0.lock().unwrap(),
+            "sample",
+            NarrationKind::SamplePreview,
+        );
         state.0.lock().unwrap().admit_player(&current).unwrap();
         started("old");
         started("sample");
@@ -1593,9 +1964,14 @@ mod tests {
         let job = install(&mut state.0.lock().unwrap(), "late-worker");
         let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = events.clone();
-        app.listen(TTS_EVENT, move |_| { observed.fetch_add(1, Ordering::SeqCst); });
+        app.listen(TTS_EVENT, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        });
         job.cancel.cancel();
-        assert_eq!(speak_inner(app.handle(), &job).await.unwrap_err(), network::CANCELLED);
+        assert_eq!(
+            speak_inner(app.handle(), &job).await.unwrap_err(),
+            network::CANCELLED
+        );
         assert_eq!(events.load(Ordering::SeqCst), 0);
     }
 
@@ -1617,8 +1993,9 @@ mod tests {
                 "data": STANDARD.encode(pcm)
             }}, "finish_reason": null}]});
             let body = format!("data: {audio}\n\ndata: [DONE]\n\n");
-            let router = Router::new().route("/v1/chat/completions", post(
-                move |Json(request): Json<serde_json::Value>| {
+            let router = Router::new().route(
+                "/v1/chat/completions",
+                post(move |Json(request): Json<serde_json::Value>| {
                     let captured = captured.clone();
                     let body = body.clone();
                     async move {
@@ -1628,33 +2005,50 @@ mod tests {
                             requests.len()
                         };
                         if fail_first && attempt == 1 {
-                            (StatusCode::SERVICE_UNAVAILABLE,
-                                [("content-type", "application/json")], "{}".to_owned())
+                            (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("content-type", "application/json")],
+                                "{}".to_owned(),
+                            )
                         } else {
-                            (StatusCode::OK, [("content-type", "text/event-stream")], body)
+                            (
+                                StatusCode::OK,
+                                [("content-type", "text/event-stream")],
+                                body,
+                            )
                         }
                     }
-                },
-            ));
+                }),
+            );
             let shutdown = CancellationToken::new();
             let stopped = shutdown.clone();
             let server = tokio::spawn(async move {
                 axum::serve(listener, router)
                     .with_graceful_shutdown(stopped.cancelled_owned())
-                    .await.unwrap();
+                    .await
+                    .unwrap();
             });
-            Self { base_url, requests, shutdown, server }
+            Self {
+                base_url,
+                requests,
+                shutdown,
+                server,
+            }
         }
 
         async fn stop(&mut self) {
             self.shutdown.cancel();
             tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.server)
-                .await.expect("fixture server stops").unwrap();
+                .await
+                .expect("fixture server stops")
+                .unwrap();
         }
     }
 
     impl Drop for SegmentHttpFixture {
-        fn drop(&mut self) { self.shutdown.cancel(); }
+        fn drop(&mut self) {
+            self.shutdown.cancel();
+        }
     }
 
     fn segment_fixture_job(base_url: &str) -> Arc<TtsJob> {
@@ -1668,33 +2062,56 @@ mod tests {
     }
 
     fn fixture_piece() -> NarrationPiece {
-        NarrationPiece { text: "这是同一句待合成的文本。".into(), guidance: Some(Arc::from("轻声")), voice: None }
+        NarrationPiece {
+            text: "这是同一句待合成的文本。".into(),
+            guidance: Some(Arc::from("轻声")),
+            voice: None,
+        }
     }
 
     async fn buffered_pcm(segment: &Arc<SegmentBuffer>, cancel: &CancellationToken) -> Vec<u8> {
         super::super::wav::pcm16_mono(&segment.wav(cancel).await.unwrap(), 24000).unwrap()
     }
 
-    async fn clone_library_fixture() -> (tauri::App<tauri::test::MockRuntime>, tempfile::TempDir, String) {
+    async fn clone_library_fixture() -> (
+        tauri::App<tauri::test::MockRuntime>,
+        tempfile::TempDir,
+        String,
+    ) {
         use sha2::Digest;
         let directory = tempfile::tempdir_in(".").unwrap();
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
-        context.config_mut().app.app_directories_override = Some(
-            tauri::utils::config::AppDirectoriesOverride::Root(directory.path().canonicalize().unwrap()),
-        );
+        context.config_mut().app.app_directories_override =
+            Some(tauri::utils::config::AppDirectoriesOverride::Root(
+                directory.path().canonicalize().unwrap(),
+            ));
         let app = tauri::test::mock_builder().build(context).unwrap();
         let root = app.path().app_data_dir().unwrap().join("voice_library");
-        tokio::fs::create_dir_all(root.join("samples")).await.unwrap();
+        tokio::fs::create_dir_all(root.join("samples"))
+            .await
+            .unwrap();
         let id = "a".repeat(32);
         let audio = audio_codec::pcm_wav(&vec![0; 4800]).unwrap();
-        tokio::fs::write(root.join("samples").join(format!("{id}.wav")), &audio).await.unwrap();
+        tokio::fs::write(root.join("samples").join(format!("{id}.wav")), &audio)
+            .await
+            .unwrap();
         let sample = samples::VoiceCloneModelDto {
-            id: id.clone(), name: "Reference".into(), file_name: "reference.wav".into(),
-            format: samples::CloneSampleFormat::Wav, file_bytes: audio.len() as u64, duration_ms: 100,
-            file_hash: hex::encode(sha2::Sha256::digest(&audio)), created_at: 1, updated_at: 1,
+            id: id.clone(),
+            name: "Reference".into(),
+            file_name: "reference.wav".into(),
+            format: samples::CloneSampleFormat::Wav,
+            file_bytes: audio.len() as u64,
+            duration_ms: 100,
+            file_hash: hex::encode(sha2::Sha256::digest(&audio)),
+            created_at: 1,
+            updated_at: 1,
         };
-        tokio::fs::write(root.join("registry.json"), serde_json::to_vec(
-            &serde_json::json!({"version":1,"samples":[sample]})).unwrap()).await.unwrap();
+        tokio::fs::write(
+            root.join("registry.json"),
+            serde_json::to_vec(&serde_json::json!({"version":1,"samples":[sample]})).unwrap(),
+        )
+        .await
+        .unwrap();
         (app, directory, id)
     }
 
@@ -1716,34 +2133,74 @@ mod tests {
         app.manage(agents);
         let mut narration = segment_fixture_job(base_url);
         Arc::get_mut(&mut narration).unwrap().config.tts_mode = VoiceTtsMode::Clone;
-        Arc::get_mut(&mut narration).unwrap().config.clone_sample_id.clear();
+        Arc::get_mut(&mut narration)
+            .unwrap()
+            .config
+            .clone_sample_id
+            .clear();
         narration.worker_started.store(true, Ordering::Release);
-        app.manage(TtsServiceState(Mutex::new(Registry {
-            current: Some(Slot { id: narration.id.clone(), cancel: narration.cancel.clone(),
-                job: Some(narration.clone()), kind: NarrationKind::Chat }),
-            ..Default::default()
-        }), tokio::sync::Mutex::new(())));
+        app.manage(TtsServiceState(
+            Mutex::new(Registry {
+                current: Some(Slot {
+                    id: narration.id.clone(),
+                    cancel: narration.cancel.clone(),
+                    job: Some(narration.clone()),
+                    kind: NarrationKind::Chat,
+                }),
+                ..Default::default()
+            }),
+            tokio::sync::Mutex::new(()),
+        ));
         narration
     }
 
     fn feed_member(app: &tauri::App<tauri::test::MockRuntime>, id: &str, agent: &str, text: &str) {
-        feed_chat_event(app.handle(), &StreamEvent::end(
-            id.into(), Some(serde_json::json!({"isGroupMessage":true,"agentId":agent,"originUserMessageId":"origin"})),
-            Some("completed".into()), Some(text.into()), None, None, None,
-        ));
+        feed_chat_event(
+            app.handle(),
+            &StreamEvent::end(
+                id.into(),
+                Some(
+                    serde_json::json!({"isGroupMessage":true,"agentId":agent,"originUserMessageId":"origin"}),
+                ),
+                Some("completed".into()),
+                Some(text.into()),
+                None,
+                None,
+                None,
+            ),
+        );
     }
 
     #[tokio::test]
-    async fn truncation_notice_uses_previous_playable_voice_when_the_last_group_member_is_unvoiced() {
+    async fn truncation_notice_uses_previous_playable_voice_when_the_last_group_member_is_unvoiced()
+    {
         let app = tauri::test::mock_app();
-        let narration = group_narration_fixture(&app, "https://example.invalid/v1",
-            crate::vcp_modules::agent_types::AgentVoiceConfig { enabled: false, ..Default::default() });
+        let narration = group_narration_fixture(
+            &app,
+            "https://example.invalid/v1",
+            crate::vcp_modules::agent_types::AgentVoiceConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
         let body = "上一位已朗读。";
-        feed_member(&app, "first", "b", &format!("{body}{}", " ".repeat(network::MAX_TEXT_BYTES - 8 - body.len())));
+        feed_member(
+            &app,
+            "first",
+            "b",
+            &format!(
+                "{body}{}",
+                " ".repeat(network::MAX_TEXT_BYTES - 8 - body.len())
+            ),
+        );
         feed_member(&app, "last", "a", "没有选择音色的末位成员触发截断。");
         let mut reader = NarrationReader {
-            app: app.handle(), narration: &narration, speech_queue: VecDeque::new(),
-            chat_finished: false, current_voice: None, last_spoken_voice: None,
+            app: app.handle(),
+            narration: &narration,
+            speech_queue: VecDeque::new(),
+            chat_finished: false,
+            current_voice: None,
+            last_spoken_voice: None,
         };
         let first = reader.next(&narration.cancel).await.unwrap().unwrap();
         assert_eq!(first.text, body);
@@ -1752,7 +2209,10 @@ mod tests {
         assert_eq!(reader.message_id(), Some("first"));
         assert_eq!(notice.text, "语音内容过长，剩余内容已截断");
         assert!(notice.guidance.is_none());
-        assert!(Arc::ptr_eq(first.voice.as_ref().unwrap(), notice.voice.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(
+            first.voice.as_ref().unwrap(),
+            notice.voice.as_ref().unwrap()
+        ));
         assert_eq!(notice.voice.unwrap().config.voice, "苏打");
         assert!(reader.next(&narration.cancel).await.unwrap().is_none());
         assert!(!narration.cancel.is_cancelled());
@@ -1761,12 +2221,22 @@ mod tests {
     #[tokio::test]
     async fn truncation_before_any_spoken_body_keeps_the_current_members_independent_voice() {
         let app = tauri::test::mock_app();
-        let narration = group_narration_fixture(&app, "https://example.invalid/v1",
-            crate::vcp_modules::agent_types::AgentVoiceConfig { enabled: false, ..Default::default() });
+        let narration = group_narration_fixture(
+            &app,
+            "https://example.invalid/v1",
+            crate::vcp_modules::agent_types::AgentVoiceConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
         feed_member(&app, "first", "b", &" ".repeat(network::MAX_TEXT_BYTES + 1));
         let mut reader = NarrationReader {
-            app: app.handle(), narration: &narration, speech_queue: VecDeque::new(),
-            chat_finished: false, current_voice: None, last_spoken_voice: None,
+            app: app.handle(),
+            narration: &narration,
+            speech_queue: VecDeque::new(),
+            chat_finished: false,
+            current_voice: None,
+            last_spoken_voice: None,
         };
         let notice = reader.next(&narration.cancel).await.unwrap().unwrap();
         assert_eq!(notice.text, "语音内容过长，剩余内容已截断");
@@ -1780,11 +2250,17 @@ mod tests {
         use crate::vcp_modules::{
             agent_service::{create_default_config, AgentConfigState},
             db_manager::DbState,
-            settings_manager::{ConfigDomain, ConfigSaveResult, ConfigUpdate, DomainPatch, SettingsState},
+            settings_manager::{
+                ConfigDomain, ConfigSaveResult, ConfigUpdate, DomainPatch, SettingsState,
+            },
         };
         async fn save_global(state: &SettingsState, db: &DbState, voice: &str, stream: bool) {
             let baseline = state.read_snapshot(db).await.unwrap();
-            let result = state.apply(db, ConfigUpdate { patches: vec![DomainPatch {
+            let result = state
+                .apply(
+                    db,
+                    ConfigUpdate {
+                        patches: vec![DomainPatch {
                 domain: ConfigDomain::Voice,
                 expected_revision: baseline.domains[&ConfigDomain::Voice].revision.clone(),
                 changes: serde_json::json!({
@@ -1795,11 +2271,19 @@ mod tests {
                     "tts.stream":baseline.data.voice.tts.stream,
                     "connection.apiKey":baseline.data.voice.connection.api_key,
                 }).as_object().unwrap().clone(),
-            }] }, |_, _| {}).await.unwrap();
+            }],
+                    },
+                    |_, _| {},
+                )
+                .await
+                .unwrap();
             assert!(matches!(result, ConfigSaveResult::Saved { .. }));
         }
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         for migration in [
             include_str!("../../../../migrations/0100_baseline_v2.sql"),
             include_str!("../../../../migrations/0103_config_domains.sql"),
@@ -1822,23 +2306,32 @@ mod tests {
 
         save_global(&settings, &db, "茉莉", false).await;
         let first = prepare_narration(app.handle(), &cancel).await.unwrap();
-        let independent = prepare_speaker(app.handle(), &first.policy.config, Some("a"), &cancel).await.unwrap();
+        let independent = prepare_speaker(app.handle(), &first.policy.config, Some("a"), &cancel)
+            .await
+            .unwrap();
         assert_eq!(independent.config.voice, "冰糖");
         assert!(independent.config.tts_stream);
         {
             let state = app.state::<AgentConfigState>();
             state.caches.get_mut("a").unwrap().voice.enabled = false;
         }
-        let inherited = prepare_speaker(app.handle(), &first.policy.config, Some("a"), &cancel).await.unwrap();
+        let inherited = prepare_speaker(app.handle(), &first.policy.config, Some("a"), &cancel)
+            .await
+            .unwrap();
         assert_eq!(inherited.config.voice, "茉莉");
         assert!(!inherited.config.tts_stream);
 
         save_global(&settings, &db, "苏打", true).await;
         let next = prepare_narration(app.handle(), &cancel).await.unwrap();
-        let inherited = prepare_speaker(app.handle(), &next.policy.config, Some("a"), &cancel).await.unwrap();
+        let inherited = prepare_speaker(app.handle(), &next.policy.config, Some("a"), &cancel)
+            .await
+            .unwrap();
         assert_eq!(inherited.config.voice, "苏打");
         assert!(inherited.config.tts_stream);
-        assert_eq!(first.policy.config.voice, "茉莉", "an admitted reply keeps its immutable snapshot");
+        assert_eq!(
+            first.policy.config.voice, "茉莉",
+            "an admitted reply keeps its immutable snapshot"
+        );
 
         {
             let state = app.state::<AgentConfigState>();
@@ -1846,7 +2339,9 @@ mod tests {
             agent.voice.enabled = true;
             agent.voice.voice = "白桦".into();
         }
-        let independent = prepare_speaker(app.handle(), &next.policy.config, Some("a"), &cancel).await.unwrap();
+        let independent = prepare_speaker(app.handle(), &next.policy.config, Some("a"), &cancel)
+            .await
+            .unwrap();
         assert_eq!(independent.config.voice, "白桦");
         assert_eq!(independent.config.api_key, "fixture-key");
     }
@@ -1862,30 +2357,68 @@ mod tests {
         agent.voice.clone_sample_id = id.clone();
         agents.caches.insert("a".into(), agent);
         app.manage(agents);
-        assert!(samples::delete_voice_clone_sample(app.handle().clone(), id.clone()).await.unwrap());
-        let defaults = segment_fixture_job("https://example.invalid/v1").config.clone();
-        let prepared = prepare_speaker(app.handle(), &defaults, Some("a"), &CancellationToken::new()).await.unwrap();
+        assert!(
+            samples::delete_voice_clone_sample(app.handle().clone(), id.clone())
+                .await
+                .unwrap()
+        );
+        let defaults = segment_fixture_job("https://example.invalid/v1")
+            .config
+            .clone();
+        let prepared = prepare_speaker(
+            app.handle(),
+            &defaults,
+            Some("a"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(prepared.config.tts_mode, VoiceTtsMode::Clone);
         assert!(prepared.config.clone_sample_id.is_empty());
         assert!(!prepared.config.has_selected_voice());
         assert!(prepared.sample.is_none());
-        assert_eq!(app.state::<AgentConfigState>().caches.get("a").unwrap().voice.clone_sample_id, id);
+        assert_eq!(
+            app.state::<AgentConfigState>()
+                .caches
+                .get("a")
+                .unwrap()
+                .voice
+                .clone_sample_id,
+            id
+        );
         let mut without_credentials = defaults;
         without_credentials.api_key.clear();
-        let prepared = prepare_speaker(app.handle(), &without_credentials, Some("a"), &CancellationToken::new()).await.unwrap();
+        let prepared = prepare_speaker(
+            app.handle(),
+            &without_credentials,
+            Some("a"),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(prepared.config.tts_mode, VoiceTtsMode::Clone);
-        assert!(!prepared.config.has_selected_voice(), "local asset availability does not depend on API credentials");
+        assert!(
+            !prepared.config.has_selected_voice(),
+            "local asset availability does not depend on API credentials"
+        );
     }
 
     #[tokio::test]
     async fn clone_registry_errors_are_not_treated_as_an_empty_selection() {
         let (app, _directory, id) = clone_library_fixture().await;
         let root = app.path().app_data_dir().unwrap().join("voice_library");
-        tokio::fs::write(root.join("registry.json"), b"invalid registry").await.unwrap();
-        let mut config = segment_fixture_job("https://example.invalid/v1").config.clone();
+        tokio::fs::write(root.join("registry.json"), b"invalid registry")
+            .await
+            .unwrap();
+        let mut config = segment_fixture_job("https://example.invalid/v1")
+            .config
+            .clone();
         config.tts_mode = VoiceTtsMode::Clone;
         config.clone_sample_id = id;
-        let error = prepare_voice(app.handle(), config, &CancellationToken::new()).await.err().unwrap();
+        let error = prepare_voice(app.handle(), config, &CancellationToken::new())
+            .await
+            .err()
+            .unwrap();
         assert!(error.contains("索引损坏"));
     }
 
@@ -1894,17 +2427,46 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
         let document = allocate_document(app.handle().clone()).unwrap();
-        connect_playback_document(app.handle().clone(), document.clone()).await.unwrap();
+        connect_playback_document(app.handle().clone(), document.clone())
+            .await
+            .unwrap();
         for (id, mode, voice, expected_error) in [
-            ("builtin-invalid", VoiceTtsMode::Builtin, "none", "音色配置无效"),
+            (
+                "builtin-invalid",
+                VoiceTtsMode::Builtin,
+                "none",
+                "音色配置无效",
+            ),
             ("clone-empty", VoiceTtsMode::Clone, "冰糖", "未选择朗读音色"),
         ] {
-            let error = preview_tts(app.handle().clone(), id.into(), document.clone(), "试听正文".into(), TtsPreviewSettings {
-                connection: VoiceConnectionConfig { api_key: "fixture-key".into(), ..Default::default() },
-                tts: VoiceTtsConfig { mode, voice: voice.into(), ..Default::default() },
-            }).await.err().unwrap();
+            let error = preview_tts(
+                app.handle().clone(),
+                id.into(),
+                document.clone(),
+                "试听正文".into(),
+                TtsPreviewSettings {
+                    connection: VoiceConnectionConfig {
+                        api_key: "fixture-key".into(),
+                        ..Default::default()
+                    },
+                    tts: VoiceTtsConfig {
+                        mode,
+                        voice: voice.into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .err()
+            .unwrap();
             assert!(error.contains(expected_error));
-            assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
+            assert!(app
+                .state::<TtsServiceState>()
+                .0
+                .lock()
+                .unwrap()
+                .current
+                .is_none());
         }
     }
 
@@ -1915,25 +2477,60 @@ mod tests {
         for deleted_clone in [false, true] {
             let (app, _directory, id) = clone_library_fixture().await;
             let voice = if deleted_clone {
-                assert!(samples::delete_voice_clone_sample(app.handle().clone(), id.clone()).await.unwrap());
-                AgentVoiceConfig { enabled: true, mode: VoiceTtsMode::Clone, clone_sample_id: id, ..Default::default() }
-            } else { AgentVoiceConfig { enabled: false, ..Default::default() } };
+                assert!(
+                    samples::delete_voice_clone_sample(app.handle().clone(), id.clone())
+                        .await
+                        .unwrap()
+                );
+                AgentVoiceConfig {
+                    enabled: true,
+                    mode: VoiceTtsMode::Clone,
+                    clone_sample_id: id,
+                    ..Default::default()
+                }
+            } else {
+                AgentVoiceConfig {
+                    enabled: false,
+                    ..Default::default()
+                }
+            };
             let narration = group_narration_fixture(&app, &server.base_url, voice);
             feed_member(&app, "first", "a", "第一位没有声音但仍有文字。");
             feed_member(&app, "second", "b", "第二位继续朗读。");
-            finish_tts_chat(app.handle().clone(), narration.id.clone()).await.unwrap();
-            let mut reader = NarrationReader { app: app.handle(), narration: &narration,
-                speech_queue: VecDeque::new(), chat_finished: false, current_voice: None, last_spoken_voice: None };
+            finish_tts_chat(app.handle().clone(), narration.id.clone())
+                .await
+                .unwrap();
+            let mut reader = NarrationReader {
+                app: app.handle(),
+                narration: &narration,
+                speech_queue: VecDeque::new(),
+                chat_finished: false,
+                current_voice: None,
+                last_spoken_voice: None,
+            };
             let piece = reader.next(&narration.cancel).await.unwrap().unwrap();
             assert_eq!(piece.text, "第二位继续朗读。");
             assert_eq!(piece.voice.as_ref().unwrap().config.voice, "苏打");
-            prepare_segment(&narration, None, piece, Arc::new(SegmentBuffer::default()), narration.cancel.clone()).await.unwrap();
+            prepare_segment(
+                &narration,
+                None,
+                piece,
+                Arc::new(SegmentBuffer::default()),
+                narration.cancel.clone(),
+            )
+            .await
+            .unwrap();
             assert!(reader.next(&narration.cancel).await.unwrap().is_none());
             assert!(!narration.cancel.is_cancelled());
             assert!(!narration.terminal.load(Ordering::Acquire));
         }
         assert_eq!(server.requests.lock().unwrap().len(), 2);
-        assert!(server.requests.lock().unwrap().iter().all(|request| request["audio"]["voice"] == "苏打"));
+        assert!(server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request["audio"]["voice"] == "苏打"));
         server.stop().await;
     }
 
@@ -1941,40 +2538,93 @@ mod tests {
     async fn deleting_a_prepared_group_voice_keeps_its_message_but_skips_its_next_message() {
         use crate::vcp_modules::agent_types::AgentVoiceConfig;
         let (app, _directory, id) = clone_library_fixture().await;
-        let narration = group_narration_fixture(&app, "https://example.invalid/v1", AgentVoiceConfig {
-            enabled: true, mode: VoiceTtsMode::Clone, clone_sample_id: id.clone(), ..Default::default()
-        });
-        feed_member(&app, "first", "a", &"第一位的长回复继续使用同一份声音。".repeat(40));
-        let mut reader = NarrationReader { app: app.handle(), narration: &narration,
-            speech_queue: VecDeque::new(), chat_finished: false, current_voice: None, last_spoken_voice: None };
-        let first = reader.next(&narration.cancel).await.unwrap().unwrap().voice.unwrap();
+        let narration = group_narration_fixture(
+            &app,
+            "https://example.invalid/v1",
+            AgentVoiceConfig {
+                enabled: true,
+                mode: VoiceTtsMode::Clone,
+                clone_sample_id: id.clone(),
+                ..Default::default()
+            },
+        );
+        feed_member(
+            &app,
+            "first",
+            "a",
+            &"第一位的长回复继续使用同一份声音。".repeat(40),
+        );
+        let mut reader = NarrationReader {
+            app: app.handle(),
+            narration: &narration,
+            speech_queue: VecDeque::new(),
+            chat_finished: false,
+            current_voice: None,
+            last_spoken_voice: None,
+        };
+        let first = reader
+            .next(&narration.cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .voice
+            .unwrap();
         assert!(first.sample.is_some());
-        assert!(samples::delete_voice_clone_sample(app.handle().clone(), id).await.unwrap());
-        let second = reader.next(&narration.cancel).await.unwrap().unwrap().voice.unwrap();
+        assert!(samples::delete_voice_clone_sample(app.handle().clone(), id)
+            .await
+            .unwrap());
+        let second = reader
+            .next(&narration.cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .voice
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(second.sample.as_ref().unwrap().data_url.starts_with("data:audio/wav;base64,"));
+        assert!(second
+            .sample
+            .as_ref()
+            .unwrap()
+            .data_url
+            .starts_with("data:audio/wav;base64,"));
         feed_member(&app, "later", "a", "下一条已经没有音色。");
         feed_member(&app, "other", "b", "另一位照常朗读。");
-        finish_tts_chat(app.handle().clone(), narration.id.clone()).await.unwrap();
+        finish_tts_chat(app.handle().clone(), narration.id.clone())
+            .await
+            .unwrap();
         let mut saw_other = false;
         while let Some(piece) = reader.next(&narration.cancel).await.unwrap() {
             assert_ne!(piece.text, "下一条已经没有音色。");
-            if piece.text == "另一位照常朗读。" { saw_other = true; }
+            if piece.text == "另一位照常朗读。" {
+                saw_other = true;
+            }
         }
         assert!(saw_other);
     }
 
     #[tokio::test]
     async fn durable_nonstream_end_delivers_the_actual_author_to_the_narration_feed() {
-        use crate::vcp_modules::{db_manager::DbState, message_service,
-            vcp_client::{ActiveRequestLease, ActiveRequests}};
+        use crate::vcp_modules::{
+            db_manager::DbState,
+            message_service,
+            vcp_client::{ActiveRequestLease, ActiveRequests},
+        };
         for (owner_type, owner_id, author) in [("agent", "a", "a"), ("group", "g", "b")] {
-            let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-                .connect("sqlite::memory:").await.unwrap();
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await
+                .unwrap();
             sqlx::raw_sql(include_str!("../../../../migrations/0100_baseline_v2.sql"))
-                .execute(&pool).await.unwrap();
-            sqlx::raw_sql(include_str!("../../../../migrations/0102_stream_stop_intent.sql"))
-                .execute(&pool).await.unwrap();
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::raw_sql(include_str!(
+                "../../../../migrations/0102_stream_stop_intent.sql"
+            ))
+            .execute(&pool)
+            .await
+            .unwrap();
             sqlx::raw_sql("INSERT INTO agents (owner_type,agent_id,name,model,updated_at) VALUES ('agent','a','A','test',1),('agent','b','B','test',1);
                 INSERT INTO groups (owner_type,group_id,name,updated_at) VALUES ('group','g','Group',1);
                 INSERT INTO topics (owner_type,owner_id,topic_id,title,created_at,updated_at) VALUES ('agent','a','t','Topic',1,1),('group','g','t','Topic',1,1);")
@@ -1983,17 +2633,43 @@ mod tests {
             app.manage(DbState::new(pool.clone(), Default::default()));
             app.manage(ActiveRequests::default());
             app.manage(TtsServiceState::default());
-            let job = install(&mut app.state::<TtsServiceState>().0.lock().unwrap(), "durable-end");
+            let job = install(
+                &mut app.state::<TtsServiceState>().0.lock().unwrap(),
+                "durable-end",
+            );
             job.worker_started.store(true, Ordering::Release);
             let key = MessageKey::new(TopicKey::new(owner_type, owner_id, "t"), "reply");
-            let (lease, _) = ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone()).unwrap();
+            let (lease, _) = ActiveRequestLease::try_acquire(
+                app.state::<ActiveRequests>().0.clone(),
+                key.clone(),
+            )
+            .unwrap();
             lease.set_origin_user_message("origin").unwrap();
-            message_service::begin_stream_message(&app.state::<DbState>(), &key, Some(author), None).await.unwrap();
+            message_service::begin_stream_message(
+                &app.state::<DbState>(),
+                &key,
+                Some(author),
+                None,
+            )
+            .await
+            .unwrap();
             // No Aurora/thinking event precedes this durable final result.
-            message_service::finalize_stream_message(app.handle().clone(), &pool, &key,
-                "完整回复。".into(), false, Some("completed".into()), None, Some(author.into())).await.unwrap();
+            message_service::finalize_stream_message(
+                app.handle().clone(),
+                &pool,
+                &key,
+                "完整回复。".into(),
+                false,
+                Some("completed".into()),
+                None,
+                Some(author.into()),
+            )
+            .await
+            .unwrap();
             let mut input = job.input.lock().unwrap();
-            let NarrationInput::Chat(feed) = &mut *input else { unreachable!() };
+            let NarrationInput::Chat(feed) = &mut *input else {
+                unreachable!()
+            };
             let update = feed.take_update().unwrap().unwrap();
             assert_eq!(update.pieces.len(), 1);
             assert_eq!(update.pieces[0].agent_id.as_deref(), Some(author));
@@ -2022,32 +2698,65 @@ mod tests {
         let mut job = segment_fixture_job(&server.base_url);
         // An unusable inherited clone must not block independent built-in voices.
         Arc::get_mut(&mut job).unwrap().config.tts_mode = VoiceTtsMode::Clone;
-        Arc::get_mut(&mut job).unwrap().config.clone_sample_id.clear();
+        Arc::get_mut(&mut job)
+            .unwrap()
+            .config
+            .clone_sample_id
+            .clear();
         {
             let mut input = job.input.lock().unwrap();
-            let NarrationInput::Chat(feed) = &mut *input else { unreachable!() };
+            let NarrationInput::Chat(feed) = &mut *input else {
+                unreachable!()
+            };
             for id in ["a", "b"] {
                 feed.accept(&StreamEvent::end(
-                    format!("message-{id}"), Some(json!({"isGroupMessage":true,"agentId":id})),
-                    Some("completed".into()), Some("相同的正文。".into()), None, None, None,
-                )).unwrap();
+                    format!("message-{id}"),
+                    Some(json!({"isGroupMessage":true,"agentId":id})),
+                    Some("completed".into()),
+                    Some("相同的正文。".into()),
+                    None,
+                    None,
+                    None,
+                ))
+                .unwrap();
             }
             feed.finish_submission();
         }
         let temporary = tempfile::tempdir().unwrap();
         let cache = TtsCache::open(temporary.path().into()).await.unwrap();
         let mut reader = NarrationReader {
-            app: app.handle(), narration: &job, speech_queue: VecDeque::new(),
-            chat_finished: false, current_voice: None, last_spoken_voice: None,
+            app: app.handle(),
+            narration: &job,
+            speech_queue: VecDeque::new(),
+            chat_finished: false,
+            current_voice: None,
+            last_spoken_voice: None,
         };
         while let Some(piece) = reader.next(&job.cancel).await.unwrap() {
             let segment = Arc::new(SegmentBuffer::default());
-            prepare_segment(&job, Some(&cache), piece, segment.clone(), job.cancel.clone()).await.unwrap();
+            prepare_segment(
+                &job,
+                Some(&cache),
+                piece,
+                segment.clone(),
+                job.cancel.clone(),
+            )
+            .await
+            .unwrap();
             assert_eq!(buffered_pcm(&segment, &job.cancel).await, pcm);
         }
-        let voices: Vec<_> = server.requests.lock().unwrap().iter()
-            .map(|request| request["audio"]["voice"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(voices, ["冰糖", "苏打"], "identical text must not reuse another speaker's cache");
+        let voices: Vec<_> = server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request["audio"]["voice"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            voices,
+            ["冰糖", "苏打"],
+            "identical text must not reuse another speaker's cache"
+        );
         server.stop().await;
     }
 
@@ -2065,18 +2774,35 @@ mod tests {
         let job = segment_fixture_job("https://example.invalid/v1");
         {
             let mut input = job.input.lock().unwrap();
-            let NarrationInput::Chat(feed) = &mut *input else { unreachable!() };
+            let NarrationInput::Chat(feed) = &mut *input else {
+                unreachable!()
+            };
             feed.accept(&StreamEvent::end(
-                "message".into(), Some(serde_json::json!({"agentId":"a"})),
-                Some("completed".into()), Some("这是一段足够长的语音正文。".repeat(50)), None, None, None,
-            )).unwrap();
+                "message".into(),
+                Some(serde_json::json!({"agentId":"a"})),
+                Some("completed".into()),
+                Some("这是一段足够长的语音正文。".repeat(50)),
+                None,
+                None,
+                None,
+            ))
+            .unwrap();
         }
         let mut reader = NarrationReader {
-            app: app.handle(), narration: &job, speech_queue: VecDeque::new(),
-            chat_finished: false, current_voice: None, last_spoken_voice: None,
+            app: app.handle(),
+            narration: &job,
+            speech_queue: VecDeque::new(),
+            chat_finished: false,
+            current_voice: None,
+            last_spoken_voice: None,
         };
         let first = reader.next(&job.cancel).await.unwrap().unwrap();
-        app.state::<AgentConfigState>().caches.get_mut("a").unwrap().voice.voice = "苏打".into();
+        app.state::<AgentConfigState>()
+            .caches
+            .get_mut("a")
+            .unwrap()
+            .voice
+            .voice = "苏打".into();
         let second = reader.next(&job.cancel).await.unwrap().unwrap();
         let first_voice = first.voice.unwrap();
         let second_voice = second.voice.unwrap();
@@ -2089,15 +2815,37 @@ mod tests {
         let pcm = vec![1, 0, 2, 0, 3, 0, 4, 0];
         let mut server = SegmentHttpFixture::start(&pcm, true).await;
         let temporary = tempfile::tempdir().unwrap();
-        let cache = TtsCache::open(temporary.path().to_path_buf()).await.unwrap();
+        let cache = TtsCache::open(temporary.path().to_path_buf())
+            .await
+            .unwrap();
         let job = segment_fixture_job(&server.base_url);
         let segment = Arc::new(SegmentBuffer::default());
-        let error = prepare_segment(&job, Some(&cache), fixture_piece(), segment.clone(), job.cancel.clone())
-            .await.unwrap_err();
+        let error = prepare_segment(
+            &job,
+            Some(&cache),
+            fixture_piece(),
+            segment.clone(),
+            job.cancel.clone(),
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("503"));
-        assert_eq!(server.requests.lock().unwrap().len(), 1, "a network error ends this segment immediately");
-        assert!(segment.wav(&job.cancel).await.is_err(), "failed preparation must not mark audio complete");
-        assert!(tokio::fs::read_dir(temporary.path()).await.unwrap().next_entry().await.unwrap().is_none());
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "a network error ends this segment immediately"
+        );
+        assert!(
+            segment.wav(&job.cancel).await.is_err(),
+            "failed preparation must not mark audio complete"
+        );
+        assert!(tokio::fs::read_dir(temporary.path())
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .is_none());
         server.stop().await;
     }
 
@@ -2106,29 +2854,58 @@ mod tests {
         let pcm = vec![1, 0, 2, 0, 3, 0, 4, 0];
         let mut server = SegmentHttpFixture::start(&pcm, false).await;
         let temporary = tempfile::tempdir().unwrap();
-        let cache = TtsCache::open(temporary.path().to_path_buf()).await.unwrap();
+        let cache = TtsCache::open(temporary.path().to_path_buf())
+            .await
+            .unwrap();
         let mut job = segment_fixture_job(&server.base_url);
         let first = Arc::new(SegmentBuffer::default());
-        prepare_segment(&job, Some(&cache), fixture_piece(), first.clone(), job.cancel.clone())
-            .await.unwrap();
+        prepare_segment(
+            &job,
+            Some(&cache),
+            fixture_piece(),
+            first.clone(),
+            job.cancel.clone(),
+        )
+        .await
+        .unwrap();
         assert_eq!(buffered_pcm(&first, &job.cancel).await, pcm);
-        let request = network::prepare_synthesis(&job.config, &fixture_piece().text,
-            fixture_piece().guidance.as_deref(), None).unwrap();
+        let request = network::prepare_synthesis(
+            &job.config,
+            &fixture_piece().text,
+            fixture_piece().guidance.as_deref(),
+            None,
+        )
+        .unwrap();
         let key = cache::segment_key(&request.identity);
         let file = temporary.path().join(format!("{key}.wav"));
-        assert_eq!(super::super::wav::pcm16_mono(&tokio::fs::read(file).await.unwrap(), 24000).unwrap(), pcm);
+        assert_eq!(
+            super::super::wav::pcm16_mono(&tokio::fs::read(file).await.unwrap(), 24000).unwrap(),
+            pcm
+        );
         {
             let requests = server.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
             assert!(requests.iter().all(|request| request["stream"] == true));
-            assert!(requests.iter().all(|request| request["audio"]["format"] == "pcm16"));
+            assert!(requests
+                .iter()
+                .all(|request| request["audio"]["format"] == "pcm16"));
         }
         server.stop().await;
         Arc::get_mut(&mut job).unwrap().config.tts_stream = false;
         let second = Arc::new(SegmentBuffer::default());
-        tokio::time::timeout(std::time::Duration::from_secs(1), prepare_segment(
-            &job, Some(&cache), fixture_piece(), second.clone(), job.cancel.clone(),
-        )).await.expect("cache hit must not attempt offline HTTP").unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            prepare_segment(
+                &job,
+                Some(&cache),
+                fixture_piece(),
+                second.clone(),
+                job.cancel.clone(),
+            ),
+        )
+        .await
+        .expect("cache hit must not attempt offline HTTP")
+        .unwrap();
         assert_eq!(buffered_pcm(&second, &job.cancel).await, pcm);
         assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
@@ -2138,18 +2915,32 @@ mod tests {
         let pcm = vec![10, 0, 20, 0, 30, 0, 40, 0];
         let mut server = SegmentHttpFixture::start(&pcm, false).await;
         let temporary = tempfile::tempdir().unwrap();
-        let cache = TtsCache::open(temporary.path().to_path_buf()).await.unwrap();
+        let cache = TtsCache::open(temporary.path().to_path_buf())
+            .await
+            .unwrap();
         let job = segment_fixture_job(&server.base_url);
-        let request = network::prepare_synthesis(&job.config, &fixture_piece().text,
-            fixture_piece().guidance.as_deref(), None).unwrap();
+        let request = network::prepare_synthesis(
+            &job.config,
+            &fixture_piece().text,
+            fixture_piece().guidance.as_deref(),
+            None,
+        )
+        .unwrap();
         let key = cache::segment_key(&request.identity);
         // A directory at the final filename causes both real lookup and real
         // rename to fail, regardless of platform file permission conventions.
         let blocked = temporary.path().join(format!("{key}.wav"));
         tokio::fs::create_dir(&blocked).await.unwrap();
         let segment = Arc::new(SegmentBuffer::default());
-        prepare_segment(&job, Some(&cache), fixture_piece(), segment.clone(), job.cancel.clone())
-            .await.expect("cache failures must not interrupt valid synthesis");
+        prepare_segment(
+            &job,
+            Some(&cache),
+            fixture_piece(),
+            segment.clone(),
+            job.cancel.clone(),
+        )
+        .await
+        .expect("cache failures must not interrupt valid synthesis");
         assert_eq!(buffered_pcm(&segment, &job.cancel).await, pcm);
         assert!(tokio::fs::metadata(&blocked).await.unwrap().is_dir());
         assert_eq!(server.requests.lock().unwrap().len(), 1);
@@ -2158,7 +2949,11 @@ mod tests {
         while let Some(entry) = entries.next_entry().await.unwrap() {
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
-        assert_eq!(names, [format!("{key}.wav")], "failed commit removes its pending file");
+        assert_eq!(
+            names,
+            [format!("{key}.wav")],
+            "failed commit removes its pending file"
+        );
         server.stop().await;
     }
 
@@ -2223,15 +3018,22 @@ mod tests {
         let state = app.state::<TtsServiceState>();
         let mut registry = state.0.lock().unwrap();
         assert!(registry.current.is_none());
-        assert!(registry.reserve("next-reply".into(), NarrationKind::Chat).is_ok());
+        assert!(registry
+            .reserve("next-reply".into(), NarrationKind::Chat)
+            .is_ok());
     }
 
     #[test]
     fn bubble_input_projects_once_and_keeps_guidance_with_each_piece() {
         let mut input = NarrationInput::Bubble(MessageSpeech::new());
-        let raw = format!("<voice_guidance>轻声</voice_guidance>\n(慵懒){}", "这是一句需要朗读的正文。".repeat(35));
+        let raw = format!(
+            "<voice_guidance>轻声</voice_guidance>\n(慵懒){}",
+            "这是一句需要朗读的正文。".repeat(35)
+        );
         input.submit_bubble(&raw, true).unwrap();
-        let NarrationInput::Bubble(message) = &mut input else { unreachable!() };
+        let NarrationInput::Bubble(message) = &mut input else {
+            unreachable!()
+        };
         let mut count = 0;
         loop {
             let (piece, instruction) = message.next();
@@ -2255,7 +3057,9 @@ mod tests {
         let raw = "<voice_guidance>轻声</voice_guidance>照读";
         input.submit_preview(raw.into()).unwrap();
         assert!(input.submit_bubble(raw, true).is_err());
-        let NarrationInput::Preview(reply) = &mut input else { unreachable!() };
+        let NarrationInput::Preview(reply) = &mut input else {
+            unreachable!()
+        };
         assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == raw));
     }
 
@@ -2264,18 +3068,32 @@ mod tests {
         let mut input = NarrationInput::Bubble(MessageSpeech::new());
         assert!(input.submit_bubble("<think>不读</think>", true).is_err());
         let mut input = NarrationInput::Bubble(MessageSpeech::new());
-        input.submit_bubble("<think>模型忘记闭合，这段内容仍然需要朗读。", true).unwrap();
-        let NarrationInput::Bubble(message) = &mut input else { unreachable!() };
-        assert!(matches!(message.next(), (ReplyPiece::Text(text), None) if text.contains("模型忘记闭合")));
+        input
+            .submit_bubble("<think>模型忘记闭合，这段内容仍然需要朗读。", true)
+            .unwrap();
+        let NarrationInput::Bubble(message) = &mut input else {
+            unreachable!()
+        };
+        assert!(
+            matches!(message.next(), (ReplyPiece::Text(text), None) if text.contains("模型忘记闭合"))
+        );
     }
 
     #[test]
     fn active_call_rejects_bubble_admission_but_accepts_its_own_reply() {
-        assert!(NarrationKind::Bubble(bubble_source()).validate_admission(true).is_err());
-        assert!(NarrationKind::Bubble(bubble_source()).validate_admission(false).is_ok());
+        assert!(NarrationKind::Bubble(bubble_source())
+            .validate_admission(true)
+            .is_err());
+        assert!(NarrationKind::Bubble(bubble_source())
+            .validate_admission(false)
+            .is_ok());
         assert!(NarrationKind::Chat.validate_admission(true).is_ok());
-        assert!(NarrationKind::SamplePreview.validate_admission(true).is_err());
-        assert!(NarrationKind::SamplePreview.validate_admission(false).is_ok());
+        assert!(NarrationKind::SamplePreview
+            .validate_admission(true)
+            .is_err());
+        assert!(NarrationKind::SamplePreview
+            .validate_admission(false)
+            .is_ok());
     }
 
     #[tokio::test]
@@ -2284,11 +3102,25 @@ mod tests {
         app.manage(TtsServiceState::default());
         let state = app.state::<TtsServiceState>();
         let source = bubble_source();
-        let narration = install_kind(&mut state.0.lock().unwrap(), "bubble", NarrationKind::Bubble(source.clone()));
-        stop_bubble_for_messages(app.handle(), &TopicKey::new("agent", "a", "other"), &[source.message_id.clone()]).await.unwrap();
-        stop_bubble_for_messages(app.handle(), &source.topic, &["unrelated".into()]).await.unwrap();
+        let narration = install_kind(
+            &mut state.0.lock().unwrap(),
+            "bubble",
+            NarrationKind::Bubble(source.clone()),
+        );
+        stop_bubble_for_messages(
+            app.handle(),
+            &TopicKey::new("agent", "a", "other"),
+            &[source.message_id.clone()],
+        )
+        .await
+        .unwrap();
+        stop_bubble_for_messages(app.handle(), &source.topic, &["unrelated".into()])
+            .await
+            .unwrap();
         assert!(!narration.cancel.is_cancelled());
-        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()]).await.unwrap();
+        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()])
+            .await
+            .unwrap();
         assert!(narration.cancel.is_cancelled());
         assert!(state.0.lock().unwrap().current.is_none());
     }
@@ -2298,20 +3130,49 @@ mod tests {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
         let document = allocate_document(app.handle().clone()).unwrap();
-        connect_playback_document(app.handle().clone(), document.clone()).await.unwrap();
-        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
-            .connect("sqlite::memory:").await.unwrap();
+        connect_playback_document(app.handle().clone(), document.clone())
+            .await
+            .unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query("CREATE TABLE messages (owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT, content TEXT, deleted_at INTEGER);
             INSERT INTO messages VALUES ('agent', 'a', 't', 'message', '原文保留在软删除行', NULL);")
             .execute(&pool).await.unwrap();
-        app.manage(crate::vcp_modules::db_manager::DbState::new(pool.clone(), Default::default()));
+        app.manage(crate::vcp_modules::db_manager::DbState::new(
+            pool.clone(),
+            Default::default(),
+        ));
         let source = bubble_source();
-        assert_eq!(source.read(app.handle()).await.unwrap(), "原文保留在软删除行");
+        assert_eq!(
+            source.read(app.handle()).await.unwrap(),
+            "原文保留在软删除行"
+        );
         // The frontend has read the source, but no TTS slot exists yet.
         sqlx::query("UPDATE messages SET deleted_at = 1 WHERE msg_id = 'message'")
-            .execute(&pool).await.unwrap();
-        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()]).await.unwrap();
-        assert!(start_tts_session(app.handle().clone(), "late".into(), document, None, Some(source)).await.is_err());
-        assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
+            .execute(&pool)
+            .await
+            .unwrap();
+        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()])
+            .await
+            .unwrap();
+        assert!(start_tts_session(
+            app.handle().clone(),
+            "late".into(),
+            document,
+            None,
+            Some(source)
+        )
+        .await
+        .is_err());
+        assert!(app
+            .state::<TtsServiceState>()
+            .0
+            .lock()
+            .unwrap()
+            .current
+            .is_none());
     }
 }

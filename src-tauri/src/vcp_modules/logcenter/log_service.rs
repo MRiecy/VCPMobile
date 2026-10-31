@@ -157,13 +157,15 @@ mod response_tests {
     fn empty_logs_and_rotation_keep_their_distinct_protocol_meanings() {
         let empty: LogFetchResult = serde_json::from_value(json!({
             "content":"","offset":0,"path":"/logs/server.log","fileSize":0,"needFullReload":false
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(empty.content.is_empty());
         assert_eq!(empty.offset, 0);
         assert!(!empty.need_full_reload);
         let rotation: LogFetchResult = serde_json::from_value(json!({
             "offset":0,"path":"/logs/server.log","needFullReload":true
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(rotation.need_full_reload);
         assert!(rotation.content.is_empty());
         assert_eq!(rotation.file_size, 0);
@@ -176,7 +178,10 @@ mod response_tests {
         for key in ["offset", "path", "needFullReload"] {
             let mut missing = valid.clone();
             missing.as_object_mut().unwrap().remove(key);
-            assert!(serde_json::from_value::<LogFetchResult>(missing).is_err(), "{key}");
+            assert!(
+                serde_json::from_value::<LogFetchResult>(missing).is_err(),
+                "{key}"
+            );
         }
     }
 }

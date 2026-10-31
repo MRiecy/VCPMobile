@@ -202,7 +202,9 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     // 表情服务固定部署在服务根地址，不继承聊天端点路径和查询参数。
     let origin = resolve_http_origin(vcp_server_url).map_err(|error| error.to_string())?;
     if admin_user.is_empty() || admin_pass.is_empty() {
-        return Err("管理员账号或密码未配置，请在 设置 → 用户身份 中填写管理员账号和密码".to_string());
+        return Err(
+            "管理员账号或密码未配置，请在 设置 → 用户身份 中填写管理员账号和密码".to_string(),
+        );
     }
     if file_key.is_empty() {
         return Err("表情包图床密钥 (fileKey) 未配置，请在 设置 → 服务器连接 中填写".to_string());
@@ -217,9 +219,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         .map_err(|error| error.to_string())?;
 
     // 包括等待响应头和完整响应体；失败发生在写库前，保留已有表情库。
-    let mut req = client
-        .get(api_url.clone())
-        .timeout(Duration::from_secs(30));
+    let mut req = client.get(api_url.clone()).timeout(Duration::from_secs(30));
     if !admin_user.is_empty() && !admin_pass.is_empty() {
         req = req.basic_auth(admin_user, Some(admin_pass));
     }
@@ -442,7 +442,12 @@ mod tests {
     fn decoded_segments(url: &Url) -> Vec<String> {
         url.path_segments()
             .unwrap()
-            .map(|segment| percent_decode_str(segment).decode_utf8().unwrap().into_owned())
+            .map(|segment| {
+                percent_decode_str(segment)
+                    .decode_utf8()
+                    .unwrap()
+                    .into_owned()
+            })
             .collect()
     }
 
@@ -458,7 +463,12 @@ mod tests {
             assert!(url.fragment().is_none());
             assert_eq!(
                 decoded_segments(&url),
-                [format!("pw={key}"), "images".into(), category.into(), filename.into()],
+                [
+                    format!("pw={key}"),
+                    "images".into(),
+                    category.into(),
+                    filename.into()
+                ],
             );
         }
         let url = build_emoticon_image_url(&origin, "a%23b", "a%2Fb", "c%25.png").unwrap();
@@ -511,8 +521,16 @@ mod tests {
                 }
                 // ImageServer receives one decoded Express route parameter for
                 // pw=<Key>; decoding each wire segment once models that boundary.
-                let segments: Vec<_> = uri.path().split('/').skip(1)
-                    .map(|segment| percent_decode_str(segment).decode_utf8().unwrap().into_owned())
+                let segments: Vec<_> = uri
+                    .path()
+                    .split('/')
+                    .skip(1)
+                    .map(|segment| {
+                        percent_decode_str(segment)
+                            .decode_utf8()
+                            .unwrap()
+                            .into_owned()
+                    })
                     .collect();
                 Json(json!({ "segments": segments })).into_response()
             }
@@ -529,9 +547,13 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::raw_sql(include_str!("../../../migrations/0103_config_domains.sql"))
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         let db = DbState::new(pool, std::path::PathBuf::new());
         let settings = SettingsState::new();
         let initial = settings.read_snapshot(&db).await.unwrap();
@@ -542,36 +564,66 @@ mod tests {
             "adminUsername": "admin",
             "adminPassword": "password",
             "fileKey": file_key,
-        }).as_object().unwrap().clone();
+        })
+        .as_object()
+        .unwrap()
+        .clone();
         let old_server = serde_json::to_value(&initial.data.server).unwrap();
-        let base_values = changes.keys()
+        let base_values = changes
+            .keys()
             .map(|field| (field.clone(), old_server[field].clone()))
             .collect();
-        let saved = settings.apply(&db, ConfigUpdate {
-            patches: vec![DomainPatch {
-                domain: ConfigDomain::Server,
-                expected_revision: initial.domains[&ConfigDomain::Server].revision.clone(),
-                changes,
-                base_values,
-            }],
-        }, |_, _| {}).await.unwrap();
+        let saved = settings
+            .apply(
+                &db,
+                ConfigUpdate {
+                    patches: vec![DomainPatch {
+                        domain: ConfigDomain::Server,
+                        expected_revision: initial.domains[&ConfigDomain::Server].revision.clone(),
+                        changes,
+                        base_values,
+                    }],
+                },
+                |_, _| {},
+            )
+            .await
+            .unwrap();
         assert!(matches!(saved, ConfigSaveResult::Saved { .. }));
 
         sqlx::query("INSERT INTO emoticon_library (category, filename, url, search_key) VALUES ('old', 'old.png', 'https://old.invalid/old.png', 'old')")
             .execute(&db.pool).await.unwrap();
         let now = crate::vcp_modules::infra::utils::now_millis();
-        sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('emoticon_last_sync', ?, ?)")
-            .bind(now.to_string()).bind(now).execute(&db.pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES ('emoticon_last_sync', ?, ?)",
+        )
+        .bind(now.to_string())
+        .bind(now)
+        .execute(&db.pool)
+        .await
+        .unwrap();
         let app = tauri::test::mock_app();
         app.manage(db.clone());
         app.manage(settings);
         app.manage(EmoticonManagerState::default());
 
-        assert_eq!(refresh_emoticon_library_internal(app.handle(), false).await.unwrap(), 1);
-        assert!(request_rx.try_recv().is_err(), "fresh cache should avoid a request");
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), refresh_emoticon_library_internal(app.handle(), true))
-                .await.unwrap().unwrap(),
+            refresh_emoticon_library_internal(app.handle(), false)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            request_rx.try_recv().is_err(),
+            "fresh cache should avoid a request"
+        );
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                refresh_emoticon_library_internal(app.handle(), true)
+            )
+            .await
+            .unwrap()
+            .unwrap(),
             1,
         );
         let (list_uri, list_headers) = request_rx.recv().await.unwrap();
@@ -588,21 +640,47 @@ mod tests {
         );
 
         let response: serde_json::Value = reqwest::Client::new()
-            .get(&persisted[0].url).send().await.unwrap().json().await.unwrap();
-        assert_eq!(response["segments"], json!([format!("pw={file_key}"), "images", category, filename]));
+            .get(&persisted[0].url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            response["segments"],
+            json!([format!("pw={file_key}"), "images", category, filename])
+        );
         let (image_uri, _) = request_rx.recv().await.unwrap();
         assert!(image_uri.query().is_none());
         assert!(image_uri.path().starts_with("/pw="));
 
-        let before_sync: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
-            .fetch_one(&db.pool).await.unwrap();
+        let before_sync: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         fail_listing.store(true, Ordering::SeqCst);
-        assert!(tokio::time::timeout(Duration::from_secs(5), refresh_emoticon_library_internal(app.handle(), true))
-            .await.unwrap().is_err());
-        assert_eq!(internal_load_library(app.handle()).await.unwrap()[0].url, persisted[0].url);
-        assert_eq!(app.state::<EmoticonManagerState>().library.lock().await[0].url, persisted[0].url);
-        let after_sync: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
-            .fetch_one(&db.pool).await.unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_secs(5),
+            refresh_emoticon_library_internal(app.handle(), true)
+        )
+        .await
+        .unwrap()
+        .is_err());
+        assert_eq!(
+            internal_load_library(app.handle()).await.unwrap()[0].url,
+            persisted[0].url
+        );
+        assert_eq!(
+            app.state::<EmoticonManagerState>().library.lock().await[0].url,
+            persisted[0].url
+        );
+        let after_sync: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
         assert_eq!(after_sync, before_sync);
     }
 }

@@ -27,13 +27,17 @@ fn notice(id: &str, epoch: u32) -> VoiceNotice {
 #[test]
 fn tts_barge_in_preserves_the_playback_identity() {
     let mut sessions = Sessions::default();
-    sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
+    sessions
+        .begin("call-a".into(), VoiceVadConfig::default())
+        .unwrap();
     for step in 1..=6 {
         let mut input = frame(step * 512, 0.9, true);
         input.playback_id = Some("tts-turn-a".into());
         let event = sessions.consume_frame(input).unwrap();
         if step == 6 {
-            let VoiceAudioEvent::Frame(frame) = event else { panic!("expected voice frame") };
+            let VoiceAudioEvent::Frame(frame) = event else {
+                panic!("expected voice frame")
+            };
             assert_eq!(frame.speech_transition, Some(SpeechTransition::Start));
             assert_eq!(frame.frame.playback_id.as_deref(), Some("tts-turn-a"));
         }
@@ -98,10 +102,12 @@ fn custom_durations_wait_for_the_first_complete_frame_at_or_after_the_requested_
     let start = detector.process(frame(1024, 0.9, true)).unwrap();
     assert_eq!(start.speech_transition, Some(SpeechTransition::Start));
     for step in 3..=11 {
-        assert!(detector
-            .process(frame(step * 512, 0.1, true))
-            .unwrap()
-            .speech_active);
+        assert!(
+            detector
+                .process(frame(step * 512, 0.1, true))
+                .unwrap()
+                .speech_active
+        );
     }
     let end = detector.process(frame(12 * 512, 0.1, true)).unwrap();
     assert_eq!(end.speech_transition, Some(SpeechTransition::End)); // 320 ms.
@@ -114,22 +120,28 @@ fn custom_playback_confirmation_restarts_when_playback_state_changes() {
         ..VoiceVadConfig::default()
     });
     for step in 1..=9 {
-        assert!(!detector
-            .process(frame(step * 512, 0.9, true))
-            .unwrap()
-            .speech_active);
+        assert!(
+            !detector
+                .process(frame(step * 512, 0.9, true))
+                .unwrap()
+                .speech_active
+        );
     }
     for step in 10..=11 {
-        assert!(!detector
-            .process(frame(step * 512, 0.9, false))
-            .unwrap()
-            .speech_active);
+        assert!(
+            !detector
+                .process(frame(step * 512, 0.9, false))
+                .unwrap()
+                .speech_active
+        );
     }
     for step in 12..=20 {
-        assert!(!detector
-            .process(frame(step * 512, 0.9, true))
-            .unwrap()
-            .speech_active);
+        assert!(
+            !detector
+                .process(frame(step * 512, 0.9, true))
+                .unwrap()
+                .speech_active
+        );
     }
     assert_eq!(
         detector
@@ -147,7 +159,12 @@ fn epoch_reset_preserves_custom_policy_but_discards_old_confirmation_evidence() 
         end_silence_ms: 64,
         playback_onset_ms: 33,
     });
-    assert!(!detector.process(frame(512, 0.6, true)).unwrap().speech_active);
+    assert!(
+        !detector
+            .process(frame(512, 0.6, true))
+            .unwrap()
+            .speech_active
+    );
     let mut next = frame(512, 0.6, true);
     next.audio_epoch = 2;
     let restarted = detector.process(next.clone()).unwrap();
@@ -358,10 +375,14 @@ fn invalid_measurements_and_repeated_samples_cannot_supply_onset_evidence() {
 #[test]
 fn cancel_during_start_and_old_completion_cannot_revoke_new_session() {
     let mut sessions = Sessions::default();
-    let old = sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
+    let old = sessions
+        .begin("call-a".into(), VoiceVadConfig::default())
+        .unwrap();
     assert_eq!(sessions.cancel("call-a", None), Some(0));
     assert!(!sessions.owns("call-a", old));
-    let current = sessions.begin("call-b".into(), VoiceVadConfig::default()).unwrap();
+    let current = sessions
+        .begin("call-b".into(), VoiceVadConfig::default())
+        .unwrap();
     assert!(sessions.cancel("call-a", Some(old)).is_none());
     assert!(sessions.consume_frame(frame(512, 0.9, false)).is_none());
     assert!(sessions
@@ -374,7 +395,9 @@ fn cancel_during_start_and_old_completion_cannot_revoke_new_session() {
 fn stop_before_start_tombstone_keeps_a_later_active_capture_intact() {
     let mut sessions = Sessions::default();
     assert_eq!(sessions.cancel("call-a", None), None);
-    let current = sessions.begin("call-b".into(), VoiceVadConfig::default()).unwrap();
+    let current = sessions
+        .begin("call-b".into(), VoiceVadConfig::default())
+        .unwrap();
     let mut sample = frame(512, 0.9, false);
     sample.session_id = "call-b".into();
     assert!(sessions.consume_frame(sample.clone()).is_some());
@@ -406,7 +429,9 @@ fn stop_before_start_tombstone_keeps_a_later_active_capture_intact() {
 #[test]
 fn an_unrelated_start_is_busy_until_the_owner_is_explicitly_cancelled() {
     let mut sessions = Sessions::default();
-    let old = sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
+    let old = sessions
+        .begin("call-a".into(), VoiceVadConfig::default())
+        .unwrap();
     assert!(sessions
         .begin("call-b".into(), VoiceVadConfig::default())
         .unwrap_err()
@@ -414,7 +439,9 @@ fn an_unrelated_start_is_busy_until_the_owner_is_explicitly_cancelled() {
     assert!(sessions.owns("call-a", old));
     // This is the synchronous cancellation phase, before any native stop ack.
     sessions.cancel("call-a", None);
-    let current = sessions.begin("call-b".into(), VoiceVadConfig::default()).unwrap();
+    let current = sessions
+        .begin("call-b".into(), VoiceVadConfig::default())
+        .unwrap();
     assert!(sessions.owns("call-b", current));
     assert!(sessions.cancel("call-a", Some(old)).is_none());
     assert!(sessions.owns("call-b", current));
@@ -429,9 +456,14 @@ fn cancellation_memory_is_bounded_and_eviction_never_allows_replacing_an_owner()
     sessions.cancel(&format!("cancelled-{CANCELLED_SESSION_LIMIT}"), None);
     assert_eq!(sessions.cancelled.len(), CANCELLED_SESSION_LIMIT);
     assert!(sessions
-        .begin(format!("cancelled-{CANCELLED_SESSION_LIMIT}"), VoiceVadConfig::default())
+        .begin(
+            format!("cancelled-{CANCELLED_SESSION_LIMIT}"),
+            VoiceVadConfig::default()
+        )
         .is_err());
-    let generation = sessions.begin("live-call".into(), VoiceVadConfig::default()).unwrap();
+    let generation = sessions
+        .begin("live-call".into(), VoiceVadConfig::default())
+        .unwrap();
     // Even an ID older than the bounded cancellation memory cannot take over.
     assert!(sessions
         .begin("cancelled-0".into(), VoiceVadConfig::default())
@@ -443,7 +475,9 @@ fn cancellation_memory_is_bounded_and_eviction_never_allows_replacing_an_owner()
 #[test]
 fn native_terminal_closes_only_the_current_audio_epoch() {
     let mut sessions = Sessions::default();
-    sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
+    sessions
+        .begin("call-a".into(), VoiceVadConfig::default())
+        .unwrap();
     let mut current = frame(512, 0.9, false);
     current.audio_epoch = 2;
     sessions.consume_frame(current);

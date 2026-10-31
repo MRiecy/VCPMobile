@@ -256,7 +256,9 @@ impl Phase1Metadata {
 #[cfg(test)]
 mod tests {
     use super::Phase1Metadata;
-    use crate::vcp_modules::sync_types::{AvatarManifestState, ManifestRequest, OwnerManifestState};
+    use crate::vcp_modules::sync_types::{
+        AvatarManifestState, ManifestRequest, OwnerManifestState,
+    };
 
     #[tokio::test]
     async fn owner_manifest_combines_agent_and_group_states() {

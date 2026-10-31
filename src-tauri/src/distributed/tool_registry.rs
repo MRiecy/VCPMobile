@@ -557,7 +557,9 @@ impl ToolRegistry {
             load_tool_config_file(&load_path, &load_known)
         })
         .await
-        .map_err(|error| ToolConfigLoadError::Persistence(format!("分布式工具配置读取任务失败: {error}")))
+        .map_err(|error| {
+            ToolConfigLoadError::Persistence(format!("分布式工具配置读取任务失败: {error}"))
+        })
         .and_then(|result| result);
 
         let resolved = resolve_tool_config(loaded);
@@ -602,7 +604,9 @@ fn generic_registration_manifest(entry: &ToolEntry) -> Result<Box<RawValue>, Str
         .map_err(|error| format!("cannot build raw tool registration manifest: {error}"))
 }
 
-fn resolve_tool_config(loaded: Result<LoadedToolConfig, ToolConfigLoadError>) -> ResolvedToolConfig {
+fn resolve_tool_config(
+    loaded: Result<LoadedToolConfig, ToolConfigLoadError>,
+) -> ResolvedToolConfig {
     match loaded {
         Ok(LoadedToolConfig::Missing) => ResolvedToolConfig {
             enabled: HashSet::new(),
@@ -658,11 +662,15 @@ fn load_tool_config_file(
             return Ok(LoadedToolConfig::Missing);
         }
         Err(error) => {
-            return Err(ToolConfigLoadError::Persistence(format!("读取分布式工具配置元数据失败: {error}")));
+            return Err(ToolConfigLoadError::Persistence(format!(
+                "读取分布式工具配置元数据失败: {error}"
+            )));
         }
     };
     if !metadata.is_file() {
-        return Err(ToolConfigLoadError::Persistence("分布式工具配置不是普通文件".to_string()));
+        return Err(ToolConfigLoadError::Persistence(
+            "分布式工具配置不是普通文件".to_string(),
+        ));
     }
     if metadata.len() > MAX_TOOL_CONFIG_BYTES {
         return Err(ToolConfigLoadError::Invalid(format!(
@@ -671,50 +679,59 @@ fn load_tool_config_file(
         )));
     }
 
-    let mut file =
-        File::open(config_path).map_err(|error| ToolConfigLoadError::Persistence(format!("打开分布式工具配置失败: {error}")))?;
+    let mut file = File::open(config_path).map_err(|error| {
+        ToolConfigLoadError::Persistence(format!("打开分布式工具配置失败: {error}"))
+    })?;
     let mut content = String::with_capacity(metadata.len() as usize);
-    file.read_to_string(&mut content)
-        .map_err(|error| {
-            let message = format!("读取分布式工具配置失败: {error}");
-            if error.kind() == std::io::ErrorKind::InvalidData {
-                ToolConfigLoadError::Invalid(message)
-            } else {
-                ToolConfigLoadError::Persistence(message)
-            }
-        })?;
-    let value: Value = serde_json::from_str(&content)
-        .map_err(|error| ToolConfigLoadError::Invalid(format!("解析分布式工具配置失败: {error}")))?;
+    file.read_to_string(&mut content).map_err(|error| {
+        let message = format!("读取分布式工具配置失败: {error}");
+        if error.kind() == std::io::ErrorKind::InvalidData {
+            ToolConfigLoadError::Invalid(message)
+        } else {
+            ToolConfigLoadError::Persistence(message)
+        }
+    })?;
+    let value: Value = serde_json::from_str(&content).map_err(|error| {
+        ToolConfigLoadError::Invalid(format!("解析分布式工具配置失败: {error}"))
+    })?;
 
     if value.is_array() {
-        serde_json::from_value::<Vec<String>>(value)
-            .map_err(|error| ToolConfigLoadError::Invalid(format!("解析旧版 disabled-name 工具配置失败: {error}")))?;
+        serde_json::from_value::<Vec<String>>(value).map_err(|error| {
+            ToolConfigLoadError::Invalid(format!("解析旧版 disabled-name 工具配置失败: {error}"))
+        })?;
         return Ok(LoadedToolConfig::LegacyDisabledNames);
     }
 
-    let object = value
-        .as_object()
-        .ok_or_else(|| ToolConfigLoadError::Invalid("分布式工具授权配置必须是 JSON 对象".to_string()))?;
+    let object = value.as_object().ok_or_else(|| {
+        ToolConfigLoadError::Invalid("分布式工具授权配置必须是 JSON 对象".to_string())
+    })?;
     let schema_version = object
         .get("schemaVersion")
         .and_then(Value::as_u64)
-        .ok_or_else(|| ToolConfigLoadError::Invalid("分布式工具授权配置缺少有效 schemaVersion".to_string()))?;
+        .ok_or_else(|| {
+            ToolConfigLoadError::Invalid("分布式工具授权配置缺少有效 schemaVersion".to_string())
+        })?;
     if schema_version != u64::from(TOOL_CONFIG_SCHEMA_VERSION) {
-        return Err(ToolConfigLoadError::Invalid(format!("不支持的分布式工具配置版本: {}", schema_version)));
+        return Err(ToolConfigLoadError::Invalid(format!(
+            "不支持的分布式工具配置版本: {}",
+            schema_version
+        )));
     }
-    let names = object
-        .get("enabledTools")
-        .cloned()
-        .ok_or_else(|| ToolConfigLoadError::Invalid("分布式工具授权配置缺少 enabledTools".to_string()))?;
-    let names: Vec<String> = serde_json::from_value(names)
-        .map_err(|error| ToolConfigLoadError::Invalid(format!("解析 enabledTools 失败: {error}")))?;
+    let names = object.get("enabledTools").cloned().ok_or_else(|| {
+        ToolConfigLoadError::Invalid("分布式工具授权配置缺少 enabledTools".to_string())
+    })?;
+    let names: Vec<String> = serde_json::from_value(names).map_err(|error| {
+        ToolConfigLoadError::Invalid(format!("解析 enabledTools 失败: {error}"))
+    })?;
 
     let mut seen = HashSet::with_capacity(names.len());
     let mut enabled = HashSet::with_capacity(names.len());
     let mut orphaned = Vec::new();
     for name in names {
         if !seen.insert(name.clone()) {
-            return Err(ToolConfigLoadError::Invalid(format!("授权配置包含重复的分布式工具名称: {name}")));
+            return Err(ToolConfigLoadError::Invalid(format!(
+                "授权配置包含重复的分布式工具名称: {name}"
+            )));
         }
         if known_names.contains(&name) {
             enabled.insert(name);
@@ -901,7 +918,9 @@ mod tests {
         assert!(!resolved.rewrite_empty);
         assert_eq!(resolved.status.state, ToolConfigState::PersistenceError);
         let registry = test_registry();
-        let status = registry.ensure_enabled_config_loaded_from_path(Ok(path.clone())).await;
+        let status = registry
+            .ensure_enabled_config_loaded_from_path(Ok(path.clone()))
+            .await;
         assert_eq!(status.state, ToolConfigState::PersistenceError);
         assert!(!registry.is_enabled("Clipboard"));
         assert_eq!(std::fs::read(original).unwrap(), b"keep");
@@ -914,11 +933,17 @@ mod tests {
         let path = temp.path().join(TOOL_CONFIG_FILE);
         std::fs::write(&path, [0xff]).unwrap();
         let registry = test_registry();
-        let status = registry.ensure_enabled_config_loaded_from_path(Ok(path.clone())).await;
+        let status = registry
+            .ensure_enabled_config_loaded_from_path(Ok(path.clone()))
+            .await;
         assert_eq!(status.state, ToolConfigState::RecoveredDisabled);
-        assert_eq!(load_tool_config_file(&path, &known_names()).unwrap(), LoadedToolConfig::Current {
-            enabled: HashSet::new(), orphaned: Vec::new(),
-        });
+        assert_eq!(
+            load_tool_config_file(&path, &known_names()).unwrap(),
+            LoadedToolConfig::Current {
+                enabled: HashSet::new(),
+                orphaned: Vec::new(),
+            }
+        );
     }
 
     #[tokio::test]

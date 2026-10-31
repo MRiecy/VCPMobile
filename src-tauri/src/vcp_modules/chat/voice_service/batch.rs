@@ -62,7 +62,11 @@ impl CallInput {
             return Err(super::network::CANCELLED.into());
         }
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
-        if state.current.as_ref().is_some_and(|batch| batch.parts.len() >= MAX_BATCH_PARTS) {
+        if state
+            .current
+            .as_ref()
+            .is_some_and(|batch| batch.parts.len() >= MAX_BATCH_PARTS)
+        {
             return Err("连续语音片段已达 128 段，请等待当前输入完成。".into());
         }
         let barge = state.current.is_none() && state.has_claimed;
@@ -206,7 +210,10 @@ impl CallInput {
 
     pub fn discard_offer(&self, offer_id: &str) {
         if let Ok(mut state) = self.state.lock() {
-            if state.current.as_ref().and_then(|batch| batch.offer_id.as_ref())
+            if state
+                .current
+                .as_ref()
+                .and_then(|batch| batch.offer_id.as_ref())
                 .is_some_and(|id| id == offer_id)
             {
                 state.current = None;
@@ -324,14 +331,23 @@ mod tests {
         let empty = call.begin().unwrap();
         let last = call.begin().unwrap();
         assert!(matches!(
-            call.complete(&first.batch_id, first.sequence, format!(" {} ", "a".repeat(MAX_TEXT_BYTES - 2))).unwrap(),
+            call.complete(
+                &first.batch_id,
+                first.sequence,
+                format!(" {} ", "a".repeat(MAX_TEXT_BYTES - 2))
+            )
+            .unwrap(),
             BatchCompletion::Pending
         ));
         assert!(matches!(
-            call.complete(&empty.batch_id, empty.sequence, " \n\t ".into()).unwrap(),
+            call.complete(&empty.batch_id, empty.sequence, " \n\t ".into())
+                .unwrap(),
             BatchCompletion::Pending
         ));
-        let offer = offered(call.complete(&last.batch_id, last.sequence, " b ".into()).unwrap());
+        let offer = offered(
+            call.complete(&last.batch_id, last.sequence, " b ".into())
+                .unwrap(),
+        );
         assert_eq!(offer.text.len(), MAX_TEXT_BYTES);
         assert!(offer.text.ends_with("a b"));
     }
@@ -341,21 +357,36 @@ mod tests {
         let call = CallInput::new("call".into());
         let first = call.begin().unwrap();
         let pending = call.begin().unwrap();
-        call.partial(&pending.batch_id, pending.sequence, "b".into()).unwrap();
-        assert!(call.complete(&first.batch_id, first.sequence, "a".repeat(MAX_TEXT_BYTES - 1)).is_err());
+        call.partial(&pending.batch_id, pending.sequence, "b".into())
+            .unwrap();
+        assert!(call
+            .complete(
+                &first.batch_id,
+                first.sequence,
+                "a".repeat(MAX_TEXT_BYTES - 1)
+            )
+            .is_err());
     }
 
     #[test]
     fn saturation_rejects_only_new_speech_and_accepted_recognition_can_still_be_claimed() {
         let call = CallInput::new("call".into());
-        let parts: Vec<_> = (0..MAX_BATCH_PARTS).map(|_| call.begin().unwrap()).collect();
+        let parts: Vec<_> = (0..MAX_BATCH_PARTS)
+            .map(|_| call.begin().unwrap())
+            .collect();
         assert!(call.begin().is_err());
         for part in &parts[..MAX_BATCH_PARTS - 1] {
-            assert!(matches!(call.complete(&part.batch_id, part.sequence, "已接受".into()).unwrap(),
-                BatchCompletion::Pending));
+            assert!(matches!(
+                call.complete(&part.batch_id, part.sequence, "已接受".into())
+                    .unwrap(),
+                BatchCompletion::Pending
+            ));
         }
         let last = &parts[MAX_BATCH_PARTS - 1];
-        let ready = offered(call.complete(&last.batch_id, last.sequence, "末句".into()).unwrap());
+        let ready = offered(
+            call.complete(&last.batch_id, last.sequence, "末句".into())
+                .unwrap(),
+        );
         assert_eq!(ready.text.split_whitespace().count(), MAX_BATCH_PARTS);
         // Rejection must also preserve an offer that already exists, including
         // when reply preparation has not reached the claim boundary yet.
@@ -365,6 +396,13 @@ mod tests {
         let next = call.begin().unwrap();
         assert_eq!(next.sequence, MAX_BATCH_PARTS as u64);
         assert_ne!(next.batch_id, last.batch_id);
-        assert_eq!(offered(call.complete(&next.batch_id, next.sequence, "下一批".into()).unwrap()).text, "下一批");
+        assert_eq!(
+            offered(
+                call.complete(&next.batch_id, next.sequence, "下一批".into())
+                    .unwrap()
+            )
+            .text,
+            "下一批"
+        );
     }
 }

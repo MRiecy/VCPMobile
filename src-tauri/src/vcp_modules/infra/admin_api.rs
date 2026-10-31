@@ -13,7 +13,8 @@ use reqwest::{Method, RequestBuilder, Url};
 pub fn ensure_admin_config(settings: &Settings, feature_label: &str) -> Result<(), String> {
     resolve_service_base(&settings.server.url, settings.server.endpoint_mode)
         .map_err(|error| error.to_string())?;
-    if settings.server.admin_username.trim().is_empty() || settings.server.admin_password.is_empty() {
+    if settings.server.admin_username.trim().is_empty() || settings.server.admin_password.is_empty()
+    {
         return Err(format!(
             "{feature_label}需要管理员用户名与密码，请在 设置 → 用户身份 中填写"
         ));

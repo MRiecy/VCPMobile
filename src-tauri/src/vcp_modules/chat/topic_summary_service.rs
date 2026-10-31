@@ -1,6 +1,6 @@
+use crate::vcp_modules::infra::vcp_http_endpoint::{resolve_chat_endpoint, ChatRequestPurpose};
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, ConversationConfig, SettingsState};
-use crate::vcp_modules::infra::vcp_http_endpoint::{resolve_chat_endpoint, ChatRequestPurpose};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, State};
@@ -81,7 +81,10 @@ pub async fn summarize_topic(
     )?;
     let response = client
         .post(&vcp_url)
-        .header("Authorization", format!("Bearer {}", settings.server.api_key))
+        .header(
+            "Authorization",
+            format!("Bearer {}", settings.server.api_key),
+        )
         .header("Content-Type", "application/json")
         .json(&json!({
             "messages": [{"role": "user", "content": summary_prompt}],

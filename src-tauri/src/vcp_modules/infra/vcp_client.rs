@@ -20,15 +20,13 @@ use tokio_util::codec::LengthDelimitedCodec;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 
-use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
-use crate::vcp_modules::content_parser::ContentBlock;
-use crate::vcp_modules::db_manager::DbState;
 use super::vcp_http_endpoint::{
     resolve_chat_endpoint, resolve_model_discovery_endpoint, ChatRequestPurpose,
 };
-use crate::vcp_modules::settings_manager::{
-    ChatEndpointMode, Settings,
-};
+use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
+use crate::vcp_modules::content_parser::ContentBlock;
+use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::settings_manager::{ChatEndpointMode, Settings};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 
 mod request_body;
@@ -99,7 +97,6 @@ pub struct ChatEndpointPreview {
     pub final_url: String,
     pub model_discovery_url: Option<String>,
 }
-
 
 pub fn freeze_chat_connection(
     settings: &Settings,
@@ -399,7 +396,9 @@ struct HelperHandoff {
 }
 
 impl RequestOutput {
-    fn pending_terminal(&self) -> Option<Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>> {
+    fn pending_terminal(
+        &self,
+    ) -> Option<Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>> {
         self.state.lock().ok()?.pending_terminal.clone()
     }
 
@@ -423,14 +422,20 @@ impl RequestOutput {
             if state.chat_feed.is_none() {
                 let feed_app = app.clone();
                 let check_app = app.clone();
-                state.chat_feed = Some(Arc::new(move |event| crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)));
-                state.has_chat_listener = Some(Arc::new(move |origin| crate::vcp_modules::chat::voice_service::has_chat_listener(&check_app, origin)));
+                state.chat_feed = Some(Arc::new(move |event| {
+                    crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)
+                }));
+                state.has_chat_listener = Some(Arc::new(move |origin| {
+                    crate::vcp_modules::chat::voice_service::has_chat_listener(&check_app, origin)
+                }));
             }
         }
     }
 
     fn send_activity(&self, key: &MessageKey, request_id: uuid::Uuid, active: bool) -> bool {
-        let Ok(mut state) = self.state.lock() else { return false; };
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
         if state.owner_released {
             return false;
         }
@@ -439,15 +444,18 @@ impl RequestOutput {
         }
         // Owner metadata survives a content end/error so the lease can always
         // release its preparation/busy indicator after durable settlement.
-        Self::send_locked(&state, StreamEvent {
-            r#type: "request_activity".to_string(),
-            context: Some(json!({
-                "ownerType": key.topic.owner_type, "ownerId": key.topic.owner_id,
-                "topicId": key.topic.topic_id, "requestId": request_id,
-            })),
-            chunk: Some(json!({ "active": active })),
-            ..Default::default()
-        })
+        Self::send_locked(
+            &state,
+            StreamEvent {
+                r#type: "request_activity".to_string(),
+                context: Some(json!({
+                    "ownerType": key.topic.owner_type, "ownerId": key.topic.owner_id,
+                    "topicId": key.topic.topic_id, "requestId": request_id,
+                })),
+                chunk: Some(json!({ "active": active })),
+                ..Default::default()
+            },
+        )
     }
     #[cfg(target_os = "android")]
     fn retain_helper_handoff(
@@ -491,15 +499,20 @@ impl RequestOutput {
         self.attach_connection(channel, false)
     }
 
-    fn attach_connection(&self, channel: Channel<StreamEvent>, replace_connection: bool) -> Result<bool, String> {
+    fn attach_connection(
+        &self,
+        channel: Channel<StreamEvent>,
+        replace_connection: bool,
+    ) -> Result<bool, String> {
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
         if state.closed || state.owner_released {
             return Ok(false);
         }
-        if !replace_connection && state
-            .channel
-            .as_ref()
-            .is_some_and(|current| current.id() == channel.id())
+        if !replace_connection
+            && state
+                .channel
+                .as_ref()
+                .is_some_and(|current| current.id() == channel.id())
         {
             return Ok(true);
         }
@@ -541,7 +554,9 @@ impl RequestOutput {
                 context.insert("originUserMessageId".into(), json!(origin));
             }
         }
-        if let Some(feed) = &state.chat_feed { feed(&event); }
+        if let Some(feed) = &state.chat_feed {
+            feed(&event);
+        }
         match &state.channel {
             Some(channel) => channel
                 .send(event)
@@ -567,8 +582,12 @@ impl RequestOutput {
         if state.closed {
             return;
         }
-        let feeds_tts = state.origin_user_message_id.as_ref().is_some_and(|origin|
-            state.has_chat_listener.as_ref().is_some_and(|listener| listener(origin)));
+        let feeds_tts = state.origin_user_message_id.as_ref().is_some_and(|origin| {
+            state
+                .has_chat_listener
+                .as_ref()
+                .is_some_and(|listener| listener(origin))
+        });
         if state.channel.is_none() && !feeds_tts {
             buffer.discard_pending_delivery();
             state.snapshot_pending = true;
@@ -612,8 +631,17 @@ fn request_output<R: Runtime>(
     // A reconnect can finish discovery after another WebView has connected.
     // New owners always take the current consumer, never that stale caller's.
     let requests = app.try_state::<ActiveRequests>();
-    let connection = requests.as_ref().and_then(|requests| requests.1.lock().ok());
-    let channel = connection.as_ref().and_then(|connection| connection.as_ref().map(|connection| connection.channel.clone())).or(channel);
+    let connection = requests
+        .as_ref()
+        .and_then(|requests| requests.1.lock().ok());
+    let channel = connection
+        .as_ref()
+        .and_then(|connection| {
+            connection
+                .as_ref()
+                .map(|connection| connection.channel.clone())
+        })
+        .or(channel);
     let output = app
         .try_state::<ActiveRequests>()
         .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()))
@@ -650,14 +678,20 @@ pub(crate) fn retain_request_terminal<R: Runtime>(
     key: &MessageKey,
     terminal: Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>,
 ) {
-    let Some(output) = app.try_state::<ActiveRequests>()
-        .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone())) else {
+    let Some(output) = app
+        .try_state::<ActiveRequests>()
+        .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()))
+    else {
         return;
     };
     // Android already retains these results through its helper handoff. Do not
     // keep a second resident owner beside a live helper or its completed file.
     #[cfg(target_os = "android")]
-    if output.helper_handoff.lock().is_ok_and(|handoff| handoff.is_some()) {
+    if output
+        .helper_handoff
+        .lock()
+        .is_ok_and(|handoff| handoff.is_some())
+    {
         return;
     }
     if let Ok(mut state) = output.state.lock() {
@@ -687,7 +721,9 @@ pub(crate) async fn discard_deleted_generation<R: Runtime>(app: &AppHandle<R>, k
             request.output.close();
             let _ = requests.cancel(key);
             if request.released.is_cancelled() {
-                requests.0.remove_if(key, |_, current| current.attempt_id == request.attempt_id);
+                requests
+                    .0
+                    .remove_if(key, |_, current| current.attempt_id == request.attempt_id);
             }
         }
     }
@@ -824,7 +860,11 @@ pub struct ActiveRequestLease {
 
 impl ActiveRequestLease {
     pub(crate) fn set_origin_user_message(&self, id: &str) -> Result<(), String> {
-        self.entry.output.state.lock().map_err(|error| error.to_string())?
+        self.entry
+            .output
+            .state
+            .lock()
+            .map_err(|error| error.to_string())?
             .origin_user_message_id = Some(id.to_string());
         Ok(())
     }
@@ -869,12 +909,14 @@ impl ActiveRequestLease {
         recovering: bool,
     ) -> Result<(Self, CancellationToken), String> {
         let attempt_id = uuid::Uuid::new_v4();
-        let make_entry = |output| Arc::new(ActiveRequestEntry {
-            attempt_id,
-            cancellation_token: cancellation_token.clone(),
-            output,
-            released: CancellationToken::new(),
-        });
+        let make_entry = |output| {
+            Arc::new(ActiveRequestEntry {
+                attempt_id,
+                cancellation_token: cancellation_token.clone(),
+                output,
+                released: CancellationToken::new(),
+            })
+        };
 
         let entry = match requests.entry(key.clone()) {
             Entry::Vacant(slot) => {
@@ -891,18 +933,29 @@ impl ActiveRequestLease {
                 slot.insert(entry.clone());
                 entry
             }
-            Entry::Occupied(_) => return Err(format!(
-                "Request {} is already active for {}/{}/{}; duplicate attempt rejected",
-                key.msg_id, key.topic.owner_type, key.topic.owner_id, key.topic.topic_id
-            )),
+            Entry::Occupied(_) => {
+                return Err(format!(
+                    "Request {} is already active for {}/{}/{}; duplicate attempt rejected",
+                    key.msg_id, key.topic.owner_type, key.topic.owner_id, key.topic.topic_id
+                ))
+            }
         };
-        Ok((Self { requests, key, entry }, cancellation_token))
+        Ok((
+            Self {
+                requests,
+                key,
+                entry,
+            },
+            cancellation_token,
+        ))
     }
 }
 
 impl Drop for ActiveRequestLease {
     fn drop(&mut self) {
-        self.entry.output.send_activity(&self.key, self.entry.attempt_id, false);
+        self.entry
+            .output
+            .send_activity(&self.key, self.entry.attempt_id, false);
         self.entry.output.close();
         if let Entry::Occupied(entry) = self.requests.entry(self.key.clone()) {
             if entry.get().attempt_id == self.entry.attempt_id {
@@ -939,7 +992,10 @@ pub struct ActiveGroupTurns(
 impl Default for ActiveGroupTurns {
     fn default() -> Self {
         log::info!("[VCPClient] Initialized ActiveGroupTurns successfully.");
-        Self(Arc::new(DashMap::new()), std::sync::Mutex::new(std::collections::VecDeque::new()))
+        Self(
+            Arc::new(DashMap::new()),
+            std::sync::Mutex::new(std::collections::VecDeque::new()),
+        )
     }
 }
 
@@ -947,20 +1003,26 @@ impl ActiveGroupTurns {
     pub(crate) fn accept_continue(&self, key: &TopicKey, debounce_ms: u32) -> Result<(), String> {
         let mut recent = self.1.lock().map_err(|e| e.to_string())?;
         recent.retain(|(_, time)| time.elapsed() < Duration::from_secs(10));
-        if recent.iter().any(|(topic, time)| topic == key && time.elapsed() < Duration::from_millis(debounce_ms as u64)) {
+        if recent.iter().any(|(topic, time)| {
+            topic == key && time.elapsed() < Duration::from_millis(debounce_ms as u64)
+        }) {
             return Err("继续操作过于频繁，请稍后重试。".into());
         }
         recent.retain(|(topic, _)| topic != key);
-        while recent.len() >= 128 { recent.pop_front(); }
+        while recent.len() >= 128 {
+            recent.pop_front();
+        }
         recent.push_back((key.clone(), std::time::Instant::now()));
         Ok(())
     }
 
     pub(crate) fn try_acquire(&self, key: TopicKey) -> Result<ActiveGroupTurnLease, String> {
-        self.try_acquire_or_wait(key.clone()).map_err(|_| format!(
-            "Group turn is already active for {}/{}/{}",
-            key.owner_type, key.owner_id, key.topic_id
-        ))
+        self.try_acquire_or_wait(key.clone()).map_err(|_| {
+            format!(
+                "Group turn is already active for {}/{}/{}",
+                key.owner_type, key.owner_id, key.topic_id
+            )
+        })
     }
 
     /// Atomically acquire the slot or subscribe to its current owner's release.
@@ -998,49 +1060,97 @@ impl ActiveGroupTurns {
         };
         entry.cancellation_token.cancel();
         if let Ok(session) = entry.session.lock() {
-            if let Some(session) = session.as_ref() { session.cancel_scopes(); session.invalidate(); }
+            if let Some(session) = session.as_ref() {
+                session.cancel_scopes();
+                session.invalidate();
+            }
         }
         let event = group_turn_event(key, &entry, true);
-        if let Ok(channel) = entry.channel.lock() { if let Some(channel) = channel.as_ref() { let _ = channel.send(event); } }
+        if let Ok(channel) = entry.channel.lock() {
+            if let Some(channel) = channel.as_ref() {
+                let _ = channel.send(event);
+            }
+        }
         drop(entry);
         true
     }
 
     pub(crate) fn cancel_owner(&self, owner_type: &str, owner_id: &str) {
-        let keys = self.0.iter().filter(|entry| entry.key().owner_type == owner_type && entry.key().owner_id == owner_id)
-            .map(|entry| entry.key().clone()).collect::<Vec<_>>();
-        for key in keys { self.cancel(&key); }
+        let keys = self
+            .0
+            .iter()
+            .filter(|entry| {
+                entry.key().owner_type == owner_type && entry.key().owner_id == owner_id
+            })
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.cancel(&key);
+        }
     }
 
     pub(crate) fn notify_history_changed(&self, key: &TopicKey) {
-        if let Some(session) = self.session(key) { session.invalidate(); self.publish(key); }
+        if let Some(session) = self.session(key) {
+            session.invalidate();
+            self.publish(key);
+        }
     }
 
     pub(crate) fn notify_group_changed(&self, group_id: &str) {
-        let keys = self.0.iter().filter(|entry| entry.key().owner_type == "group" && entry.key().owner_id == group_id)
-            .map(|entry| entry.key().clone()).collect::<Vec<_>>();
-        for key in keys { self.notify_history_changed(&key); }
+        let keys = self
+            .0
+            .iter()
+            .filter(|entry| entry.key().owner_type == "group" && entry.key().owner_id == group_id)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.notify_history_changed(&key);
+        }
     }
 
     pub(crate) fn notify_all_groups_changed(&self) {
-        let keys = self.0.iter().map(|entry| entry.key().clone()).collect::<Vec<_>>();
-        for key in keys { self.notify_history_changed(&key); }
+        let keys = self
+            .0
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.notify_history_changed(&key);
+        }
     }
 
-    pub(crate) fn topic_for_session(&self, session: &Arc<crate::vcp_modules::group::group_session::GroupSession>) -> Option<TopicKey> {
+    pub(crate) fn topic_for_session(
+        &self,
+        session: &Arc<crate::vcp_modules::group::group_session::GroupSession>,
+    ) -> Option<TopicKey> {
         self.0.iter().find_map(|entry| {
-            entry.session.lock().ok()?.as_ref().filter(|current| Arc::ptr_eq(current, session)).map(|_| entry.key().clone())
+            entry
+                .session
+                .lock()
+                .ok()?
+                .as_ref()
+                .filter(|current| Arc::ptr_eq(current, session))
+                .map(|_| entry.key().clone())
         })
     }
 
-    pub(crate) fn session(&self, key: &TopicKey) -> Option<Arc<crate::vcp_modules::group::group_session::GroupSession>> {
-        self.0.get(key).and_then(|entry| entry.session.lock().ok()?.clone())
+    pub(crate) fn session(
+        &self,
+        key: &TopicKey,
+    ) -> Option<Arc<crate::vcp_modules::group::group_session::GroupSession>> {
+        self.0
+            .get(key)
+            .and_then(|entry| entry.session.lock().ok()?.clone())
     }
 
     pub(crate) fn publish(&self, key: &TopicKey) {
         if let Some(entry) = self.0.get(key) {
             let event = group_turn_event(key, &entry, true);
-            if let Ok(channel) = entry.channel.lock() { if let Some(channel) = channel.as_ref() { let _ = channel.send(event); } }
+            if let Ok(channel) = entry.channel.lock() {
+                if let Some(channel) = channel.as_ref() {
+                    let _ = channel.send(event);
+                }
+            }
         }
     }
 
@@ -1063,7 +1173,11 @@ impl ActiveGroupTurns {
             request.output.attach(channel.clone())?;
         }
         let event = group_turn_event(key, &turn, true);
-        if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
+        if let Ok(feed) = turn.chat_feed.lock() {
+            if let Some(feed) = feed.as_ref() {
+                feed(&event);
+            }
+        }
         let _ = channel.send(event);
         let mut snapshot = json!({
             "ownerType": key.owner_type, "ownerId": key.owner_id,
@@ -1071,8 +1185,13 @@ impl ActiveGroupTurns {
         });
         if let Ok(session) = turn.session.lock() {
             if let Some(session) = session.as_ref() {
-                if let Ok(Value::Object(extra)) = session.snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string())) {
-                    if let Some(snapshot) = snapshot.as_object_mut() { snapshot.extend(extra); }
+                if let Ok(Value::Object(extra)) = session
+                    .snapshot()
+                    .and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string()))
+                {
+                    if let Some(snapshot) = snapshot.as_object_mut() {
+                        snapshot.extend(extra);
+                    }
                 }
             }
         }
@@ -1087,24 +1206,40 @@ pub(crate) struct ActiveGroupTurnLease {
 }
 
 impl ActiveGroupTurnLease {
-    pub(crate) fn start_session(&self, trigger: &'static str, force_continue: bool) -> Result<Arc<crate::vcp_modules::group::group_session::GroupSession>, String> {
+    pub(crate) fn start_session(
+        &self,
+        trigger: &'static str,
+        force_continue: bool,
+    ) -> Result<Arc<crate::vcp_modules::group::group_session::GroupSession>, String> {
         let turn = self.turns.get(&self.key).ok_or("群聊执行租约已经释放")?;
         let mut slot = turn.session.lock().map_err(|e| e.to_string())?;
-        if slot.is_some() { return Err("群聊会话已经启动".into()); }
-        let session = crate::vcp_modules::group::group_session::GroupSession::new(turn.turn_id.to_string(), self.cancellation_token.clone(), trigger, force_continue);
+        if slot.is_some() {
+            return Err("群聊会话已经启动".into());
+        }
+        let session = crate::vcp_modules::group::group_session::GroupSession::new(
+            turn.turn_id.to_string(),
+            self.cancellation_token.clone(),
+            trigger,
+            force_continue,
+        );
         *slot = Some(session.clone());
         Ok(session)
     }
 
     pub(crate) fn set_origin_user_message(&self, id: &str) -> Result<(), String> {
         if let Some(turn) = self.turns.get(&self.key) {
-            *turn.origin_user_message_id.lock().map_err(|error| error.to_string())? = Some(id.to_string());
+            *turn
+                .origin_user_message_id
+                .lock()
+                .map_err(|error| error.to_string())? = Some(id.to_string());
         }
         Ok(())
     }
 
     pub(crate) fn origin_user_message(&self) -> Option<String> {
-        self.turns.get(&self.key).and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone())
+        self.turns
+            .get(&self.key)
+            .and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone())
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -1134,15 +1269,24 @@ impl ActiveGroupTurnLease {
     ) -> Result<(), String> {
         let requests = app.state::<ActiveRequests>();
         let connection = requests.1.lock().map_err(|error| error.to_string())?;
-        let channel = connection.as_ref().map(|connection| connection.channel.clone()).or(channel);
+        let channel = connection
+            .as_ref()
+            .map(|connection| connection.channel.clone())
+            .or(channel);
         if let Some(turn) = self.turns.get(&self.key) {
             let feed_app = app.clone();
-            *turn.chat_feed.lock().map_err(|error| error.to_string())? = Some(Arc::new(move |event|
-                crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)));
+            *turn.chat_feed.lock().map_err(|error| error.to_string())? =
+                Some(Arc::new(move |event| {
+                    crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)
+                }));
             let mut current = turn.channel.lock().map_err(|error| error.to_string())?;
             *current = channel.clone();
             let event = group_turn_event(&self.key, &turn, true);
-            if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
+            if let Ok(feed) = turn.chat_feed.lock() {
+                if let Some(feed) = feed.as_ref() {
+                    feed(&event);
+                }
+            }
             if let Some(channel) = channel {
                 let _ = channel.send(event);
             }
@@ -1156,11 +1300,19 @@ impl Drop for ActiveGroupTurnLease {
         if let Some((_, turn)) = self.turns.remove(&self.key) {
             if let Ok(session) = turn.session.lock() {
                 if let Some(session) = session.as_ref() {
-                    session.close(if self.cancellation_token.is_cancelled() { Some("cancelled_by_user".into()) } else { None });
+                    session.close(if self.cancellation_token.is_cancelled() {
+                        Some("cancelled_by_user".into())
+                    } else {
+                        None
+                    });
                 }
             }
             let event = group_turn_event(&self.key, &turn, false);
-            if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
+            if let Ok(feed) = turn.chat_feed.lock() {
+                if let Some(feed) = feed.as_ref() {
+                    feed(&event);
+                }
+            }
             if let Ok(channel) = turn.channel.lock() {
                 if let Some(channel) = channel.as_ref() {
                     let _ = channel.send(event);
@@ -1175,8 +1327,13 @@ fn group_turn_event(key: &TopicKey, turn: &ActiveGroupTurnEntry, active: bool) -
     let mut chunk = json!({ "active": active });
     if let Ok(session) = turn.session.lock() {
         if let Some(session) = session.as_ref() {
-            if let Ok(Value::Object(extra)) = session.snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string())) {
-                if let Some(chunk) = chunk.as_object_mut() { chunk.extend(extra); }
+            if let Ok(Value::Object(extra)) = session
+                .snapshot()
+                .and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string()))
+            {
+                if let Some(chunk) = chunk.as_object_mut() {
+                    chunk.extend(extra);
+                }
             }
         }
     }
@@ -1208,11 +1365,19 @@ pub async fn interruptGroupTurn(
         topic_id
     );
     let key = TopicKey::new(owner_type, owner_id, topic_id);
-    let origin = state.0.get(&key).and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone());
+    let origin = state
+        .0
+        .get(&key)
+        .and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone());
     if let Some(origin) = origin {
         let speech_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = crate::vcp_modules::chat::voice_service::stop_chat_reply_by_origin(&speech_app, &origin).await {
+            if let Err(error) = crate::vcp_modules::chat::voice_service::stop_chat_reply_by_origin(
+                &speech_app,
+                &origin,
+            )
+            .await
+            {
                 log::warn!("[VCPClient] Could not stop reply speech: {error}");
             }
         });
@@ -1233,18 +1398,34 @@ pub async fn interruptGroupTurn(
     for message_id in &pending {
         schedule_pending_stop(&app, &requests, MessageKey::new(key.clone(), message_id));
     }
-    Ok(json!({"status": if cancelled || !pending.is_empty() { "cancelling" } else { "not_running" }}))
+    Ok(
+        json!({"status": if cancelled || !pending.is_empty() { "cancelling" } else { "not_running" }}),
+    )
 }
 
-fn schedule_pending_stop<R: Runtime>(app: &AppHandle<R>, requests: &ActiveRequests, key: MessageKey) {
-    let producer = requests.0.get(&key)
+fn schedule_pending_stop<R: Runtime>(
+    app: &AppHandle<R>,
+    requests: &ActiveRequests,
+    key: MessageKey,
+) {
+    let producer = requests
+        .0
+        .get(&key)
         .filter(|entry| !entry.released.is_cancelled())
         .map(|entry| entry.value().clone());
     if let Some(entry) = &producer {
         entry.cancellation_token.cancel();
     }
-    let channel = requests.1.lock().ok().and_then(|connection| connection.as_ref()
-        .map(|connection| connection.channel.clone())).unwrap_or_else(|| Channel::new(|_| Ok(())));
+    let channel = requests
+        .1
+        .lock()
+        .ok()
+        .and_then(|connection| {
+            connection
+                .as_ref()
+                .map(|connection| connection.channel.clone())
+        })
+        .unwrap_or_else(|| Channel::new(|_| Ok(())));
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Some(entry) = producer {
@@ -1256,9 +1437,16 @@ fn schedule_pending_stop<R: Runtime>(app: &AppHandle<R>, requests: &ActiveReques
             }
         }
         if let Err(error) = recover_active_generation(
-            app.clone(), app.state::<ActiveRequests>(), key.topic.owner_id,
-            key.topic.owner_type, key.topic.topic_id, key.msg_id, channel,
-        ).await {
+            app.clone(),
+            app.state::<ActiveRequests>(),
+            key.topic.owner_id,
+            key.topic.owner_type,
+            key.topic.topic_id,
+            key.msg_id,
+            channel,
+        )
+        .await
+        {
             log::warn!("[VCPClient] Stop remains pending: {error}");
         }
     });
@@ -1400,11 +1588,14 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     }
 
     let prepared_body = request_body::prepare(
-        app.path().app_cache_dir().map_err(|error| VcpRequestFailure::preparation(error.to_string()))?,
+        app.path()
+            .app_cache_dir()
+            .map_err(|error| VcpRequestFailure::preparation(error.to_string()))?,
         request_body,
         cancellation_token.clone(),
         preparation_permit,
-    ).await;
+    )
+    .await;
     if cancellation_token.is_cancelled() {
         return Ok(VcpResponse::cancelled());
     }
@@ -1509,7 +1700,10 @@ async fn preprocess_multimodal_messages<R: Runtime>(
 
         remove_internal_local_attachment_metadata(&mut msg);
         let had_content = msg.get("content").is_some();
-        let content = msg.get_mut("content").map(Value::take).unwrap_or(Value::Null);
+        let content = msg
+            .get_mut("content")
+            .map(Value::take)
+            .unwrap_or(Value::Null);
 
         // 处理多模态或复杂内容数组
         if let Value::Array(content_array) = content {
@@ -1618,7 +1812,9 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                             }
                         } else {
                             if matches!(media_kind, "audio" | "video") {
-                                return Err(format!("音视频附件 {label} 的本地文件不可用，请重新导入后重试"));
+                                return Err(format!(
+                                    "音视频附件 {label} 的本地文件不可用，请重新导入后重试"
+                                ));
                             }
                             log::warn!(
                                 "[VCPClient] Attachment CAS {} is unavailable for multimodal preprocessing",
@@ -2126,8 +2322,9 @@ async fn handle_streaming_request<R: Runtime>(
         let (action, params) = if is_resume {
             ("resume", None)
         } else {
-            let body = request_body.as_ref().ok_or_else(||
-                VcpRequestFailure::preparation("模型请求正文未准备".into()))?;
+            let body = request_body
+                .as_ref()
+                .ok_or_else(|| VcpRequestFailure::preparation("模型请求正文未准备".into()))?;
             let mut helper_context = context.clone().unwrap_or_else(|| json!({}));
             helper_context["messageId"] = json!(message_id);
             (
@@ -2174,10 +2371,13 @@ async fn handle_streaming_request<R: Runtime>(
                 .to_string()
                 .into());
         }
-        let body = request_body.ok_or_else(||
-            VcpRequestFailure::preparation("模型请求正文未准备".into()))?;
+        let body = request_body
+            .ok_or_else(|| VcpRequestFailure::preparation("模型请求正文未准备".into()))?;
         let length = body.length;
-        let upload = body.into_http_body().await.map_err(VcpRequestFailure::preparation)?;
+        let upload = body
+            .into_http_body()
+            .await
+            .map_err(VcpRequestFailure::preparation)?;
         let response = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
@@ -2396,14 +2596,27 @@ async fn handle_streaming_request<R: Runtime>(
                 Ok(None) => {}
                 Err(error) => {
                     if cancelled || cancellation_token.is_cancelled() {
-                        checkpoint_stop_partial(app, &context, &message_id, partial_content.as_deref()).await?;
-                        return Err(VcpRequestFailure::stopping(error.to_string(), partial_content));
+                        checkpoint_stop_partial(
+                            app,
+                            &context,
+                            &message_id,
+                            partial_content.as_deref(),
+                        )
+                        .await?;
+                        return Err(VcpRequestFailure::stopping(
+                            error.to_string(),
+                            partial_content,
+                        ));
                     }
-                    return Err(VcpRequestFailure::recoverable_helper(error.to_string(), partial_content));
+                    return Err(VcpRequestFailure::recoverable_helper(
+                        error.to_string(),
+                        partial_content,
+                    ));
                 }
             }
             if cancelled || cancellation_token.is_cancelled() {
-                checkpoint_stop_partial(app, &context, &message_id, partial_content.as_deref()).await?;
+                checkpoint_stop_partial(app, &context, &message_id, partial_content.as_deref())
+                    .await?;
                 return Err(VcpRequestFailure::stopping(message, partial_content));
             }
             return Err(VcpRequestFailure::recoverable_helper(
@@ -2424,7 +2637,10 @@ async fn handle_streaming_request<R: Runtime>(
     aurora_buffer.finalize();
     send_update(&mut aurora_buffer);
     if let Err(message) = outcome {
-        return Err(VcpRequestFailure::streaming(message, aurora_buffer.full_text));
+        return Err(VcpRequestFailure::streaming(
+            message,
+            aurora_buffer.full_text,
+        ));
     }
     let is_aborted = last_finish_reason.as_deref() == Some("cancelled_by_user");
     Ok(VcpResponse {
@@ -2495,12 +2711,16 @@ async fn handle_non_streaming_request(
     };
 
     // 从标准的 OpenAI 格式中提取文本和结束原因
-    let first_choice = vcp_response.get_mut("choices")
+    let first_choice = vcp_response
+        .get_mut("choices")
         .and_then(Value::as_array_mut)
         .and_then(|choices| choices.first_mut());
     let (full_content, finish_reason) = if let Some(choice) = first_choice {
-        let content = match choice.get_mut("message")
-            .and_then(|message| message.get_mut("content")).map(Value::take) {
+        let content = match choice
+            .get_mut("message")
+            .and_then(|message| message.get_mut("content"))
+            .map(Value::take)
+        {
             Some(Value::String(content)) => content,
             _ => String::new(),
         };
@@ -2557,11 +2777,24 @@ pub async fn interruptRequest(
         TopicKey::new(owner_type, owner_id, topic_id),
         message_id.clone(),
     );
-    let origin = state.0.get(&key).and_then(|entry| entry.output.state.lock().ok()?.origin_user_message_id.clone());
+    let origin = state.0.get(&key).and_then(|entry| {
+        entry
+            .output
+            .state
+            .lock()
+            .ok()?
+            .origin_user_message_id
+            .clone()
+    });
     if let Some(origin) = origin {
         let speech_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = crate::vcp_modules::chat::voice_service::stop_chat_reply_by_origin(&speech_app, &origin).await {
+            if let Err(error) = crate::vcp_modules::chat::voice_service::stop_chat_reply_by_origin(
+                &speech_app,
+                &origin,
+            )
+            .await
+            {
                 log::warn!("[VCPClient] Could not stop reply speech: {error}");
             }
         });
@@ -2576,9 +2809,18 @@ pub async fn interruptRequest(
         "UPDATE active_generations SET stop_requested = 1
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
     )
-    .bind(&key.topic.owner_type).bind(&key.topic.owner_id).bind(&key.topic.topic_id).bind(&key.msg_id)
-    .execute(&db.pool).await.map_err(|error| error.to_string())?.rows_affected() != 0;
-    let entry = state.0.get(&key)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
+    .execute(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .rows_affected()
+        != 0;
+    let entry = state
+        .0
+        .get(&key)
         .filter(|entry| !entry.released.is_cancelled())
         .map(|entry| entry.value().clone());
     if entry.is_some() || pending {
@@ -2602,17 +2844,19 @@ pub async fn interruptRequest(
         .fetch_optional(&db.pool)
         .await
         .map_err(|error| error.to_string())?;
-        let retained_terminal = state.0.get(&key).is_some_and(|entry|
-            entry.released.is_cancelled() && entry.output.pending_terminal().is_some());
+        let retained_terminal = state.0.get(&key).is_some_and(|entry| {
+            entry.released.is_cancelled() && entry.output.pending_terminal().is_some()
+        });
         match reason.flatten() {
             Some(reason) => {
                 Ok(json!({ "success": true, "status": "completed", "finishReason": reason }))
             }
-            None if retained_terminal => {
-                Ok(json!({ "success": true, "status": "cancelling" }))
-            }
+            None if retained_terminal => Ok(json!({ "success": true, "status": "cancelling" })),
             None if pending => Ok(json!({ "success": true, "status": "cancelling" })),
-            None => Err(format!("Request {} has no committed terminal result", message_id)),
+            None => Err(format!(
+                "Request {} has no committed terminal result",
+                message_id
+            )),
         }
     };
     // Cancelling this wait never aborts the request owner or its commit.
@@ -2721,13 +2965,17 @@ pub async fn reconnect_chat_streams<R: Runtime>(
 
 #[cfg(test)]
 async fn reconnect_chat_output<R: Runtime>(
-    app: AppHandle<R>, connection_id: String, channel: Option<Channel<StreamEvent>>,
+    app: AppHandle<R>,
+    connection_id: String,
+    channel: Option<Channel<StreamEvent>>,
 ) -> Result<ReconnectChatStreamsResult, String> {
     reconnect_chat_output_for_webview(app, connection_id, channel, None).await
 }
 
 fn is_current_webview<R: Runtime>(app: &AppHandle<R>, webview: &tauri::Webview<R>) -> bool {
-    let Some(current) = app.get_webview_window(webview.label()) else { return false; };
+    let Some(current) = app.get_webview_window(webview.label()) else {
+        return false;
+    };
     // Tauri 2.12.1 clones share their Arc<ResourceTable>; a replacement with the
     // same label has a different table. Drop each guard before taking the next:
     // current and caller can refer to the same non-reentrant mutex.
@@ -2755,12 +3003,18 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
     let mut active_requests = Vec::new();
     let channel = {
         let mut current = requests.1.lock().map_err(|error| error.to_string())?;
-        if webview.as_ref().is_some_and(|webview| !is_current_webview(&app, webview)) {
+        if webview
+            .as_ref()
+            .is_some_and(|webview| !is_current_webview(&app, webview))
+        {
             return Err("connection_stale".to_string());
         }
         let replace_connection = channel.is_some();
         if let Some(channel) = channel {
-            *current = Some(ChatOutputConnection { id: connection_id.clone(), channel });
+            *current = Some(ChatOutputConnection {
+                id: connection_id.clone(),
+                channel,
+            });
         }
         let connection = current.as_ref().ok_or("connection_not_registered")?;
         if connection.id != connection_id {
@@ -2770,8 +3024,13 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
         // A new WebView may reuse a numeric JS callback ID. Registration
         // replaces the consumer by connection identity, not by that number.
         for request in requests.0.iter() {
-            if request.output.attach_connection(channel.clone(), replace_connection)?
-                && request.output.send_activity(request.key(), request.attempt_id, true) {
+            if request
+                .output
+                .attach_connection(channel.clone(), replace_connection)?
+                && request
+                    .output
+                    .send_activity(request.key(), request.attempt_id, true)
+            {
                 active_requests.push(json!({
                     "ownerType": request.key().topic.owner_type,
                     "ownerId": request.key().topic.owner_id,
@@ -2781,7 +3040,11 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
             }
             keys.insert(request.key().clone());
         }
-        let active_turns = turns.0.iter().map(|turn| turn.key().clone()).collect::<Vec<_>>();
+        let active_turns = turns
+            .0
+            .iter()
+            .map(|turn| turn.key().clone())
+            .collect::<Vec<_>>();
         for key in active_turns {
             if let Some(turn) = turns.attach_output(&requests, &key, channel.clone())? {
                 group_turns.push(turn);
@@ -2793,7 +3056,11 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
     let generations = pending_generations(&db.pool).await?;
     for generation in &generations {
         keys.insert(MessageKey::new(
-            TopicKey::new(&generation.owner_type, &generation.owner_id, &generation.topic_id),
+            TopicKey::new(
+                &generation.owner_type,
+                &generation.owner_id,
+                &generation.topic_id,
+            ),
             &generation.msg_id,
         ));
     }
@@ -2805,11 +3072,18 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
                     keys.insert(key);
                 }
             }
-            Err(error) => log::warn!("[VCPClient] Keeping unreadable offline SSE file {path:?}: {error}"),
+            Err(error) => {
+                log::warn!("[VCPClient] Keeping unreadable offline SSE file {path:?}: {error}")
+            }
         }
     }
-    if requests.1.lock().map_err(|error| error.to_string())?
-        .as_ref().is_none_or(|connection| connection.id != connection_id) {
+    if requests
+        .1
+        .lock()
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        .is_none_or(|connection| connection.id != connection_id)
+    {
         return Err("connection_stale".to_string());
     }
     for key in keys {
@@ -2817,18 +3091,30 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
         let channel = channel.clone();
         tauri::async_runtime::spawn(async move {
             let result = recover_active_generation(
-                app.clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
-                key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(),
+                app.clone(),
+                app.state::<ActiveRequests>(),
+                key.topic.owner_id.clone(),
+                key.topic.owner_type.clone(),
+                key.topic.topic_id.clone(),
+                key.msg_id.clone(),
                 channel.clone(),
-            ).await;
+            )
+            .await;
             if let Err(error) = result {
                 // The owner sends detailed recoverable failures itself. A DB or
                 // mailbox failure before a transport exists still needs an event.
-                log::warn!("[VCPClient] Reconnect for {} remains pending: {error}", key.msg_id);
+                log::warn!(
+                    "[VCPClient] Reconnect for {} remains pending: {error}",
+                    key.msg_id
+                );
             }
         });
     }
-    Ok(ReconnectChatStreamsResult { generations, group_turns, active_requests })
+    Ok(ReconnectChatStreamsResult {
+        generations,
+        group_turns,
+        active_requests,
+    })
 }
 
 async fn pending_generations(pool: &sqlx::SqlitePool) -> Result<Vec<ActiveGeneration>, String> {
@@ -2887,10 +3173,19 @@ pub(crate) async fn finalize_stream_error<R: Runtime>(
     // terminal before any database access; the finalizer's transaction alone
     // decides whether the message is pending, already settled, or removed.
     let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
-        app_handle.clone(), pool, key, stream_error_content(&partial_content, error),
-        false, Some("error".to_string()), stream_channel, agent_id,
-    ).await?;
-    Ok(committed.filter(|message| message.newly_committed).map(|message| message.content))
+        app_handle.clone(),
+        pool,
+        key,
+        stream_error_content(&partial_content, error),
+        false,
+        Some("error".to_string()),
+        stream_channel,
+        agent_id,
+    )
+    .await?;
+    Ok(committed
+        .filter(|message| message.newly_committed)
+        .map(|message| message.content))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3029,29 +3324,46 @@ async fn remove_offline_completed(path: &std::path::Path) -> Result<(), String> 
 
 #[cfg(target_os = "android")]
 async fn read_completed_transport<R: Runtime>(
-    app: &AppHandle<R>, request_id: &str, output: &RequestOutput,
+    app: &AppHandle<R>,
+    request_id: &str,
+    output: &RequestOutput,
 ) -> Result<Option<Result<VcpResponse, VcpRequestFailure>>, VcpRequestFailure> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut files = Vec::new();
-    for path in offline_completed_paths(app, Some(request_id)).await
-        .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))? {
-        files.push(open_offline_completed(path).await
-            .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))?);
+    for path in offline_completed_paths(app, Some(request_id))
+        .await
+        .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))?
+    {
+        files.push(
+            open_offline_completed(path)
+                .await
+                .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))?,
+        );
     }
     files.sort_by_key(|file| std::cmp::Reverse(file.metadata.completed_at));
-    let Some(file) = files.into_iter().next() else { return Ok(None); };
-    let mut reader = tokio::fs::File::open(&file.path).await
+    let Some(file) = files.into_iter().next() else {
+        return Ok(None);
+    };
+    let mut reader = tokio::fs::File::open(&file.path)
+        .await
         .map_err(|error| VcpRequestFailure::recoverable_helper(error.to_string(), None))?;
-    reader.seek(std::io::SeekFrom::Start(file.content_offset)).await
+    reader
+        .seek(std::io::SeekFrom::Start(file.content_offset))
+        .await
         .map_err(|error| VcpRequestFailure::recoverable_helper(error.to_string(), None))?;
     let mut content = String::new();
-    reader.read_to_string(&mut content).await
+    reader
+        .read_to_string(&mut content)
+        .await
         .map_err(|error| VcpRequestFailure::recoverable_helper(error.to_string(), None))?;
     output.retain_completed_file(&file);
     if let Some(error) = file.metadata.error {
         return Ok(Some(Err(VcpRequestFailure::streaming(error, content))));
     }
-    let reason = file.metadata.finish_reason.unwrap_or_else(|| "completed".to_string());
+    let reason = file
+        .metadata
+        .finish_reason
+        .unwrap_or_else(|| "completed".to_string());
     let aborted = reason == "cancelled_by_user";
     Ok(Some(Ok(VcpResponse {
         full_content: content,
@@ -3062,7 +3374,10 @@ async fn read_completed_transport<R: Runtime>(
 
 #[cfg(target_os = "android")]
 async fn checkpoint_stop_partial<R: Runtime>(
-    app: &AppHandle<R>, context: &Option<Value>, message_id: &str, partial: Option<&str>,
+    app: &AppHandle<R>,
+    context: &Option<Value>,
+    message_id: &str,
+    partial: Option<&str>,
 ) -> Result<(), VcpRequestFailure> {
     let key = message_key_from_context(context, message_id)?;
     let db = app.state::<DbState>();
@@ -3071,10 +3386,19 @@ async fn checkpoint_stop_partial<R: Runtime>(
          stop_partial_content = COALESCE(?, stop_partial_content)
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
     )
-    .bind(partial).bind(&key.topic.owner_type).bind(&key.topic.owner_id)
-    .bind(&key.topic.topic_id).bind(&key.msg_id)
-    .execute(&db.pool).await.map_err(|error| VcpRequestFailure::stopping(
-        format!("停止待确认，暂存正文失败：{error}"), partial.map(str::to_string)))?;
+    .bind(partial)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
+    .execute(&db.pool)
+    .await
+    .map_err(|error| {
+        VcpRequestFailure::stopping(
+            format!("停止待确认，暂存正文失败：{error}"),
+            partial.map(str::to_string),
+        )
+    })?;
     Ok(())
 }
 
@@ -3165,7 +3489,11 @@ async fn finalize_offline_completed<R: Runtime>(
     )
     .await?;
     remove_offline_completed(&file.path).await?;
-    Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound })
+    Ok(if committed.is_some() {
+        RecoveryStatus::Completed
+    } else {
+        RecoveryStatus::NotFound
+    })
 }
 
 async fn recover_offline_generation<R: Runtime>(
@@ -3240,7 +3568,10 @@ async fn recover_active_generation<R: Runtime>(
     // durable result; do not claim a second attempt beside a closing one.
     let (_recovery_lease, _recovery_cancellation_token) = loop {
         {
-            let current = active_requests.1.lock().map_err(|error| error.to_string())?;
+            let current = active_requests
+                .1
+                .lock()
+                .map_err(|error| error.to_string())?;
             if let Some(channel) = current.as_ref() {
                 stream_channel = channel.channel.clone();
             }
@@ -3256,7 +3587,10 @@ async fn recover_active_generation<R: Runtime>(
                     continue;
                 };
                 let attached = {
-                    let current = active_requests.1.lock().map_err(|error| error.to_string())?;
+                    let current = active_requests
+                        .1
+                        .lock()
+                        .map_err(|error| error.to_string())?;
                     if let Some(channel) = current.as_ref() {
                         stream_channel = channel.channel.clone();
                     }
@@ -3268,12 +3602,22 @@ async fn recover_active_generation<R: Runtime>(
                         "SELECT EXISTS(SELECT 1 FROM active_generations
                          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?)",
                     )
-                    .bind(&key.topic.owner_type).bind(&key.topic.owner_id)
-                    .bind(&key.topic.topic_id).bind(&key.msg_id)
-                    .fetch_one(&db.pool).await.map_err(|error| error.to_string())?;
+                    .bind(&key.topic.owner_type)
+                    .bind(&key.topic.owner_id)
+                    .bind(&key.topic.topic_id)
+                    .bind(&key.msg_id)
+                    .fetch_one(&db.pool)
+                    .await
+                    .map_err(|error| error.to_string())?;
                     if pending {
-                        entry.output.send(recovery_state_event(&key,
-                            if entry.cancellation_token.is_cancelled() { "stopping" } else { "connected" }));
+                        entry.output.send(recovery_state_event(
+                            &key,
+                            if entry.cancellation_token.is_cancelled() {
+                                "stopping"
+                            } else {
+                                "connected"
+                            },
+                        ));
                     }
                     return Ok(RecoveryStatus::Attached);
                 }
@@ -3374,14 +3718,19 @@ async fn recover_active_generation<R: Runtime>(
             // A terminal row can win just before this connection attaches. Its
             // durable result is delivered through the same channel, once.
             if let Err(error) = emit_persisted_terminal(&app, &key, &output).await {
-                output.send(StreamEvent::error(key.msg_id.clone(),
-                    recovery_state_event(&key, "error").context, error.clone()));
+                output.send(StreamEvent::error(
+                    key.msg_id.clone(),
+                    recovery_state_event(&key, "error").context,
+                    error.clone(),
+                ));
                 return Err(error);
             }
         }
         Err(error) => {
             let mut event = StreamEvent::error(
-                key.msg_id.clone(), recovery_state_event(&key, "error").context, error.clone(),
+                key.msg_id.clone(),
+                recovery_state_event(&key, "error").context,
+                error.clone(),
             );
             if _recovery_cancellation_token.is_cancelled() {
                 event.r#type = "stopping".to_string();
@@ -3406,7 +3755,9 @@ fn recovery_state_event(key: &MessageKey, state: &str) -> StreamEvent {
 }
 
 async fn emit_persisted_terminal<R: Runtime>(
-    app: &AppHandle<R>, key: &MessageKey, output: &RequestOutput,
+    app: &AppHandle<R>,
+    key: &MessageKey,
+    output: &RequestOutput,
 ) -> Result<(), String> {
     let db = app.state::<DbState>();
     let row: Option<(String, String, i64, Option<String>, Option<String>, i64)> = sqlx::query_as(
@@ -3416,8 +3767,13 @@ async fn emit_persisted_terminal<R: Runtime>(
          WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.msg_id = ?
            AND m.deleted_at IS NULL AND m.finish_reason IS NOT NULL",
     )
-    .bind(&key.topic.owner_type).bind(&key.topic.owner_id).bind(&key.topic.topic_id).bind(&key.msg_id)
-    .fetch_optional(&db.pool).await.map_err(|error| error.to_string())?;
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?;
     if let Some((content, reason, timestamp, agent_id, name, topic_updated_at)) = row {
         let mut context = recovery_state_event(key, "end").context;
         if let Some(context) = context.as_mut() {
@@ -3425,8 +3781,15 @@ async fn emit_persisted_terminal<R: Runtime>(
             context["agentName"] = json!(name);
             context["replayed"] = json!(true);
         }
-        output.send(StreamEvent::end(key.msg_id.clone(), context, Some(reason), Some(content),
-            None, Some(timestamp.max(0) as u64), Some(topic_updated_at)));
+        output.send(StreamEvent::end(
+            key.msg_id.clone(),
+            context,
+            Some(reason),
+            Some(content),
+            None,
+            Some(timestamp.max(0) as u64),
+            Some(topic_updated_at),
+        ));
     }
     Ok(())
 }
@@ -3460,10 +3823,21 @@ async fn handle_recovery_failure<R: Runtime>(
         .fetch_optional(&db.pool).await.map_err(|error| error.to_string())?;
         if let Some(stored_partial) = stop {
             let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
-                app.clone(), &db.pool, key, partial_content.or(stored_partial).unwrap_or_default(),
-                true, Some("cancelled_by_user".to_string()), Some(stream_channel), agent_id,
-            ).await?;
-            return Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound });
+                app.clone(),
+                &db.pool,
+                key,
+                partial_content.or(stored_partial).unwrap_or_default(),
+                true,
+                Some("cancelled_by_user".to_string()),
+                Some(stream_channel),
+                agent_id,
+            )
+            .await?;
+            return Ok(if committed.is_some() {
+                RecoveryStatus::Completed
+            } else {
+                RecoveryStatus::NotFound
+            });
         }
     } else if recovery_pending || error == STREAM_CAPACITY_EXHAUSTED {
         // The helper still owns the complete response. A local attachment or
@@ -3480,12 +3854,7 @@ async fn handle_recovery_failure<R: Runtime>(
         if stop_pending {
             event.r#type = "stopping".to_string();
         }
-        deliver_request_event(
-            app,
-            key,
-            Some(stream_channel),
-            event,
-        );
+        deliver_request_event(app, key, Some(stream_channel), event);
         return Err(error);
     }
 
@@ -3497,8 +3866,16 @@ async fn handle_recovery_failure<R: Runtime>(
     };
     let db = app.state::<DbState>();
     let pool = &db.pool;
-    let committed_content =
-        finalize_stream_error(app, pool, key, partial_content, error, Some(stream_channel), agent_id).await?;
+    let committed_content = finalize_stream_error(
+        app,
+        pool,
+        key,
+        partial_content,
+        error,
+        Some(stream_channel),
+        agent_id,
+    )
+    .await?;
     if committed_content.is_none() {
         return terminal_generation_result(pool, key).await;
     }
@@ -3575,7 +3952,11 @@ async fn resume_claimed_generation<R: Runtime>(
     )
     .await?;
 
-    Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound })
+    Ok(if committed.is_some() {
+        RecoveryStatus::Completed
+    } else {
+        RecoveryStatus::NotFound
+    })
 }
 
 #[cfg(test)]
@@ -3597,8 +3978,12 @@ mod offline_completed_tests {
             .execute(&pool)
             .await
             .expect("schema");
-        sqlx::raw_sql(include_str!("../../../migrations/0102_stream_stop_intent.sql"))
-            .execute(&pool).await.expect("stop intent schema");
+        sqlx::raw_sql(include_str!(
+            "../../../migrations/0102_stream_stop_intent.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("stop intent schema");
         sqlx::raw_sql(
             "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
              VALUES ('agent', 'offline-agent', 'Agent', 'test', 1);
@@ -3654,12 +4039,18 @@ mod offline_completed_tests {
         (db, key, directory, path)
     }
 
-    fn channel() -> (Channel<StreamEvent>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+    fn channel() -> (
+        Channel<StreamEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<Value>,
+    ) {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        (Channel::new(move |body| {
-            let _ = sender.send(body.deserialize::<Value>()?);
-            Ok(())
-        }), receiver)
+        (
+            Channel::new(move |body| {
+                let _ = sender.send(body.deserialize::<Value>()?);
+                Ok(())
+            }),
+            receiver,
+        )
     }
 
     async fn reject_terminal_commits(pool: &sqlx::SqlitePool) {
@@ -3667,7 +4058,10 @@ mod offline_completed_tests {
             "CREATE TRIGGER reject_terminal_commit BEFORE UPDATE OF finish_reason ON messages
              WHEN NEW.finish_reason IS NOT NULL
              BEGIN SELECT RAISE(ABORT, 'forced terminal commit failure'); END;",
-        ).execute(pool).await.unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn receive_event(
@@ -3676,12 +4070,17 @@ mod offline_completed_tests {
     ) -> Value {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let event = events.recv().await.expect("stream channel remains available");
+                let event = events
+                    .recv()
+                    .await
+                    .expect("stream channel remains available");
                 if event["type"] == event_type {
                     return event;
                 }
             }
-        }).await.expect("stream event")
+        })
+        .await
+        .expect("stream event")
     }
 
     #[tokio::test]
@@ -3694,41 +4093,84 @@ mod offline_completed_tests {
             app.manage(ActiveRequests::default());
             app.manage(ActiveGroupTurns::default());
             let requests = app.state::<ActiveRequests>();
-            let (lease, cancellation) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+            let (lease, cancellation) =
+                ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
             let output = Arc::downgrade(&lease.entry.output);
             let (original, mut original_events) = channel();
-            lease.bind_output(app.handle(), Some(original.clone())).unwrap();
-            if aborted { cancellation.cancel(); }
+            lease
+                .bind_output(app.handle(), Some(original.clone()))
+                .unwrap();
+            if aborted {
+                cancellation.cancel();
+            }
             reject_terminal_commits(&pool).await;
             let content = "已收到的回答 🦀\n\n```rust\nlet x = 1;\n```";
             let error = crate::vcp_modules::chat::message_service::finalize_stream_message(
-                app.handle().clone(), &pool, &key, content.into(), aborted, Some(reason.into()),
-                Some(original), Some("offline-agent".into()),
-            ).await.expect_err("the injected transaction failure must surface");
+                app.handle().clone(),
+                &pool,
+                &key,
+                content.into(),
+                aborted,
+                Some(reason.into()),
+                Some(original),
+                Some("offline-agent".into()),
+            )
+            .await
+            .expect_err("the injected transaction failure must surface");
             assert!(error.contains("forced terminal commit failure"));
-            assert_eq!(receive_event(&mut original_events, "error").await["content"], content);
+            assert_eq!(
+                receive_event(&mut original_events, "error").await["content"],
+                content
+            );
             drop(lease);
-            let unfinished: (String, Option<String>) = sqlx::query_as("SELECT content, finish_reason FROM messages")
-                .fetch_one(&pool).await.unwrap();
-            assert_eq!(unfinished, (String::new(), None), "the failed transaction must not claim persistence");
-            sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+            let unfinished: (String, Option<String>) =
+                sqlx::query_as("SELECT content, finish_reason FROM messages")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                unfinished,
+                (String::new(), None),
+                "the failed transaction must not claim persistence"
+            );
+            sqlx::query("DROP TRIGGER reject_terminal_commit")
+                .execute(&pool)
+                .await
+                .unwrap();
 
             let (replacement, mut events) = channel();
-            let receipt = reconnect_chat_output(app.handle().clone(), "replacement".into(), Some(replacement))
-                .await.unwrap();
+            let receipt = reconnect_chat_output(
+                app.handle().clone(),
+                "replacement".into(),
+                Some(replacement),
+            )
+            .await
+            .unwrap();
             assert_eq!(receipt.generations.len(), 1);
             let end = receive_event(&mut events, "end").await;
             assert_eq!(end["content"], content);
             assert_eq!(end["finishReason"], reason);
             assert_eq!(end["context"]["replayed"], true);
-            let durable: (String, String) = sqlx::query_as("SELECT content, finish_reason FROM messages")
-                .fetch_one(&pool).await.unwrap();
+            let durable: (String, String) =
+                sqlx::query_as("SELECT content, finish_reason FROM messages")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(durable, (content.into(), reason.into()));
-            assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM active_generations")
-                .fetch_one(&pool).await.unwrap(), 0);
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM active_generations")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap(),
+                0
+            );
             tokio::time::timeout(Duration::from_secs(5), async {
-                while output.upgrade().is_some() { tokio::task::yield_now().await; }
-            }).await.expect("committed terminal owner must be released");
+                while output.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("committed terminal owner must be released");
             while let Ok(event) = original_events.try_recv() {
                 assert_ne!(event["type"], "end");
             }
@@ -3741,69 +4183,133 @@ mod offline_completed_tests {
             sqlx::sqlite::SqlitePoolOptions::new()
                 .max_connections(1)
                 .acquire_timeout(Duration::from_millis(100)),
-        ).await;
+        )
+        .await;
         let pool = db.pool.clone();
         sqlx::raw_sql(
             "INSERT INTO groups (owner_type, group_id, name, updated_at)
              VALUES ('group', 'error-group', 'Group', 1);
              INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at)
              VALUES ('error-topic', 'group', 'error-group', 'Topic', 1, 1);",
-        ).execute(&pool).await.unwrap();
-        let key = MessageKey::new(TopicKey::new("group", "error-group", "error-topic"), "error-message");
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let key = MessageKey::new(
+            TopicKey::new("group", "error-group", "error-topic"),
+            "error-message",
+        );
         crate::vcp_modules::chat::message_service::begin_stream_message(
-            &db, &key, Some("offline-agent"), Some("Agent"),
-        ).await.unwrap();
+            &db,
+            &key,
+            Some("offline-agent"),
+            Some("Agent"),
+        )
+        .await
+        .unwrap();
         let app = tauri::test::mock_app();
         app.manage(db);
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
-        let (lease, _) = ActiveRequestLease::try_acquire(
-            app.state::<ActiveRequests>().0.clone(), key.clone(),
-        ).unwrap();
+        let (lease, _) =
+            ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone())
+                .unwrap();
         let output = Arc::downgrade(&lease.entry.output);
         let (original, mut original_events) = channel();
-        lease.bind_output(app.handle(), Some(original.clone())).unwrap();
+        lease
+            .bind_output(app.handle(), Some(original.clone()))
+            .unwrap();
 
         // Exhaust the pool before the error entry point's first database access.
         let connection = pool.acquire().await.unwrap();
         let partial = "网络断开前已收到的群回复 🦀";
         let expected = format!("{partial}\n\n> VCP流式错误: connection reset");
         let error = finalize_stream_error(
-            app.handle(), &pool, &key, partial.into(), "connection reset".into(), Some(original),
+            app.handle(),
+            &pool,
+            &key,
+            partial.into(),
+            "connection reset".into(),
+            Some(original),
             Some("offline-agent".into()),
-        ).await.expect_err("the first database access must time out");
-        assert!(error.contains("timed out"), "unexpected database failure: {error}");
+        )
+        .await
+        .expect_err("the first database access must time out");
+        assert!(
+            error.contains("timed out"),
+            "unexpected database failure: {error}"
+        );
         drop(lease);
         drop(connection);
-        assert!(output.upgrade().is_some(), "failed error finalization must retain its terminal owner");
-        assert_eq!(receive_event(&mut original_events, "error").await["content"], expected);
+        assert!(
+            output.upgrade().is_some(),
+            "failed error finalization must retain its terminal owner"
+        );
+        assert_eq!(
+            receive_event(&mut original_events, "error").await["content"],
+            expected
+        );
 
         let (replacement, mut events) = channel();
         let recovered = recover_active_generation(
-            app.handle().clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
-            key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(), replacement,
-        ).await.unwrap();
+            app.handle().clone(),
+            app.state::<ActiveRequests>(),
+            key.topic.owner_id.clone(),
+            key.topic.owner_type.clone(),
+            key.topic.topic_id.clone(),
+            key.msg_id.clone(),
+            replacement,
+        )
+        .await
+        .unwrap();
         assert!(matches!(recovered, RecoveryStatus::Completed));
         let end = receive_event(&mut events, "end").await;
         assert_eq!(end["content"], expected);
         assert_eq!(end["finishReason"], "error");
         assert_eq!(end["context"]["agentId"], "offline-agent");
         assert_eq!(end["context"]["replayed"], true);
-        let (content, reason, agent_id, name, timestamp, hash):
-            (String, String, String, String, i64, String) = sqlx::query_as(
-                "SELECT content, finish_reason, agent_id, name, timestamp, content_hash
+        let (content, reason, agent_id, name, timestamp, hash): (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            String,
+        ) = sqlx::query_as(
+            "SELECT content, finish_reason, agent_id, name, timestamp, content_hash
                  FROM messages WHERE msg_id = 'error-message'",
-            ).fetch_one(&pool).await.unwrap();
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(content, expected);
         assert_eq!(reason, "error");
         assert_eq!(agent_id, "offline-agent");
-        assert_eq!(hash, crate::vcp_modules::sync_hash::HashAggregator::compute_message_fingerprint(
-            &key.msg_id, "assistant", Some(&name), &content, timestamp as u64, Some(&agent_id), &[],
-        ));
-        assert_eq!(sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'error-message'",
-        ).fetch_one(&pool).await.unwrap(), 0);
-        assert!(output.upgrade().is_none(), "committed terminal owner must be released");
+        assert_eq!(
+            hash,
+            crate::vcp_modules::sync_hash::HashAggregator::compute_message_fingerprint(
+                &key.msg_id,
+                "assistant",
+                Some(&name),
+                &content,
+                timestamp as u64,
+                Some(&agent_id),
+                &[],
+            )
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'error-message'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            output.upgrade().is_none(),
+            "committed terminal owner must be released"
+        );
     }
 
     #[tokio::test]
@@ -3815,29 +4321,63 @@ mod offline_completed_tests {
             app.manage(db);
             app.manage(ActiveRequests::default());
             crate::vcp_modules::chat::message_service::finalize_stream_message(
-                app.handle().clone(), &pool, &key, "already completed".into(), false,
-                Some("stop".into()), None, Some("offline-agent".into()),
-            ).await.unwrap();
+                app.handle().clone(),
+                &pool,
+                &key,
+                "already completed".into(),
+                false,
+                Some("stop".into()),
+                None,
+                Some("offline-agent".into()),
+            )
+            .await
+            .unwrap();
             if deleted {
-                sqlx::query("UPDATE messages SET deleted_at = 42").execute(&pool).await.unwrap();
+                sqlx::query("UPDATE messages SET deleted_at = 42")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
             }
             let (lease, _) = ActiveRequestLease::try_acquire(
-                app.state::<ActiveRequests>().0.clone(), key.clone(),
-            ).unwrap();
+                app.state::<ActiveRequests>().0.clone(),
+                key.clone(),
+            )
+            .unwrap();
             let output = Arc::downgrade(&lease.entry.output);
             let (replacement, mut events) = channel();
-            lease.bind_output(app.handle(), Some(replacement.clone())).unwrap();
+            lease
+                .bind_output(app.handle(), Some(replacement.clone()))
+                .unwrap();
             let result = finalize_stream_error(
-                app.handle(), &pool, &key, "late partial".into(), "late failure".into(), Some(replacement),
+                app.handle(),
+                &pool,
+                &key,
+                "late partial".into(),
+                "late failure".into(),
+                Some(replacement),
                 Some("offline-agent".into()),
-            ).await.unwrap();
-            assert!(result.is_none(), "late errors must not count as a new group speaker completion");
+            )
+            .await
+            .unwrap();
+            assert!(
+                result.is_none(),
+                "late errors must not count as a new group speaker completion"
+            );
             drop(lease);
             assert!(output.upgrade().is_none());
-            let row: (String, String, Option<i64>) = sqlx::query_as(
-                "SELECT content, finish_reason, deleted_at FROM messages",
-            ).fetch_one(&pool).await.unwrap();
-            assert_eq!(row, ("already completed".into(), "stop".into(), deleted.then_some(42)));
+            let row: (String, String, Option<i64>) =
+                sqlx::query_as("SELECT content, finish_reason, deleted_at FROM messages")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                row,
+                (
+                    "already completed".into(),
+                    "stop".into(),
+                    deleted.then_some(42)
+                )
+            );
             while let Ok(event) = events.try_recv() {
                 assert_ne!(event["type"], "error");
                 if event["type"] == "end" {
@@ -3860,31 +4400,63 @@ mod offline_completed_tests {
         let requests = app.state::<ActiveRequests>();
         let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
         reject_terminal_commits(&pool).await;
-        assert!(crate::vcp_modules::chat::message_service::finalize_stream_message(
-            app.handle().clone(), &pool, &key, "complete response".into(), false,
-            Some("completed".into()), None, Some("offline-agent".into()),
-        ).await.is_err());
+        assert!(
+            crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.handle().clone(),
+                &pool,
+                &key,
+                "complete response".into(),
+                false,
+                Some("completed".into()),
+                None,
+                Some("offline-agent".into()),
+            )
+            .await
+            .is_err()
+        );
         drop(lease);
         let (replacement, mut events) = channel();
         *requests.1.lock().unwrap() = Some(ChatOutputConnection {
-            id: "replacement".into(), channel: replacement.clone(),
+            id: "replacement".into(),
+            channel: replacement.clone(),
         });
         assert!(recover_active_generation(
-            app.handle().clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
-            key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(), replacement,
-        ).await.is_err());
-        assert_eq!(receive_event(&mut events, "error").await["content"], "complete response");
-        sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+            app.handle().clone(),
+            app.state::<ActiveRequests>(),
+            key.topic.owner_id.clone(),
+            key.topic.owner_type.clone(),
+            key.topic.topic_id.clone(),
+            key.msg_id.clone(),
+            replacement,
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            receive_event(&mut events, "error").await["content"],
+            "complete response"
+        );
+        sqlx::query("DROP TRIGGER reject_terminal_commit")
+            .execute(&pool)
+            .await
+            .unwrap();
         // This is the same durable intent / scheduling boundary used by the
         // stop commands when no producer lease remains.
         sqlx::query("UPDATE active_generations SET stop_requested = 1")
-            .execute(&pool).await.unwrap();
+            .execute(&pool)
+            .await
+            .unwrap();
         schedule_pending_stop(app.handle(), &requests, key);
         let end = receive_event(&mut events, "end").await;
         assert_eq!(end["content"], "complete response");
-        assert_eq!(end["finishReason"], "completed", "stop cannot rewrite a result already received");
-        let durable: (String, String) = sqlx::query_as("SELECT content, finish_reason FROM messages")
-            .fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            end["finishReason"], "completed",
+            "stop cannot rewrite a result already received"
+        );
+        let durable: (String, String) =
+            sqlx::query_as("SELECT content, finish_reason FROM messages")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(durable, ("complete response".into(), "completed".into()));
     }
 
@@ -3899,22 +4471,44 @@ mod offline_completed_tests {
         let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
         let (consumer, mut events) = channel();
         *requests.1.lock().unwrap() = Some(ChatOutputConnection {
-            id: "current".into(), channel: consumer,
+            id: "current".into(),
+            channel: consumer,
         });
         reject_terminal_commits(&pool).await;
-        assert!(crate::vcp_modules::chat::message_service::finalize_stream_message(
-            app.handle().clone(), &pool, &key, "received before stop".into(), false,
-            Some("length".into()), None, Some("offline-agent".into()),
-        ).await.is_err());
-        sqlx::query("UPDATE active_generations SET stop_requested = 1").execute(&pool).await.unwrap();
+        assert!(
+            crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.handle().clone(),
+                &pool,
+                &key,
+                "received before stop".into(),
+                false,
+                Some("length".into()),
+                None,
+                Some("offline-agent".into()),
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query("UPDATE active_generations SET stop_requested = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
         schedule_pending_stop(app.handle(), &requests, key);
-        sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+        sqlx::query("DROP TRIGGER reject_terminal_commit")
+            .execute(&pool)
+            .await
+            .unwrap();
         drop(lease);
         let end = receive_event(&mut events, "end").await;
         assert_eq!(end["content"], "received before stop");
         assert_eq!(end["finishReason"], "length");
-        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM active_generations")
-            .fetch_one(&pool).await.unwrap(), 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM active_generations")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -3926,42 +4520,87 @@ mod offline_completed_tests {
             app.manage(db);
             app.manage(ActiveRequests::default());
             let requests = app.state::<ActiveRequests>();
-            let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+            let (lease, _) =
+                ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
             let output = Arc::downgrade(&lease.entry.output);
             let (consumer, mut events) = channel();
             reject_terminal_commits(&pool).await;
-            assert!(crate::vcp_modules::chat::message_service::finalize_stream_message(
-                app.handle().clone(), &pool, &key, "discarded answer".into(), false,
-                Some("completed".into()), Some(consumer), Some("offline-agent".into()),
-            ).await.is_err());
-            assert_eq!(receive_event(&mut events, "error").await["content"], "discarded answer");
+            assert!(
+                crate::vcp_modules::chat::message_service::finalize_stream_message(
+                    app.handle().clone(),
+                    &pool,
+                    &key,
+                    "discarded answer".into(),
+                    false,
+                    Some("completed".into()),
+                    Some(consumer),
+                    Some("offline-agent".into()),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                receive_event(&mut events, "error").await["content"],
+                "discarded answer"
+            );
             let mut lease = Some(lease);
-            if release_producer_first { drop(lease.take()); }
+            if release_producer_first {
+                drop(lease.take());
+            }
             let deletion = crate::vcp_modules::chat::message_service::delete_messages(
-                &app.state::<DbState>(), &key.topic, vec![key.msg_id.clone()], None,
-            ).await.unwrap();
+                &app.state::<DbState>(),
+                &key.topic,
+                vec![key.msg_id.clone()],
+                None,
+            )
+            .await
+            .unwrap();
             assert_eq!(deletion.active_ids, vec![key.msg_id.clone()]);
             discard_deleted_generation(app.handle(), &key).await;
             drop(lease);
-            assert!(output.upgrade().is_none(), "deleted terminal must have no retained owner");
-            sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+            assert!(
+                output.upgrade().is_none(),
+                "deleted terminal must have no retained owner"
+            );
+            sqlx::query("DROP TRIGGER reject_terminal_commit")
+                .execute(&pool)
+                .await
+                .unwrap();
             let (replacement, mut replacement_events) = channel();
-            assert_eq!(recover_active_generation(
-                app.handle().clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
-                key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(), replacement,
-            ).await.unwrap(), RecoveryStatus::NotFound);
+            assert_eq!(
+                recover_active_generation(
+                    app.handle().clone(),
+                    app.state::<ActiveRequests>(),
+                    key.topic.owner_id.clone(),
+                    key.topic.owner_type.clone(),
+                    key.topic.topic_id.clone(),
+                    key.msg_id.clone(),
+                    replacement,
+                )
+                .await
+                .unwrap(),
+                RecoveryStatus::NotFound
+            );
             while let Ok(event) = replacement_events.try_recv() {
                 assert_ne!(event["type"], "end");
             }
-            assert!(sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM messages")
-                .fetch_one(&pool).await.unwrap().is_some());
+            assert!(
+                sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM messages")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
         }
     }
 
     #[tokio::test]
     async fn preparing_owner_reconnects_without_creating_a_pending_message() {
         let (db, key, _directory, _path) = fixture().await;
-        sqlx::query("DELETE FROM active_generations").execute(&db.pool).await.unwrap();
+        sqlx::query("DELETE FROM active_generations")
+            .execute(&db.pool)
+            .await
+            .unwrap();
         let app = tauri::test::mock_app();
         app.manage(db);
         app.manage(ActiveRequests::default());
@@ -3970,8 +4609,13 @@ mod offline_completed_tests {
         let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key).unwrap();
         lease.bind_output(app.handle(), Some(channel().0)).unwrap();
         let (replacement, mut events) = channel();
-        let receipt = reconnect_chat_output(app.handle().clone(), "preparing-interface".into(), Some(replacement))
-            .await.unwrap();
+        let receipt = reconnect_chat_output(
+            app.handle().clone(),
+            "preparing-interface".into(),
+            Some(replacement),
+        )
+        .await
+        .unwrap();
         assert!(receipt.generations.is_empty());
         assert_eq!(receipt.active_requests.len(), 1);
         tokio::task::yield_now().await;
@@ -3983,8 +4627,14 @@ mod offline_completed_tests {
         let inactive = events.recv().await.unwrap();
         assert_eq!(inactive["type"], "request_activity");
         assert_eq!(inactive["chunk"]["active"], false);
-        assert_eq!(active["context"]["requestId"], inactive["context"]["requestId"]);
-        assert!(events.try_recv().is_err(), "preparation must not create a chat bubble");
+        assert_eq!(
+            active["context"]["requestId"],
+            inactive["context"]["requestId"]
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "preparation must not create a chat bubble"
+        );
     }
 
     #[test]
@@ -3995,7 +4645,12 @@ mod offline_completed_tests {
             let captured = events.clone();
             let mut state = output.state.lock().unwrap();
             state.origin_user_message_id = Some("voice-user".into());
-            state.chat_feed = Some(Arc::new(move |event| captured.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+            state.chat_feed = Some(Arc::new(move |event| {
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(serde_json::to_value(event).unwrap())
+            }));
             state.has_chat_listener = Some(Arc::new(|origin| origin == "voice-user"));
         }
         let mut buffer = AuroraBuffer::new();
@@ -4003,7 +4658,10 @@ mod offline_completed_tests {
         buffer.process_queue();
         output.send_aurora(&mut buffer, "reply", &None, None, false);
         assert_eq!(events.lock().unwrap().len(), 1);
-        assert_eq!(events.lock().unwrap()[0]["context"]["originUserMessageId"], "voice-user");
+        assert_eq!(
+            events.lock().unwrap()[0]["context"]["originUserMessageId"],
+            "voice-user"
+        );
         output.state.lock().unwrap().has_chat_listener = Some(Arc::new(|_| false));
         buffer.append_chunk("没有朗读消费者时不构建交付。");
         buffer.process_queue();
@@ -4019,50 +4677,86 @@ mod offline_completed_tests {
         app.manage(ActiveGroupTurns::default());
         let (connected, mut events) = channel();
         *app.state::<ActiveRequests>().1.lock().unwrap() = Some(ChatOutputConnection {
-            id: "connected".into(), channel: connected,
+            id: "connected".into(),
+            channel: connected,
         });
         let (fallback, mut unused) = channel();
         let key = MessageKey::new(TopicKey::new("agent", "owner", "topic"), "reply");
-        let (lease, _) = ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone()).unwrap();
+        let (lease, _) =
+            ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone())
+                .unwrap();
         lease.set_origin_user_message("voice-user").unwrap();
-        lease.bind_output(app.handle(), Some(fallback.clone())).unwrap();
+        lease
+            .bind_output(app.handle(), Some(fallback.clone()))
+            .unwrap();
         let activity = events.recv().await.unwrap();
         assert_eq!(activity["context"]["originUserMessageId"], "voice-user");
-        deliver_request_event(app.handle(), &key, Some(fallback), StreamEvent::thinking(
-            key.msg_id.clone(), Some(json!({ "ownerId": "owner", "ownerType": "agent", "topicId": "topic", "agentName": "Agent" })),
-        ));
+        deliver_request_event(
+            app.handle(),
+            &key,
+            Some(fallback),
+            StreamEvent::thinking(
+                key.msg_id.clone(),
+                Some(
+                    json!({ "ownerId": "owner", "ownerType": "agent", "topicId": "topic", "agentName": "Agent" }),
+                ),
+            ),
+        );
         let thinking = events.recv().await.unwrap();
         assert_eq!(thinking["context"]["originUserMessageId"], "voice-user");
         assert_eq!(thinking["context"]["agentName"], "Agent");
         assert!(unused.try_recv().is_err());
         drop(lease);
-        assert_eq!(events.recv().await.unwrap()["context"]["originUserMessageId"], "voice-user");
+        assert_eq!(
+            events.recv().await.unwrap()["context"]["originUserMessageId"],
+            "voice-user"
+        );
     }
 
     #[tokio::test]
     async fn stale_webview_with_the_same_label_cannot_replace_the_current_connection() {
         let previous_app = tauri::test::mock_app();
         let previous = tauri::WebviewWindowBuilder::new(
-            &previous_app, "main", tauri::WebviewUrl::App("index.html".into()),
-        ).build().unwrap();
+            &previous_app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .build()
+        .unwrap();
         let app = tauri::test::mock_app();
         let current = tauri::WebviewWindowBuilder::new(
-            &app, "main", tauri::WebviewUrl::App("index.html".into()),
-        ).build().unwrap();
+            &app,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .build()
+        .unwrap();
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
         assert!(is_current_webview(app.handle(), current.as_ref()));
         assert!(!is_current_webview(app.handle(), previous.as_ref()));
         *app.state::<ActiveRequests>().1.lock().unwrap() = Some(ChatOutputConnection {
-            id: "current-interface".into(), channel: channel().0,
+            id: "current-interface".into(),
+            channel: channel().0,
         });
         let result = reconnect_chat_output_for_webview(
-            app.handle().clone(), "late-old-interface".into(), Some(channel().0),
+            app.handle().clone(),
+            "late-old-interface".into(),
+            Some(channel().0),
             Some(previous.as_ref().clone()),
-        ).await;
+        )
+        .await;
         assert_eq!(result.err().as_deref(), Some("connection_stale"));
-        assert_eq!(app.state::<ActiveRequests>().1.lock().unwrap().as_ref().unwrap().id,
-            "current-interface");
+        assert_eq!(
+            app.state::<ActiveRequests>()
+                .1
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .id,
+            "current-interface"
+        );
     }
 
     #[tokio::test]
@@ -4073,12 +4767,21 @@ mod offline_completed_tests {
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
         let requests = app.state::<ActiveRequests>();
-        let (_lease, token) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+        let (_lease, token) =
+            ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
         let output = request_output(app.handle(), &key, None);
         let (consumer, mut events) = channel();
-        let receipt = tokio::time::timeout(Duration::from_secs(2), reconnect_chat_output(
-            app.handle().clone(), "interface-a".into(), Some(consumer.clone()),
-        )).await.unwrap().unwrap();
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(2),
+            reconnect_chat_output(
+                app.handle().clone(),
+                "interface-a".into(),
+                Some(consumer.clone()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(receipt.generations.len(), 1);
         assert!(!token.is_cancelled());
         assert!(requests.0.contains_key(&key));
@@ -4087,14 +4790,18 @@ mod offline_completed_tests {
         buffer.process_queue();
         output.send_aurora(&mut buffer, &key.msg_id, &None, None, false);
         let revision = output.state.lock().unwrap().consumer_revision;
-        reconnect_chat_output(app.handle().clone(), "interface-a".into(), None).await.unwrap();
+        reconnect_chat_output(app.handle().clone(), "interface-a".into(), None)
+            .await
+            .unwrap();
         assert_eq!(output.state.lock().unwrap().consumer_revision, revision);
         buffer.append_chunk("继续");
         buffer.process_queue();
         output.send_aurora(&mut buffer, &key.msg_id, &None, None, false);
         let mut aurora = Vec::new();
         while let Ok(event) = events.try_recv() {
-            if event["type"] == "aurora" { aurora.push(event); }
+            if event["type"] == "aurora" {
+                aurora.push(event);
+            }
         }
         assert_eq!(aurora.len(), 2);
         assert_eq!(aurora[0]["aurora"]["kind"], "snapshot");
@@ -4102,12 +4809,22 @@ mod offline_completed_tests {
         assert_eq!(aurora[1]["aurora"]["chunk"], "继续");
         // Callback numbers are local to an interface. A new connection must
         // replace the consumer even when that numeric ID is reused.
-        reconnect_chat_output(app.handle().clone(), "interface-b".into(), Some(consumer)).await.unwrap();
+        reconnect_chat_output(app.handle().clone(), "interface-b".into(), Some(consumer))
+            .await
+            .unwrap();
         let replacement_revision = output.state.lock().unwrap().consumer_revision;
         assert!(replacement_revision > revision);
-        assert_eq!(reconnect_chat_output(app.handle().clone(), "interface-a".into(), None)
-            .await.err().as_deref(), Some("connection_stale"));
-        assert_eq!(output.state.lock().unwrap().consumer_revision, replacement_revision);
+        assert_eq!(
+            reconnect_chat_output(app.handle().clone(), "interface-a".into(), None)
+                .await
+                .err()
+                .as_deref(),
+            Some("connection_stale")
+        );
+        assert_eq!(
+            output.state.lock().unwrap().consumer_revision,
+            replacement_revision
+        );
     }
 
     #[tokio::test]
@@ -4115,27 +4832,41 @@ mod offline_completed_tests {
     async fn cold_reconnect_settles_persisted_stop_without_error_text() {
         let (db, key, _directory, _path) = fixture().await;
         sqlx::query("UPDATE active_generations SET stop_requested = 1, stop_partial_content = ?")
-            .bind("保留已经收到的正文").execute(&db.pool).await.unwrap();
+            .bind("保留已经收到的正文")
+            .execute(&db.pool)
+            .await
+            .unwrap();
         let app = tauri::test::mock_app();
         let pool = db.pool.clone();
         app.manage(db);
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
         let (consumer, mut events) = channel();
-        let receipt = reconnect_chat_output(app.handle().clone(), "stop-interface".into(), Some(consumer))
-            .await.unwrap();
+        let receipt = reconnect_chat_output(
+            app.handle().clone(),
+            "stop-interface".into(),
+            Some(consumer),
+        )
+        .await
+        .unwrap();
         assert!(receipt.generations[0].stop_requested);
         let end = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let event = events.recv().await.unwrap();
-                if event["type"] == "end" { break event; }
+                if event["type"] == "end" {
+                    break event;
+                }
                 assert_eq!(event["type"], "stopping");
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(end["content"], "保留已经收到的正文");
         assert_eq!(end["finishReason"], "cancelled_by_user");
         let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM active_generations")
-            .fetch_one(&pool).await.unwrap();
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(pending, 0);
         assert_eq!(end["messageId"], key.msg_id);
     }
@@ -4162,9 +4893,15 @@ mod offline_completed_tests {
         let inactive = events.try_recv().unwrap();
         assert_eq!(inactive["chunk"]["active"], false);
         assert_eq!(active["context"]["turnId"], inactive["context"]["turnId"]);
-        assert!(inactive["consumerRevision"].as_u64().unwrap() > active["consumerRevision"].as_u64().unwrap());
+        assert!(
+            inactive["consumerRevision"].as_u64().unwrap()
+                > active["consumerRevision"].as_u64().unwrap()
+        );
         assert!(original_events.try_recv().is_err());
-        assert!(turns.attach_output(&requests, &key, channel().0).unwrap().is_none());
+        assert!(turns
+            .attach_output(&requests, &key, channel().0)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -4201,8 +4938,13 @@ mod offline_completed_tests {
             let reason = failure.to_string();
             let expected_partial = failure.partial_content.clone();
             let result = handle_recovery_failure(
-                app.handle(), &key, failure, old_channel, Some("offline-agent".into()),
-            ).await;
+                app.handle(),
+                &key,
+                failure,
+                old_channel,
+                Some("offline-agent".into()),
+            )
+            .await;
             assert_eq!(
                 result.expect_err("attachment failure must remain retryable"),
                 reason
@@ -4437,12 +5179,16 @@ mod active_request_tests {
     }
 
     async fn empty_request_body() -> Option<PreparedBody> {
-        Some(request_body::prepare(
-            std::path::PathBuf::from("target/test-fixtures/http-bodies"),
-            json!({}),
-            CancellationToken::new(),
-            request_body::PREPARATION_SLOT.acquire().await.unwrap(),
-        ).await.unwrap())
+        Some(
+            request_body::prepare(
+                std::path::PathBuf::from("target/test-fixtures/http-bodies"),
+                json!({}),
+                CancellationToken::new(),
+                request_body::PREPARATION_SLOT.acquire().await.unwrap(),
+            )
+            .await
+            .unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -4714,16 +5460,27 @@ mod active_request_tests {
             let output = Arc::new(RequestOutput::default());
             output.bind_initial(Some(channel));
             let response = handle_non_streaming_request(
-                Client::new(), &endpoint, "", empty_request_body().await.unwrap(), "message".into(),
-                Some(json!({ "topicId": "topic" })), CancellationToken::new(), output,
-            ).await.unwrap();
+                Client::new(),
+                &endpoint,
+                "",
+                empty_request_body().await.unwrap(),
+                "message".into(),
+                Some(json!({ "topicId": "topic" })),
+                CancellationToken::new(),
+                output,
+            )
+            .await
+            .unwrap();
             assert_eq!(response.full_content, "正文 🦀\n\"quote\"\\tail");
             assert_eq!(response.finish_reason.as_deref(), reason);
             assert!(!response.is_aborted);
             let event = events.recv().await.unwrap();
             assert_eq!(event["aurora"]["content"], response.full_content);
             assert_eq!(event["context"]["topicId"], "topic");
-            assert!(events.try_recv().is_err(), "the application finalizer owns the terminal event");
+            assert!(
+                events.try_recv().is_err(),
+                "the application finalizer owns the terminal event"
+            );
         }
         server.await.unwrap();
     }
@@ -4738,7 +5495,9 @@ mod active_request_tests {
             value,
             CancellationToken::new(),
             request_body::PREPARATION_SLOT.acquire().await.unwrap(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -4748,7 +5507,9 @@ mod active_request_tests {
             loop {
                 let mut line = String::new();
                 assert!(reader.read_line(&mut line).await.unwrap() > 0);
-                if line == "\r\n" { break; }
+                if line == "\r\n" {
+                    break;
+                }
                 if let Some((name, value)) = line.split_once(':') {
                     if name.eq_ignore_ascii_case("content-length") {
                         length = Some(value.trim().parse::<usize>().unwrap());
@@ -4766,9 +5527,17 @@ mod active_request_tests {
             ).as_bytes()).await.unwrap();
         });
         let response = handle_non_streaming_request(
-            Client::new(), &endpoint, "", body, "message".into(), None,
-            CancellationToken::new(), Arc::default(),
-        ).await.unwrap();
+            Client::new(),
+            &endpoint,
+            "",
+            body,
+            "message".into(),
+            None,
+            CancellationToken::new(),
+            Arc::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.full_content, "ok");
         server.await.unwrap();
     }
@@ -4780,9 +5549,13 @@ mod active_request_tests {
             let value = json!({"messages": [{"role": "user", "content": "正文\n😀".repeat(2048)}]});
             let expected = serde_json::to_vec(&value).unwrap();
             let body = request_body::prepare(
-                std::path::PathBuf::from("target/test-fixtures/http-bodies"), value,
-                CancellationToken::new(), request_body::PREPARATION_SLOT.acquire().await.unwrap(),
-            ).await.unwrap();
+                std::path::PathBuf::from("target/test-fixtures/http-bodies"),
+                value,
+                CancellationToken::new(),
+                request_body::PREPARATION_SLOT.acquire().await.unwrap(),
+            )
+            .await
+            .unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move {
@@ -4793,7 +5566,9 @@ mod active_request_tests {
                     loop {
                         let mut line = String::new();
                         assert!(reader.read_line(&mut line).await.unwrap() > 0);
-                        if line == "\r\n" { break; }
+                        if line == "\r\n" {
+                            break;
+                        }
                         if let Some((name, value)) = line.split_once(':') {
                             if name.eq_ignore_ascii_case("content-length") {
                                 length = Some(value.trim().parse::<usize>().unwrap());
@@ -4807,17 +5582,30 @@ mod active_request_tests {
                     let reply = if redirect {
                         format!("HTTP/1.1 {status} Redirect\r\nLocation: /destination\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     } else {
-                        let content = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+                        let content =
+                            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
                         format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{content}", content.len())
                     };
                     reader.get_mut().write_all(reply.as_bytes()).await.unwrap();
                 }
             });
-            let result = tokio::time::timeout(Duration::from_secs(5), handle_non_streaming_request(
-                Client::new(), &endpoint, "", body, "message".into(), None,
-                CancellationToken::new(), Arc::default(),
-            )).await;
-            if !matches!(&result, Ok(Ok(_))) { server.abort(); }
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                handle_non_streaming_request(
+                    Client::new(),
+                    &endpoint,
+                    "",
+                    body,
+                    "message".into(),
+                    None,
+                    CancellationToken::new(),
+                    Arc::default(),
+                ),
+            )
+            .await;
+            if !matches!(&result, Ok(Ok(_))) {
+                server.abort();
+            }
             assert_eq!(result.unwrap().unwrap().full_content, "ok", "HTTP {status}");
             server.await.unwrap();
         }
@@ -4876,7 +5664,6 @@ mod active_request_tests {
         MessageKey::new(TopicKey::new("agent", "agent-a", "topic-a"), message_id)
     }
 
-
     #[tokio::test]
     async fn duplicate_attempt_is_rejected_and_cancel_reaches_every_step_clone() {
         let requests = ActiveRequests::default();
@@ -4910,14 +5697,20 @@ mod active_request_tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let (lease, token) = ActiveRequestLease::try_acquire_with_cancellation(
-            requests.0.clone(), key.clone(), cancellation,
-        ).unwrap();
+            requests.0.clone(),
+            key.clone(),
+            cancellation,
+        )
+        .unwrap();
         lease.set_origin_user_message("voice-origin").unwrap();
         lease.bind_output(app.handle(), None).unwrap();
         {
             let output = lease.entry.output.state.lock().unwrap();
             assert!(output.channel.is_none());
-            assert!(output.chat_feed.is_some(), "Rust feed binds without a WebView");
+            assert!(
+                output.chat_feed.is_some(),
+                "Rust feed binds without a WebView"
+            );
         }
         let result = perform_vcp_request_registered(
             app.handle(),
@@ -4936,9 +5729,15 @@ mod active_request_tests {
             },
             None,
             token,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert!(result.is_aborted);
-        assert!(tokio::time::timeout(Duration::from_millis(30), listener.accept()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -4970,9 +5769,15 @@ mod active_request_tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].r#type, "group_turn");
         assert_eq!(events[0].chunk.as_ref().unwrap()["active"], false);
-        assert_eq!(events[0].context.as_ref().unwrap()["originUserMessageId"], "voice-origin");
+        assert_eq!(
+            events[0].context.as_ref().unwrap()["originUserMessageId"],
+            "voice-origin"
+        );
         let later = turns.try_acquire(topic).unwrap();
-        assert!(!later.is_cancelled(), "a later unrelated group turn owns another token");
+        assert!(
+            !later.is_cancelled(),
+            "a later unrelated group turn owns another token"
+        );
     }
 
     #[tokio::test]

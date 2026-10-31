@@ -321,19 +321,30 @@ mod tests {
 
     #[test]
     fn ack_identity_fields_do_not_default_but_unknown_messages_remain_ignored() {
-        for data in [serde_json::json!(null), serde_json::json!({}),
+        for data in [
+            serde_json::json!(null),
+            serde_json::json!({}),
             serde_json::json!({"serverId":1,"clientId":"client"}),
-            serde_json::json!({"serverId":"server","clientId":false})] {
-            let envelope: IncomingEnvelope = serde_json::from_value(serde_json::json!({"type":"connection_ack","data":data})).unwrap();
+            serde_json::json!({"serverId":"server","clientId":false}),
+        ] {
+            let envelope: IncomingEnvelope =
+                serde_json::from_value(serde_json::json!({"type":"connection_ack","data":data}))
+                    .unwrap();
             assert!(envelope.parse().is_err());
         }
         let valid: IncomingEnvelope = serde_json::from_value(serde_json::json!({
             "type":"connection_ack","data":{"serverId":"server","clientId":"client"}
-        })).unwrap();
-        assert!(matches!(valid.parse().unwrap(), IncomingMessage::ConnectionAck { server_id, client_id }
-            if server_id == "server" && client_id == "client"));
-        let unknown: IncomingEnvelope = serde_json::from_value(serde_json::json!({"type":"future_event"})).unwrap();
-        assert!(matches!(unknown.parse().unwrap(), IncomingMessage::Unknown(name) if name == "future_event"));
+        }))
+        .unwrap();
+        assert!(
+            matches!(valid.parse().unwrap(), IncomingMessage::ConnectionAck { server_id, client_id }
+            if server_id == "server" && client_id == "client")
+        );
+        let unknown: IncomingEnvelope =
+            serde_json::from_value(serde_json::json!({"type":"future_event"})).unwrap();
+        assert!(
+            matches!(unknown.parse().unwrap(), IncomingMessage::Unknown(name) if name == "future_event")
+        );
     }
 
     #[test]

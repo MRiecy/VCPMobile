@@ -258,10 +258,14 @@ async fn check_startup_failure<F: std::future::Future<Output = ()>>(
 }
 
 async fn verify_if_needed<F: std::future::Future<Output = ()>>(
-    db_path: &Path, marker: &Path, on_check: impl Fn() -> F,
+    db_path: &Path,
+    marker: &Path,
+    on_check: impl Fn() -> F,
 ) -> Result<(), DbOpenFailure> {
     if super::db_health::is_quarantined()
-        || tokio::fs::try_exists(marker).await.map_err(|e| DbOpenFailure::Unavailable(e.to_string()))?
+        || tokio::fs::try_exists(marker)
+            .await
+            .map_err(|e| DbOpenFailure::Unavailable(e.to_string()))?
     {
         on_check().await;
         verify_before_open(db_path, marker).await?;
@@ -424,7 +428,10 @@ fn is_corruption_signal(error: &sqlx::Error) -> bool {
 }
 
 pub(super) fn is_corruption_code(code: i32) -> bool {
-    matches!(code & 0xff, rusqlite::ffi::SQLITE_CORRUPT | rusqlite::ffi::SQLITE_NOTADB)
+    matches!(
+        code & 0xff,
+        rusqlite::ffi::SQLITE_CORRUPT | rusqlite::ffi::SQLITE_NOTADB
+    )
 }
 
 pub(super) fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
@@ -1349,8 +1356,14 @@ mod tests {
         assert_eq!(versions, expected);
         let voice_column: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'voice_config')",
-        ).fetch_one(&pool).await.expect("inspect Agent voice column");
-        assert!(voice_column, "fresh install must apply the Agent voice migration");
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect Agent voice column");
+        assert!(
+            voice_column,
+            "fresh install must apply the Agent voice migration"
+        );
 
         // 迁移记录齐全仍可能来自误 seed；检查实际建表以确认迁移确已执行。
         for name in [

@@ -162,7 +162,10 @@ pub async fn task_set_enabled<R: Runtime>(
 /// 请求体不含 tasks 时会把任务列表清空。因此这里必须 read-modify-write：
 /// 先 GET 完整 config，仅改写 globalEnabled 后整体回写。
 fn global_enabled_payload(response: Value, enabled: bool) -> Result<Value, String> {
-    let mut config = response.get("config").and_then(Value::as_object).cloned()
+    let mut config = response
+        .get("config")
+        .and_then(Value::as_object)
+        .cloned()
         .ok_or_else(|| "服务器返回的 config 结构异常，已中止写入".to_string())?;
     if !config.get("tasks").is_some_and(Value::is_array) {
         return Err("服务器返回的 tasks 结构异常，已中止写入".to_string());
@@ -329,7 +332,8 @@ mod config_tests {
             "globalEnabled":false,"tasks":[{"id":"existing-task","enabled":false}],
             "settings":{"maxHistory":80},"extra":"keep"
         });
-        let response = json!({"config":config,"availableTaskTypes":["custom_prompt"],"taskTemplates":{}});
+        let response =
+            json!({"config":config,"availableTaskTypes":["custom_prompt"],"taskTemplates":{}});
         for enabled in [true, false] {
             let payload = global_enabled_payload(response.clone(), enabled).unwrap();
             let mut expected = config.clone();
@@ -338,7 +342,10 @@ mod config_tests {
             assert!(payload.get("config").is_none());
             assert!(payload.get("availableTaskTypes").is_none());
         }
-        assert_eq!(global_enabled_payload(json!({"config":{"tasks":[]}}), true).unwrap(), json!({"tasks":[],"globalEnabled":true}));
+        assert_eq!(
+            global_enabled_payload(json!({"config":{"tasks":[]}}), true).unwrap(),
+            json!({"tasks":[],"globalEnabled":true})
+        );
     }
 
     #[test]

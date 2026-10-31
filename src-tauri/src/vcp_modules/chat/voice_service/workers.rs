@@ -344,7 +344,9 @@ mod tests {
         let size = (data.len() - 8) as u32;
         data[4..8].copy_from_slice(&size.to_le_bytes());
         for encoding in [VoiceInputEncoding::Wav, VoiceInputEncoding::Mp3] {
-            assert!(prepare_audio(data.clone(), 4, encoding, &cancel).await.is_err());
+            assert!(prepare_audio(data.clone(), 4, encoding, &cancel)
+                .await
+                .is_err());
         }
     }
 

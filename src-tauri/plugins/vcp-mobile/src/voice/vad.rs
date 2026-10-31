@@ -59,7 +59,8 @@ impl VoiceVadConfig {
         if !(Self::MIN_DURATION_MS..=Self::MAX_END_SILENCE_MS).contains(&self.end_silence_ms) {
             return Err("说完等待时间须为 32–5000 ms 的整数。".into());
         }
-        if !(Self::MIN_DURATION_MS..=Self::MAX_PLAYBACK_ONSET_MS).contains(&self.playback_onset_ms) {
+        if !(Self::MIN_DURATION_MS..=Self::MAX_PLAYBACK_ONSET_MS).contains(&self.playback_onset_ms)
+        {
             return Err("朗读时插话确认须为 32–2000 ms 的整数。".into());
         }
         Ok(())
@@ -152,7 +153,10 @@ impl VadDetector {
                 self.onset_samples = 0;
                 self.onset_playback = frame.playback_active;
             }
-            let threshold = self.config.sensitivity.onset_threshold(frame.playback_active);
+            let threshold = self
+                .config
+                .sensitivity
+                .onset_threshold(frame.playback_active);
             let duration = self.config.onset_samples(frame.playback_active);
             if frame.probability >= threshold {
                 self.onset_samples += FRAME_SAMPLES;

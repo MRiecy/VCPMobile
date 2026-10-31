@@ -925,7 +925,8 @@ fn endpoint_error(error: HttpEndpointError) -> DiaryError {
 fn ensure_admin_config(settings: &Settings) -> Result<(), DiaryError> {
     resolve_service_base(&settings.server.url, settings.server.endpoint_mode)
         .map_err(endpoint_error)?;
-    if settings.server.admin_username.trim().is_empty() || settings.server.admin_password.is_empty() {
+    if settings.server.admin_username.trim().is_empty() || settings.server.admin_password.is_empty()
+    {
         return Err(DiaryError::new(
             DiaryErrorCode::ConfigMissing,
             "日记管理需要管理员用户名与密码",
@@ -1713,11 +1714,9 @@ async fn settings_snapshot<R: Runtime>(
                 .command_string(),
         );
     }
-    read_config(app_handle, settings_state)
-        .await
-        .map_err(|_| {
-            DiaryError::new(DiaryErrorCode::ServiceUnavailable, "无法读取应用设置").command_string()
-        })
+    read_config(app_handle, settings_state).await.map_err(|_| {
+        DiaryError::new(DiaryErrorCode::ServiceUnavailable, "无法读取应用设置").command_string()
+    })
 }
 
 fn command_error(error: DiaryError) -> String {

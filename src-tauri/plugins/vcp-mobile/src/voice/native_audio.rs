@@ -14,78 +14,134 @@ pub struct ExportedVoiceSegment {
 }
 
 pub async fn export_segment<R: Runtime>(
-    app: AppHandle<R>, session_id: String, audio_epoch: u32,
-    start_sample: u64, end_sample: u64,
+    app: AppHandle<R>,
+    session_id: String,
+    audio_epoch: u32,
+    start_sample: u64,
+    end_sample: u64,
 ) -> Result<ExportedVoiceSegment, String> {
     validate_session(&session_id)?;
     if end_sample <= start_sample || end_sample - start_sample > 30 * 16_000 {
         return Err("voice_segment_range_invalid".into());
     }
-    native_result_call(app, "exportVoiceSegment", serde_json::json!({
-        "sessionId": session_id, "audioEpoch": audio_epoch,
-        "startSample": start_sample, "endSample": end_sample,
-    }), None).await
+    native_result_call(
+        app,
+        "exportVoiceSegment",
+        serde_json::json!({
+            "sessionId": session_id, "audioEpoch": audio_epoch,
+            "startSample": start_sample, "endSample": end_sample,
+        }),
+        None,
+    )
+    .await
 }
 
 /// Closing input stops new samples; releasing segments is separate so an
 /// already recorded utterance can finish exporting after the microphone closes.
-pub async fn release_segments<R: Runtime>(app: AppHandle<R>, session_id: String) -> Result<(), String> {
+pub async fn release_segments<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> Result<(), String> {
     validate_session(&session_id)?;
-    native_call(app, "releaseVoiceSegments", serde_json::json!({ "sessionId": session_id }), None).await
+    native_call(
+        app,
+        "releaseVoiceSegments",
+        serde_json::json!({ "sessionId": session_id }),
+        None,
+    )
+    .await
 }
 
 pub async fn start_playback<R: Runtime>(
-    app: AppHandle<R>, playback_id: String, startup_frames: u32,
+    app: AppHandle<R>,
+    playback_id: String,
+    startup_frames: u32,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
     if startup_frames == 0 || startup_frames > 5_760 {
         return Err("voice_playback_startup_invalid".into());
     }
-    native_call(app, "startVoicePlayback", serde_json::json!({
-        "playbackId": playback_id, "startupFrames": startup_frames,
-    }), None).await
+    native_call(
+        app,
+        "startVoicePlayback",
+        serde_json::json!({
+            "playbackId": playback_id, "startupFrames": startup_frames,
+        }),
+        None,
+    )
+    .await
 }
 
 pub async fn append_playback<R: Runtime>(
-    app: AppHandle<R>, playback_id: String, pcm_base64: String, message_id: Option<String>,
+    app: AppHandle<R>,
+    playback_id: String,
+    pcm_base64: String,
+    message_id: Option<String>,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
     // The native boundary also validates decoded PCM alignment and size.
     if pcm_base64.is_empty() || pcm_base64.len() > 43_692 {
         return Err("voice_playback_chunk_invalid".into());
     }
-    native_call(app, "appendVoicePlayback", serde_json::json!({
-        "playbackId": playback_id, "pcmBase64": pcm_base64, "messageId": message_id,
-    }), None).await
+    native_call(
+        app,
+        "appendVoicePlayback",
+        serde_json::json!({
+            "playbackId": playback_id, "pcmBase64": pcm_base64, "messageId": message_id,
+        }),
+        None,
+    )
+    .await
 }
 
 /// A completed synthesis segment may release a short first utterance without
 /// sealing the narration job, which may still be waiting for later speakers.
 pub async fn end_playback_segment<R: Runtime>(
-    app: AppHandle<R>, playback_id: String,
+    app: AppHandle<R>,
+    playback_id: String,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
-    native_call(app, "endVoicePlaybackSegment", serde_json::json!({
-        "playbackId": playback_id,
-    }), None).await
+    native_call(
+        app,
+        "endVoicePlaybackSegment",
+        serde_json::json!({
+            "playbackId": playback_id,
+        }),
+        None,
+    )
+    .await
 }
 
 pub async fn finish_playback<R: Runtime>(
-    app: AppHandle<R>, playback_id: String,
+    app: AppHandle<R>,
+    playback_id: String,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
-    native_call(app, "finishVoicePlayback", serde_json::json!({
-        "playbackId": playback_id,
-    }), None).await
+    native_call(
+        app,
+        "finishVoicePlayback",
+        serde_json::json!({
+            "playbackId": playback_id,
+        }),
+        None,
+    )
+    .await
 }
 
 pub async fn stop_playback<R: Runtime>(
-    app: AppHandle<R>, playback_id: String,
+    app: AppHandle<R>,
+    playback_id: String,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
     // Playback has its own lifetime. Native tombstones also handle a stop that
     // reaches the output owner before its delayed start.
-    native_call(app, "stopVoicePlayback", serde_json::json!({
-        "playbackId": playback_id,
-    }), None).await
+    native_call(
+        app,
+        "stopVoicePlayback",
+        serde_json::json!({
+            "playbackId": playback_id,
+        }),
+        None,
+    )
+    .await
 }
