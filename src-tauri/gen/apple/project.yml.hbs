@@ -53,8 +53,9 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        {{~#each apple.plist-pairs}}
-        {{this.key}}: {{this.value}}{{/each}}
+{{#each apple.plist-pairs}}
+        {{this.key}}: {{this.value}}
+{{/each}}
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full
@@ -88,8 +89,9 @@ targets:
       - sdk: Security.framework
       - sdk: UIKit.framework
       - sdk: WebKit.framework
-      {{~#each ios-frameworks}}
-      - sdk: {{this}}.framework{{/each}}
+{{#each ios-frameworks}}
+      - sdk: {{this}}.framework
+{{/each}}
     preBuildScripts:
       - name: Build Rust Code
         script: |
