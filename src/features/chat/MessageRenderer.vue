@@ -29,6 +29,7 @@ import { Copy, Edit2, RotateCcw, Trash2, StopCircle, Square, Volume2 } from "@lu
 import { useBubbleNarration } from './voice/useBubbleNarration';
 import { useMessageTailRenderer } from './composables/useMessageTailRenderer';
 import { separateMessageStyles, stableMessageStyles, standaloneStyleSource } from './utils/messageStyles';
+import { createMarkdownPresentation } from './utils/markdownPresentation';
 import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
 import { allowChatMutation, chatMutationBlockReason } from "./chatMutationPolicy";
 import type { OverlayActionItem } from "../../core/types/overlay";
@@ -272,6 +273,8 @@ interface BubbleGroup {
   isTail?: boolean;
 }
 
+const markdownPresentation = createMarkdownPresentation(inheritStableReveal);
+
 // Tail chunks only change the last host; they must not re-project the stable AST.
 const stableBubbleProjection = computed(() => {
   const list: BubbleGroup[] = [];
@@ -356,7 +359,10 @@ const stableBubbleProjection = computed(() => {
     return last ? isBrkBlock(last) : false;
   })();
 
-  return { bubbles: list, lastBlockIsBrk };
+  return {
+    bubbles: markdownPresentation.project(props.message.id, list, !isUserMsg),
+    lastBlockIsBrk,
+  };
 });
 
 const needsTailBubble = computed(() => showMessageTail.value && Boolean(props.message.tailBlock)
@@ -492,6 +498,8 @@ const tailGuidanceKey = computed(() => guidanceKey(
 watch(() => props.message.id, () => { guidanceExpansion.value = {}; });
 
 function getBlockKey(block: ContentBlock, index: number, bubbleId: string): string {
+  const markdownKey = markdownPresentation.getKey(block);
+  if (markdownKey !== undefined) return markdownKey;
   if (block.type === "voice-guidance") {
     const ordinal = props.message.blocks?.filter(candidate => candidate.type === "voice-guidance").indexOf(block) ?? index;
     return guidanceKey(ordinal);
@@ -503,6 +511,17 @@ function getBlockKey(block: ContentBlock, index: number, bubbleId: string): stri
   }
   // Fallback for legacy data (index-based)
   return `${bubbleId}-${block.type}-idx-${index}`;
+}
+
+function getStableBlockMemo(block: ContentBlock, index: number, bubbleId: string): unknown[] {
+  const key = getBlockKey(block, index, bubbleId);
+  const memo: unknown[] = [key, block, shouldRevealStableBlock(block)];
+  if (block.type === 'html-preview') memo.push(isStreaming.value);
+  else if (block.type === 'thought') memo.push(isMessageInActiveStream.value);
+  else if (block.type === 'tool-use' || block.type === 'jev-tool-use' || block.type === 'tool-result') {
+    memo.push(expandToolsByDefault.value);
+  } else if (block.type === 'voice-guidance') memo.push(guidanceExpansion.value[key]);
+  return memo;
 }
 
 let pendingStableRevealBlocks = new WeakSet<ContentBlock>();
@@ -599,20 +618,15 @@ const renderHeavyContent = async (refreshMermaid = false) => {
 
   if (mathElements.length > 0) {
     try {
-      const katexModule = await import('katex');
+      const { renderKatexHtml } = await import('./utils/katexRenderer');
       if (!isCurrent()) return;
-      const katex = katexModule.default;
       mathElements.forEach((el) => {
         if (!host.contains(el)) return;
         if (el.querySelector('.katex')) return; // already rendered
         const latex = el.getAttribute('data-latex');
         if (!latex) return;
         const isDisplay = el.classList.contains('vcp-math-block');
-        katex.render(latex, el as HTMLElement, {
-          throwOnError: false,
-          strict: false,
-          displayMode: isDisplay,
-        });
+        el.innerHTML = renderKatexHtml(latex, isDisplay);
       });
     } catch (e) {
       console.error('[MessageRenderer] KaTeX render failed:', e);
@@ -1046,7 +1060,7 @@ onUnmounted(() => {
                 <div
                   v-for="(block, index) in bubble.blocks"
                   :key="getBlockKey(block, index, bubble.id)"
-                  v-memo="[getBlockKey(block, index, bubble.id), block, isStreaming, isMessageInActiveStream, expandToolsByDefault, shouldRevealStableBlock(block), guidanceExpansion[getBlockKey(block, index, bubble.id)]]"
+                  v-memo="getStableBlockMemo(block, index, bubble.id)"
                   data-message-render-region="stable"
                   :class="{ [STREAM_ELEMENT_REVEAL_CLASS]: shouldRevealStableBlock(block) }"
                   @animationend.self="finishStableBlockReveal($event, block)"
@@ -1059,7 +1073,7 @@ onUnmounted(() => {
                     :message-id="message.id"
                   />
 
-                  <!-- eslint-disable vue/no-v-html -- AST output uses filterTrustedRichHtml; generated divider/button markup uses parser roles and escaped text. -->
+                  <!-- eslint-disable vue/no-v-html -- Generated AST escapes fields and filters URLs; embedded HTML uses the shared guard. Divider/button markup uses parser roles and escaped text. -->
                   <div
                     v-else-if="isInlineHtmlBlock(block.type)"
                     data-message-content

@@ -76,7 +76,7 @@ const replaceHtml = computed(() => {
       </template>
     </div>
 
-    <!-- eslint-disable vue/no-v-html -- renderMarkdownNodes applies the shared trusted-rich-HTML guard to this AST output. -->
+    <!-- eslint-disable vue/no-v-html -- renderMarkdownNodes escapes generated fields, filters URLs, and guards embedded HTML. -->
     <div
       v-if="hasNodes(block.nodes)"
       class="vcp-diary-content vcp-markdown-block"
@@ -108,7 +108,7 @@ const replaceHtml = computed(() => {
     <div class="vcp-diary-update-body">
       <div class="vcp-diary-update-side vcp-diary-update-before">
         <div class="vcp-diary-update-label">A</div>
-        <!-- eslint-disable vue/no-v-html -- renderMarkdownNodes applies the shared trusted-rich-HTML guard to the original AST. -->
+        <!-- eslint-disable vue/no-v-html -- renderMarkdownNodes escapes generated fields, filters URLs, and guards embedded HTML. -->
         <div
           v-if="block.target?.trim() && hasNodes(block.target_nodes)"
           class="vcp-diary-update-content vcp-markdown-block"
@@ -126,7 +126,7 @@ const replaceHtml = computed(() => {
 
       <div class="vcp-diary-update-side vcp-diary-update-after">
         <div class="vcp-diary-update-label">B</div>
-        <!-- eslint-disable vue/no-v-html -- renderMarkdownNodes applies the shared trusted-rich-HTML guard to the replacement AST. -->
+        <!-- eslint-disable vue/no-v-html -- renderMarkdownNodes escapes generated fields, filters URLs, and guards embedded HTML. -->
         <div
           v-if="block.replace?.trim() && hasNodes(block.replace_nodes)"
           class="vcp-diary-update-content vcp-markdown-block"

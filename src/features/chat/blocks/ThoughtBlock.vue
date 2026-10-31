@@ -53,7 +53,7 @@ function escapeHtml(text: string): string {
       class="vcp-thought-content"
     >
       <slot>
-        <!-- eslint-disable vue/no-v-html -- AST rendering uses filterTrustedRichHtml; the plain-content fallback is HTML-escaped. -->
+        <!-- eslint-disable vue/no-v-html -- Generated AST escapes fields and filters URLs; embedded HTML uses the shared guard; plain content is escaped. -->
         <div
           class="thought-body"
           data-message-content
