@@ -33,15 +33,6 @@ jobs:
       - name: Install Node Dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Vue & TypeScript Type Check
-        run: pnpm exec vue-tsc --noEmit
-
-      - name: Frontend Unit Tests
-        run: pnpm test:run
-
-      - name: Frontend Production Build
-        run: pnpm build
-
       - name: Setup Java
         uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
@@ -75,46 +66,5 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Rust Formatting Check
-        working-directory: ./src-tauri
-        run: cargo fmt --all -- --check
-
-      - name: Rust Unit Tests
-        working-directory: ./src-tauri
-        run: cargo test --locked --workspace --lib
-
-      - name: Rust Integration Tests
-        run: pnpm test:integration
-
-      - name: Initialize Android Tauri project
-        run: pnpm tauri android init --ci
-
-      - name: Generate Android Tauri module settings
-        run: |
-          pnpm ci:prepare-android-settings
-          test -s src-tauri/gen/android/tauri.settings.gradle
-
-      - name: Verify generated Android and plugin permission trees
-        shell: bash
-        run: |
-          GENERATED_DRIFT=$(git status --porcelain --untracked-files=all -- \
-            src-tauri/gen/android \
-            src-tauri/plugins/vcp-mobile/permissions)
-          if [[ -n "$GENERATED_DRIFT" ]]; then
-            echo "Generated Android/plugin permission trees are dirty:" >&2
-            printf '%s\n' "$GENERATED_DRIFT" >&2
-            exit 1
-          fi
-
-      - name: Android Plugin Unit Tests
-        working-directory: ./src-tauri/gen/android
-        run: |
-          chmod +x ./gradlew
-          ./gradlew :tauri-plugin-vcp-mobile:testDebugUnitTest
-
-      - name: Rust Clippy (Lint & Check)
-        working-directory: ./src-tauri
-        run: cargo clippy --locked --workspace --lib --tests -- -D warnings
-
-      - name: Frontend dependency audit
-        run: pnpm audit --audit-level=high
+      - name: Run release checks
+        run: pnpm check:release

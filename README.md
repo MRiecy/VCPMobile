@@ -184,17 +184,18 @@ sequenceDiagram
 
 ### 开发者环境
 
-**Prerequisites**：Rust (stable, edition 2021) · Node.js 22+ · pnpm 10 · Java 17 (temurin) · Android SDK + NDK `29.0.14206865`
+开发工具版本见 `rust-toolchain.toml` 和 `.github/toolchain.env`。运行发布前检查需要配置 `JAVA_HOME`、`ANDROID_HOME` 和 `NDK_HOME`，并安装锁定版本的 SDK、Build Tools 和 NDK。
 
 ```bash
 git clone https://github.com/MRiecy/VCPMobile.git && cd VCPMobile
-pnpm install
+pnpm install --frozen-lockfile
 pnpm tauri android init              # 仅首次
 
 pnpm android:debug:doctor -- --json  # 工具链 / ADB / USB 体检
 pnpm android:debug:dev               # 低噪声 USB + HMR 真机调试
 
-pnpm check                           # 全量静态检查（vue-tsc + cargo check --locked）
+pnpm check                           # 日常检查：配置契约、ESLint、TypeScript 和 Rust 编译
+pnpm check:release                   # 本地和 CI 共用的发布前检查
 pnpm tauri android build --apk --target aarch64   # Release APK（需签名环境变量）
 ```
 

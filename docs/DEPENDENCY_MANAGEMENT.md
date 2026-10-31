@@ -453,7 +453,7 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 ### 6.5 发布供应链门禁
 
 - `gradle-wrapper.properties` 固定官方 Gradle 8.14.3 分发与官方 SHA-256；wrapper JAR/脚本由该版本官方 Wrapper 任务生成，Release 构建前核对官方 wrapper JAR SHA-256。
-- CI 在 `tauri android init --ci` 后检查 Android 生成树与插件权限生成树无漂移，并运行 Gradle JVM 测试。
+- 从仓库根目录运行 `pnpm check:release` 即可执行与 CI 相同的发布前检查。命令在初始化 Android 工程前后，对照 Git 暂存区检查 `src-tauri/gen/android` 和 `src-tauri/plugins/vcp-mobile/permissions`。若这两处有预期改动，先核对并暂存即可在提交前复查。Gradle JVM 测试使用本机 JDK 和 Android SDK。
 - Release 核对 tag/HEAD/event SHA、四处版本源和 Android versionCode；构建产物经固定版本（37.0.0）build-tools 验签。
 - 签名 secrets 只进入恢复、构建与验证步骤；缺任一输入即失败。验签步骤要求 APK 单一签名者且拒绝调试证书。
 - Release 只上传 arm64 签名 APK 与其 `.sha256`；不发布可被主 WebView 独立加载的前端 ZIP。
@@ -494,8 +494,7 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 
 ### 7.3 合并前测试清单（安全更新专用）
 
-- [ ] `pnpm check` 零错误。
-- [ ] `cargo clippy --locked -- -D warnings` 零警告。
+- [ ] `pnpm check:release` 通过，包含整个 Rust 工作区的库和测试目标 Clippy 检查。
 - [ ] `pnpm android:debug:dev` USB 真机启动成功。
 - [ ] 核心功能回归：登录/同步/聊天/文件上传/设置。
 - [ ] APK Release 构建成功：`pnpm tauri android build --apk --target aarch64`。

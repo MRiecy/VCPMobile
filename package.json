@@ -20,6 +20,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "check": "node tools/check.mjs",
+    "check:release": "node tools/check.mjs --release",
     "lint": "eslint . --max-warnings 0 --cache --cache-strategy content --cache-location node_modules/.cache/eslint",
     "config:generate": "cargo run --locked --manifest-path src-tauri/Cargo.toml -p vcp-config-export --",
     "config:check": "cargo run --locked --manifest-path src-tauri/Cargo.toml -p vcp-config-export -- --check",
