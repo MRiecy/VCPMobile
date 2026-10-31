@@ -289,6 +289,20 @@ def install_xcodegen(destination):
     return binary
 
 
+def archived_bundle_info(bundle, manifest, env):
+    info = plistlib.loads((bundle / "Info.plist").read_bytes())
+    require(info.get("CFBundleExecutable") and (bundle / info["CFBundleExecutable"]).is_file(),
+            f"{bundle.name}: bundle executable is missing")
+    expected = {
+        "DTSDKName": "iphoneos" + manifest["sdkVersion"],
+        "DTXcodeBuild": manifest["xcode"].splitlines()[-1].removeprefix("Build version "),
+        "MinimumOSVersion": env["IPHONEOS_DEPLOYMENT_TARGET"],
+    }
+    for key, value in expected.items():
+        require(info.get(key) == value, f"{bundle.name}: expected {key}={value}, found {info.get(key)!r}")
+    return info
+
+
 def collect_archives(evidence, manifest, env):
     """Preserve actual archives and native diagnostics without a product allowlist."""
     archives = sorted(APPLE.rglob("*.xcarchive"))
@@ -298,28 +312,28 @@ def collect_archives(evidence, manifest, env):
         archive_zip = evidence / f"{manifest['phase']}-{manifest['profile']}-{index}-{archive.name}.zip"
         run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(archive), str(archive_zip)], env=env)
         manifest["archives"].append({"file": archive_zip.name, "sha256": digest(archive_zip)})
-        for app in sorted((archive / "Products" / "Applications").glob("*.app")):
+        apps = sorted((archive / "Products" / "Applications").glob("*.app"))
+        require(apps, f"{archive.name}: archive contains no application")
+        for app in apps:
             details = evidence / "bundles" / str(index) / app.name
             details.mkdir(parents=True, exist_ok=True)
+            info = archived_bundle_info(app, manifest, env)
+            write_json(details / "voice-resources.json", verify_voice_resources(app))
+            extension = app / "PlugIns" / "VCPShare.appex"
+            require(extension.is_dir(), f"{app.name}: Share Extension is not embedded")
+            extension_info = archived_bundle_info(extension, manifest, env)
+            require(extension_info.get("NSExtension", {}).get("NSExtensionPointIdentifier") == "com.apple.share-services", "Share Extension point is missing")
+            for key in ("CFBundleShortVersionString", "CFBundleVersion", "VCPShareAppGroup"):
+                require(info.get(key) and extension_info.get(key) == info[key], f"Share Extension/main {key} missing or mismatched")
+            for bundle in (app, extension):
+                require((bundle / "PrivacyInfo.xcprivacy").is_file(), f"{bundle.name}: privacy manifest is missing")
             try:
                 (details / "files.txt").write_text("\n".join(sorted(str(p.relative_to(app)) for p in app.rglob("*"))) + "\n", encoding="utf-8")
                 shutil.copyfile(app / "Info.plist", details / "Info.plist")
-                privacy = app / "PrivacyInfo.xcprivacy"
-                if privacy.is_file():
-                    shutil.copyfile(privacy, details / privacy.name)
-                info = plistlib.loads((app / "Info.plist").read_bytes())
-                write_json(details / "voice-resources.json", verify_voice_resources(app))
-                extension = app / "PlugIns" / "VCPShare.appex"
-                require(extension.is_dir(), f"{app.name}: Share Extension is not embedded")
-                extension_info = plistlib.loads((extension / "Info.plist").read_bytes())
-                require(extension_info.get("NSExtension", {}).get("NSExtensionPointIdentifier") == "com.apple.share-services", "Share Extension point is missing")
-                require(extension_info.get("MinimumOSVersion") == "26.0", "Share Extension minimum iOS must be 26.0")
-                for key in ("CFBundleShortVersionString", "CFBundleVersion", "VCPShareAppGroup"):
-                    require(extension_info.get(key) == info.get(key), f"Share Extension/main {key} mismatch")
+                shutil.copyfile(app / "PrivacyInfo.xcprivacy", details / "PrivacyInfo.xcprivacy")
                 extension_details = details / "VCPShare.appex"
                 extension_details.mkdir(exist_ok=True)
                 shutil.copyfile(extension / "Info.plist", extension_details / "Info.plist")
-                require((extension / "PrivacyInfo.xcprivacy").is_file(), "Share Extension privacy manifest is missing")
                 shutil.copyfile(extension / "PrivacyInfo.xcprivacy", extension_details / "PrivacyInfo.xcprivacy")
                 (extension_details / "architectures.txt").write_text(run(["xcrun", "lipo", "-archs", str(extension / extension_info["CFBundleExecutable"])], env=env), encoding="utf-8")
                 binary = app / info["CFBundleExecutable"]

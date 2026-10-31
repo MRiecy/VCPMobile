@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,38 @@ g1 = load("g1", "g1.py")
 
 
 class EngineeringFileTests(unittest.TestCase):
+    def test_archive_without_application_or_main_plist_fails_collection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "App.xcarchive"
+            archive.mkdir()
+            manifest = {"phase": "phase-6", "profile": "release"}
+            # ditto is macOS-only. Exercise discovery and validation on the actual file tree.
+            with patch.object(g1, "APPLE", root), patch.object(g1, "run", side_effect=lambda cmd, **kw: Path(cmd[-1]).touch()):
+                with self.assertRaisesRegex(RuntimeError, "no application"):
+                    g1.collect_archives(root, manifest, {})
+                app = archive / "Products" / "Applications" / "VCP.app"
+                app.mkdir(parents=True)
+                with self.assertRaises(FileNotFoundError) as error:
+                    g1.collect_archives(root, manifest, {})
+                self.assertEqual(Path(error.exception.filename), app / "Info.plist")
+
+    def test_archived_bundle_rejects_a_different_sdk_or_xcode_build(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary)
+            (app / "VCP").touch()
+            info = {"CFBundleExecutable": "VCP", "DTXcodeBuild": "17C52",
+                    "DTSDKName": "iphoneos26.2", "MinimumOSVersion": "26.0"}
+            manifest = {"xcode": "Xcode 26.2\nBuild version 17C52", "sdkVersion": "26.2"}
+            env = {"IPHONEOS_DEPLOYMENT_TARGET": "26.0"}
+            plist = app / "Info.plist"
+            plist.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+            self.assertEqual(g1.archived_bundle_info(app, manifest, env), info)
+            for key, stale in (("DTSDKName", "iphoneos18.5"), ("DTXcodeBuild", "16F6")):
+                with self.subTest(key=key), self.assertRaisesRegex(RuntimeError, key):
+                    plist.write_bytes(plistlib.dumps({**info, key: stale}))
+                    g1.archived_bundle_info(app, manifest, env)
+
     def test_overlay_replays_without_changing_cli_spec_or_duplicating_resources(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
             project = Path(temporary) / "apple"
