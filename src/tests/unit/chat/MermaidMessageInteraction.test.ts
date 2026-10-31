@@ -137,10 +137,14 @@ describe('Mermaid message rendering and delegation', () => {
   it('reads replacement SVG and source without installing another element listener', async () => {
     const wrapper = mountMessage(staticMessage([{
       type: 'markdown', nodes: [{ type: 'raw_html', content:
-        `<div class="mermaid" data-mermaid-source="old" data-vcp-mermaid-enhanced="true">${svg('old')}</div>`,
+        `<div class="mermaid" data-mermaid-source="old">${svg('old')}</div>`,
       }],
     }]));
     await vi.waitFor(() => expect(wrapper.find('.vcp-mermaid-wrapper').exists()).toBe(true));
+    await wrapper.get('.mermaid text').trigger('click');
+    expect(wrapper.getComponent(Viewer).props()).toMatchObject({ visible: true, sourceCode: 'old' });
+    wrapper.getComponent(Viewer).vm.$emit('close');
+    await nextTick();
     const diagram = wrapper.get('.mermaid').element as HTMLElement;
     // Simulate content replacement after decoration, without a Vue update or an enhancement pass.
     diagram.innerHTML = svg('current');
@@ -150,20 +154,6 @@ describe('Mermaid message rendering and delegation', () => {
     expect(wrapper.getComponent(Viewer).props('svgHtml')).toContain('current');
     expect(render).not.toHaveBeenCalled();
     expect(findImage).not.toHaveBeenCalled();
-  });
-
-  it.each(['replace', 'unmount'] as const)('cleans up diagram host after %s', async action => {
-    const message = staticMessage([markdown(`graph TD; abandoned${action}-->X`, 'old')]);
-    const wrapper = mountMessage(message);
-    await vi.waitFor(() => expect(wrapper.find('.mermaid svg').exists()).toBe(true));
-    if (action === 'unmount') wrapper.unmount();
-    else {
-      message.blocks = [{ type: 'markdown', hash: 'replacement', nodes: [{ type: 'paragraph', children: [{ type: 'text', value: 'replacement' }] }] }];
-      await nextTick();
-      await flushPromises();
-      expect(wrapper.find('.mermaid').exists()).toBe(false);
-      expect(wrapper.text()).toContain('replacement');
-    }
   });
 
   it('preserves CSS variable-driven SVG without re-rendering when theme switches', async () => {

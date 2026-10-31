@@ -105,7 +105,6 @@ describe("chat mutations during generation", () => {
     expect(history.editingMessage).toBe(intent);
     expect(history.currentChatHistory.map(item => item.content)).toEqual(['original', 'keep on failure']);
     expect(acknowledge).not.toHaveBeenCalled();
-    expect(invokeMock.mock.calls.some(([name]) => name === 'truncate_history_after_message')).toBe(false);
     expect(invokeMock.mock.calls.some(([name]) => name === 'append_single_message')).toBe(false);
 
     useSettingsStore().snapshot = makeConfigSnapshot(makeSettings());
@@ -146,13 +145,13 @@ describe("chat mutations during generation", () => {
     expect(invokeMock).toHaveBeenCalledWith("delete_messages", expect.objectContaining({ msgIds: ["old"] }));
   });
 
-  it("rechecks an already opened edit-resend intent before truncating history", async () => {
+  it("rechecks an already opened edit-resend intent before committing an edit", async () => {
     const history = loadedHistory();
     await history.beginEditResend(history.captureMessageActionKey("old")!);
     expect(history.editingMessage).not.toBeNull();
     const release = useChatStreamStore().beginConversationOperation("agent-a", "agent", "topic-a");
     await history.sendMessage("edited");
-    expect(invokeMock).not.toHaveBeenCalledWith("truncate_history_after_message", expect.anything());
+    expect(invokeMock).not.toHaveBeenCalledWith("edit_resend_message", expect.anything());
     expect(history.editingMessage?.initialContent).toBe("original");
     expect(history.currentChatHistory[0].content).toBe("original");
     release();

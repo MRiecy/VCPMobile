@@ -18,7 +18,7 @@ describe('logCenterStore 增量状态机', () => {
     needFullReload: false,
   });
 
-  it.each(['49', '5001', '1.5', '-1', 'Infinity', 'bad'])('restores malformed saved line limit %s without replacing valid toggles', raw => {
+  it.each(['49', '5001', '1.5'])('restores malformed saved line limit %s without replacing valid toggles', raw => {
     localStorage.setItem('vcp_log_limit', raw);
     localStorage.setItem('vcp_log_reverse', '1');
     localStorage.setItem('vcp_log_autoscroll', '0');

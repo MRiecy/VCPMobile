@@ -189,6 +189,7 @@ fn xlsx_relocated_real_shared_strings_preserve_all_extracted_text() {
     let original = include_bytes!("fixtures/file_extractor/sample.xlsx");
     let before = extracted(&write_fixture(original, "xlsx"));
     assert!(before.contains("蒙特卡罗方法计算 π 值"));
+    assert!(before.contains("--- Sheet 1: 参数设置 ---"));
     for target in ["strings/unique.xml", "/xl/strings/unique.xml"] {
         let relocated = transform_package(original, "xlsx", |name, content| {
             let content = if name == "xl/_rels/workbook.xml.rels" {
@@ -246,6 +247,19 @@ fn office_main_parts_can_move_without_changing_text() {
     ] {
         let before = extracted(&write_fixture(bytes, extension));
         assert!(!before.contains("Office 文本提取未完成"));
+        match extension {
+            "docx" => {
+                assert!(
+                    before.contains("管理学院上机实验报告")
+                        || before.contains("管 理 学 院 上 机 实 验 报 告")
+                );
+                assert!(before.contains("蒙特卡罗模拟原理与方法"));
+            }
+            "pptx" => assert!(
+                before.contains("实验1：解析模型示例") || before.contains("线性预测模型")
+            ),
+            _ => {}
+        }
         let directory = old.rsplit_once('/').unwrap().0;
         let old_rels = format!("{directory}/_rels/{}.rels", old.rsplit('/').next().unwrap());
         let new_rels = format!("{directory}/_rels/main.xml.rels");
@@ -800,46 +814,6 @@ fn compressed_docx_with_oversized_xml_event_stops_and_next_document_still_works(
 }
 
 #[test]
-fn test_extract_docx_returns_expected_text() {
-    let docx_bytes = include_bytes!("fixtures/file_extractor/sample.docx");
-    let file = write_fixture(docx_bytes, "docx");
-    let text = try_extract_text(
-        file.path(),
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
-    .expect("DOCX 提取不应返回 None");
-
-    assert!(
-        text.contains("管理学院上机实验报告") || text.contains("管 理 学 院 上 机 实 验 报 告"),
-        "DOCX 提取结果应包含实验报告标题，实际: {text:?}"
-    );
-    assert!(
-        text.contains("蒙特卡罗模拟原理与方法"),
-        "DOCX 提取结果应包含实验内容关键词，实际: {text:?}"
-    );
-}
-
-#[test]
-fn test_extract_xlsx_returns_expected_text() {
-    let xlsx_bytes = include_bytes!("fixtures/file_extractor/sample.xlsx");
-    let file = write_fixture(xlsx_bytes, "xlsx");
-    let text = try_extract_text(
-        file.path(),
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    .expect("XLSX 提取不应返回 None");
-
-    assert!(
-        text.contains("蒙特卡罗方法计算 π 值"),
-        "XLSX 提取结果应包含表格标题，实际: {text:?}"
-    );
-    assert!(
-        text.contains("--- Sheet 1: 参数设置 ---"),
-        "XLSX 提取结果应包含 Sheet 名称，实际: {text:?}"
-    );
-}
-
-#[test]
 fn test_extract_pdf_scanned_fallback_message() {
     let pdf_bytes = include_bytes!("fixtures/file_extractor/sample.pdf");
     let file = write_fixture(pdf_bytes, "pdf");
@@ -848,22 +822,6 @@ fn test_extract_pdf_scanned_fallback_message() {
     assert_eq!(
         text, "[此文件可能为扫描件或图片型 PDF，暂不支持文字提取]",
         "扫描 PDF 应稳定返回回退提示"
-    );
-}
-
-#[test]
-fn test_extract_pptx_returns_expected_text() {
-    let pptx_bytes = include_bytes!("fixtures/file_extractor/sample.pptx");
-    let file = write_fixture(pptx_bytes, "pptx");
-    let text = try_extract_text(
-        file.path(),
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    )
-    .expect("PPTX 提取不应返回 None");
-
-    assert!(
-        text.contains("实验1：解析模型示例") || text.contains("线性预测模型"),
-        "PPTX 提取结果应包含演示文稿标题，实际: {text:?}"
     );
 }
 

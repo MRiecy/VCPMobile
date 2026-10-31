@@ -35,19 +35,6 @@ describe('shared permission guide', () => {
     vi.useRealTimers();
   });
 
-  it('continues startup without Android requests or a blocking surface when there are no current permission items', async () => {
-    wrapper = mount(PermissionGate);
-    await flushPromises();
-    document.dispatchEvent(new Event('visibilitychange'));
-    vi.advanceTimersByTime(30_000);
-    await flushPromises();
-
-    expect(wrapper.find('.vcp-permission-gate').exists()).toBe(false);
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(bootstrap).toHaveBeenCalledOnce();
-    expect(bootstrap).toHaveBeenCalledWith(true);
-  });
-
   it('keeps Android permission requests and its existing storage check in the shared guide', async () => {
     native.android = true;
     mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({

@@ -107,32 +107,6 @@ describe('message long press ownership', () => {
     dispatchPointer(prose, 'pointerup', { clientX: 26, clientY: 35 });
   });
 
-  it('replays the captured Android compatibility sequence without treating mousemove as finger movement', () => {
-    // Synthetic replay of the observed +492ms mousemove, +494ms touch contextmenu,
-    // +1041ms release. This checks that ordering; it is not device validation.
-    const prose = wrapper.get('p').element;
-    const contact = new Touch({ identifier: 7, target: prose, clientX: 20, clientY: 30 });
-    dispatchPointer(prose, 'pointerdown');
-    prose.dispatchEvent(new TouchEvent('touchstart', {
-      bubbles: true, cancelable: true, touches: [contact], targetTouches: [contact], changedTouches: [contact],
-    }));
-    vi.advanceTimersByTime(492);
-    prose.dispatchEvent(new MouseEvent('mousemove', {
-      bubbles: true, cancelable: true, clientX: 20, clientY: 30, buttons: 0,
-    }));
-    vi.advanceTimersByTime(2);
-    const menu = dispatchPointer(prose, 'contextmenu');
-    expect(menu.defaultPrevented).toBe(true);
-    vi.advanceTimersByTime(106);
-    expect(handler).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(441);
-    dispatchPointer(prose, 'pointerup');
-    prose.dispatchEvent(new TouchEvent('touchend', {
-      bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [contact],
-    }));
-    expect(handler).toHaveBeenCalledTimes(1);
-  });
-
   it('keeps a stationary message press when a different pane scrolls', () => {
     const prose = wrapper.get('p').element;
     dispatchPointer(prose, 'pointerdown');

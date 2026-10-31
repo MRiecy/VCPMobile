@@ -54,22 +54,6 @@ describe('native attachment ownership', () => {
     store.$dispose();
   });
 
-  it('does not reinsert a cleared card when CAS registration has already committed', async () => {
-    const registration = deferred<Record<string, unknown>>();
-    mockInvoke('plugin:vcp-mobile|pick_file', () => batch);
-    mockInvoke('register_local_file', () => registration.promise);
-    const store = useAttachmentStore();
-    const importing = store.handleAttachment();
-    await vi.waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'register_local_file')).toBe(true));
-    expect(store.stagedAttachments).toHaveLength(1);
-    store.clearStaged();
-    registration.resolve({ name: 'image.jpg', internalPath: '/cas/hash.jpg', hash: 'hash', type: 'image/jpeg', size: 10 });
-    await importing;
-    expect(store.stagedAttachments).toHaveLength(0);
-    expect(invokeMock).not.toHaveBeenCalledWith('plugin:vcp-mobile|delete_temp_file', { filePath: '/cas/hash.jpg' });
-    store.$dispose();
-  });
-
   it('invalidates acquisition when the user moves to a different conversation', async () => {
     const selection = deferred<typeof batch>();
     mockInvoke('plugin:vcp-mobile|pick_file', () => selection.promise);
@@ -166,6 +150,7 @@ describe('native attachment ownership', () => {
     await importing;
     expect(store.stagedAttachments).toEqual([]);
     expect(invokeMock.mock.calls.filter(([command]) => command === 'register_local_file')).toHaveLength(1);
+    expect(invokeMock).not.toHaveBeenCalledWith('plugin:vcp-mobile|delete_temp_file', { filePath: '/cas/first.jpg' });
     for (const value of files) {
       expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|delete_temp_file', { filePath: value.path });
       expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|delete_temp_file', { filePath: value.thumbnailPath });

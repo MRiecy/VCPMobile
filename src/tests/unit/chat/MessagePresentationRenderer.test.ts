@@ -229,42 +229,6 @@ describe('MessageRenderer presentation shell', () => {
     }
   });
 
-  it('renders guidance as plain tail and preserves expansion through closure and final hashes', async () => {
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
-    const stream = useChatStreamStore();
-    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'voice-guidance');
-    const message = reactive<ChatMessage>({
-      id: 'voice-guidance', role: 'assistant', timestamp: 1,
-      content: '<voice_guidance>\n自然轻快', blocks: [],
-      tailContent: '自然轻快',
-      tailBlock: { type: 'voice-guidance', content: '自然轻快', is_complete: false, hash: 'tail', render_mode: 'plain' },
-      shell: { isUser: false, displayName: 'Agent', avatarColor: '#888' },
-    });
-    const wrapper = mountStreamRenderer(message, pinia);
-    expect(wrapper.text()).not.toContain('<voice_guidance>');
-    expect(wrapper.find('.vcp-ast-sandbox').exists()).toBe(false);
-    const toggle = wrapper.get('.voice-guidance-toggle');
-    expect(toggle.attributes('aria-expanded')).toBe('false');
-    await toggle.trigger('click');
-    message.blocks = [{ type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 'stream-hash' }];
-    message.tailBlock = undefined;
-    message.tailContent = '';
-    await nextTick();
-    expect(wrapper.findAll('.voice-guidance-toggle')).toHaveLength(1);
-    expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
-    message.blocks = [
-      { type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 123456 },
-      { type: 'markdown', content: '[轻笑]你好。', hash: 7654321 },
-    ];
-    await nextTick();
-    expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
-    expect(wrapper.text()).toContain('[轻笑]你好。');
-    expect(wrapper.text()).not.toContain('<voice_guidance>');
-    wrapper.unmount();
-  });
-
   it('recovers a plain guidance snapshot and appends without creating a Markdown sandbox', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -304,6 +268,13 @@ describe('MessageRenderer presentation shell', () => {
     await vi.waitFor(() => expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('正文'));
     expect(wrapper.findAll('.voice-guidance-toggle')).toHaveLength(1);
     expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
+    await stream.processStreamEvent({ ...base, type: 'end', aurora: null, finishReason: 'completed', blocks: [
+      { type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 123456 },
+      { type: 'markdown', content: '正文', hash: 7654321 },
+    ] });
+    await nextTick();
+    expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
+    expect(wrapper.text()).not.toContain('<voice_guidance>');
     wrapper.unmount();
   });
 
@@ -584,54 +555,6 @@ describe('MessageRenderer presentation shell', () => {
       streamStore.$dispose();
       errorLog.mockRestore();
     }
-  });
-
-  it('enhances an already-rendered first-pass Mermaid SVG immediately', async () => {
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const message: ChatMessage = {
-      id: 'existing-mermaid-svg',
-      role: 'assistant',
-      timestamp: 1,
-      agentId: 'agent-a',
-      shell: {
-        avatarColor: '#64748b',
-        displayName: 'Agent A',
-        isUser: false,
-      },
-      blocks: [{
-        type: 'markdown',
-        hash: 'existing-mermaid-svg',
-        nodes: [{
-          type: 'raw_html',
-          content: '<div class="mermaid" data-mermaid-source="graph TD;A--&gt;B"><svg viewBox="0 0 10 10"><text>A</text></svg></div>',
-        }],
-      }],
-    };
-    const MermaidViewerStub = defineComponent({
-      props: { visible: Boolean },
-      template: '<div data-mermaid-viewer :data-visible="String(visible)" />',
-    });
-
-    const wrapper = mount(MessageRenderer, {
-      props: { message },
-      global: {
-        plugins: [pinia],
-        directives: { longpress: {} },
-        stubs: {
-          VcpAvatar: markerStub('avatar'),
-          MermaidFullScreenViewer: MermaidViewerStub,
-        },
-      },
-    });
-
-    await vi.waitFor(() => {
-      expect(wrapper.find('.vcp-mermaid-wrapper').exists()).toBe(true);
-    });
-    await wrapper.get('.vcp-mermaid-wrapper').trigger('click');
-    expect(wrapper.get('[data-mermaid-viewer]').attributes('data-visible')).toBe('true');
-    expect(mermaidRenderMock).not.toHaveBeenCalled();
-    wrapper.unmount();
   });
 
   it('lets a new Aurora stream reset a lower frame sequence from the previous stream', async () => {

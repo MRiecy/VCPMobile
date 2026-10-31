@@ -517,27 +517,6 @@ describe("stream render backpressure", () => {
     },
   );
 
-  it("releases the tail when durable end already contains compiled blocks", async () => {
-    const raf = installManualRaf();
-    const store = useChatStreamStore();
-    try {
-      await store.processStreamEvent(tailEvent(1, 1, "streamed", { reset: true }));
-      raf.flush();
-      const message = store.getActiveStreamMessage("agent-a", "agent", "topic-a", "assistant-1")!;
-      await store.processStreamEvent(streamEvent({
-        type: "end", messageId: "assistant-1", context: streamContext,
-        content: "saved", blocks: [{ type: "markdown", content: "saved" }], finishReason: "completed",
-      }));
-      expect(message.tailFrame).toBeUndefined();
-      expect(message.tailSnapshot).toBeUndefined();
-      expect(message.blocks).toEqual([{ type: "markdown", content: "saved" }]);
-      expect(invokeMock.mock.calls.some(([command]) => command === "process_message_content")).toBe(false);
-    } finally {
-      store.$dispose();
-      raf.restore();
-    }
-  });
-
   it("keeps the existing tail visible when terminal rendering fails", async () => {
     const raf = installManualRaf();
     const store = useChatStreamStore();

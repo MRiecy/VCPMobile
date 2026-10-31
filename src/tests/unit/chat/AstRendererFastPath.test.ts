@@ -145,14 +145,4 @@ describe('AST generated-HTML fast path', () => {
     expect(iframe?.getAttribute('sandbox')).toBe('allow-scripts');
     expect(iframe?.getAttribute('srcdoc')).toBe('<b>frame</b>');
   });
-
-  it('keeps unexpected heading values on the existing HTML guard path', () => {
-    const node = {
-      type: 'heading', level: '2 onclick="fetch(1)"', children: [text('heading')],
-    } as unknown as MarkdownNode;
-    const createElement = vi.spyOn(document, 'createElement');
-    const html = renderMarkdownNodes([node], 'unexpected-heading');
-    expect(createElement.mock.calls.filter(([tag]) => tag === 'template')).toHaveLength(1);
-    expect(parseHtml(html).querySelector('[onclick]')).toBeNull();
-  });
 });

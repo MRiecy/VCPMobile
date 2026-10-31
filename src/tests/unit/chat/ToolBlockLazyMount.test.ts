@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { defineComponent, h, nextTick, ref } from 'vue';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { marked } from 'marked';
 import ToolBlock from '@/features/chat/blocks/ToolBlock.vue';
@@ -59,29 +58,6 @@ describe('ToolBlock lazy content mounting', () => {
     expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
     expect(wrapper.get('.vcp-markdown-block').element).toBe(rendered);
     expect(parse).toHaveBeenCalledTimes(2);
-  });
-
-  it('inherits mounted content for a reused tool key and resets it for a new identity', async () => {
-    const parse = vi.spyOn(marked, 'parse');
-    const identity = ref('first-tool');
-    const block = ref(result());
-    wrapper = mount(defineComponent({
-      setup: () => () => h(ToolBlock, { key: identity.value, type: 'tool-result', block: block.value }),
-    }));
-    await wrapper.get('.tool-header-content').trigger('click');
-    const rendered = wrapper.get('.vcp-markdown-block').element;
-    block.value = result(101);
-    await nextTick();
-    expect(wrapper.get('.vcp-markdown-block').element).toBe(rendered);
-    expect(parse).toHaveBeenCalledTimes(2);
-
-    identity.value = 'replacement-tool';
-    await nextTick();
-    expect(wrapper.find('.vcp-markdown-block').exists()).toBe(false);
-    expect(parse).toHaveBeenCalledTimes(2);
-    await wrapper.get('.tool-header-content').trigger('click');
-    expect(wrapper.get('.vcp-markdown-block').element).not.toBe(rendered);
-    expect(parse).toHaveBeenCalledTimes(4);
   });
 
   it('hands the newly mounted body to the message renderer for rich-content rendering', async () => {

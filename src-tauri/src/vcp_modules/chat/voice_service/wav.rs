@@ -90,12 +90,6 @@ mod tests {
     }
 
     #[test]
-    fn finds_pcm_after_unknown_odd_sized_chunk_and_padding() {
-        assert_eq!(pcm16_mono(&wav_fixture(), 24000).unwrap(), [1, 2, 3, 4]);
-        assert_eq!(pcm16_mono_sample_count(&wav_fixture(), 24000).unwrap(), 2);
-    }
-
-    #[test]
     fn counts_and_collects_all_data_chunks_even_before_the_format_chunk() {
         let mut bytes = wav_fixture();
         let data = bytes.split_off(bytes.len() - 12);

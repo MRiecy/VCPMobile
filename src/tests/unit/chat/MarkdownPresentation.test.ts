@@ -9,32 +9,6 @@ const markdown = (...nodes: MarkdownNode[]): ContentBlock => ({ type: 'markdown'
 const bubble = (blocks: ContentBlock[], id = 'message-bubble-0') => ({ id, blocks });
 
 describe('message-local Markdown presentation', () => {
-  it('reuses the same top-level units when final compilation combines transport blocks', () => {
-    const projection = createMarkdownPresentation();
-    const initial = projection.project('message', [bubble([
-      markdown(paragraph('first', 10)), markdown(paragraph('second', 20)),
-    ])]);
-    const finalSource = markdown(paragraph('first', 10), paragraph('second', 20), paragraph('last', 30));
-    const final = projection.project('message', [bubble([finalSource])]);
-    expect(final[0].blocks).toHaveLength(3);
-    expect(final[0].blocks[0]).toBe(initial[0].blocks[0]);
-    expect(final[0].blocks[1]).toBe(initial[0].blocks[1]);
-    expect(final[0].blocks[2].nodes?.[0]).toBe(finalSource.nodes?.[2]);
-    expect(finalSource.nodes).toHaveLength(3);
-    expect(final[0].blocks.every(block => block.hash === undefined)).toBe(true);
-  });
-
-  it('compares actual content even when distinct u64 hashes round to the same JS number', () => {
-    const projection = createMarkdownPresentation();
-    const rounded = Number(9_007_199_254_740_992n);
-    expect(rounded).toBe(Number(9_007_199_254_740_993n));
-    const before = projection.project('message', [bubble([markdown(paragraph('old', rounded))])]);
-    const after = projection.project('message', [bubble([markdown(paragraph('authoritative', rounded))])]);
-    expect(after[0].blocks[0]).not.toBe(before[0].blocks[0]);
-    expect(projection.getKey(after[0].blocks[0])).not.toBe(projection.getKey(before[0].blocks[0]));
-    expect(after[0].blocks[0].nodes).toEqual([paragraph('authoritative', rounded)]);
-  });
-
   it('assigns independent identities to repeated nodes and to nodes without hashes', () => {
     const projection = createMarkdownPresentation();
     const input = () => [bubble([

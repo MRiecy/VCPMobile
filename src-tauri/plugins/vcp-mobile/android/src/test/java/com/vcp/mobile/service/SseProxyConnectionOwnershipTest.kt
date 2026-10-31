@@ -90,24 +90,6 @@ class SseProxyConnectionOwnershipTest {
     }
 
     @Test
-    fun staleConnectionCannotDetachOrCloseCurrentResumeConnection() {
-        val session = StreamSession("request-1")
-        val first = connection()
-        val resumed = connection()
-
-        session.replaceConnection(first.connection)
-        session.replaceConnection(resumed.connection)?.close()
-
-        assertFalse(session.detachConnection(first.connection))
-        first.connection.close()
-
-        assertSame(resumed.connection, session.activeConnection)
-        assertFalse(resumed.socket.isClosed)
-        assertEquals(0, resumed.socket.closeCount.get())
-        assertEquals(0, resumed.output.closeCount.get())
-    }
-
-    @Test
     fun delayedFinalizersAcrossThreeResumesOnlyCloseTheirOwnConnections() {
         val session = StreamSession("request-2")
         val first = connection()
@@ -120,8 +102,11 @@ class SseProxyConnectionOwnershipTest {
 
         assertFalse(session.detachConnection(first.connection))
         assertFalse(session.detachConnection(second.connection))
+        first.connection.close()
+        second.connection.close()
         assertSame(third.connection, session.activeConnection)
         assertEquals(0, third.socket.closeCount.get())
+        assertEquals(0, third.output.closeCount.get())
 
         assertTrue(session.detachConnection(third.connection))
         third.connection.close()

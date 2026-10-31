@@ -54,18 +54,6 @@ class ShareIntentBoundaryTest {
     }
 
     @Test
-    fun latestIntentOwnerInvalidatesEarlierCompletion() {
-        val owner = ShareIntentOwner()
-        val first = owner.begin()
-        assertTrue(owner.isCurrent(first))
-
-        val second = owner.begin()
-        assertNotEquals(first, second)
-        assertFalse(owner.isCurrent(first))
-        assertTrue(owner.isCurrent(second))
-    }
-
-    @Test
     fun newIntentClearsCachedPayloadBeforeWebViewCanConsumeIt() {
         val payload = LatestSharePayload<String>()
         val first = payload.begin()

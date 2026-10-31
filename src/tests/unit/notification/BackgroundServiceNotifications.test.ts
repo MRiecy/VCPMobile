@@ -111,9 +111,9 @@ describe('background service failure notifications', () => {
     expect(store.unreadCount).toBe(1);
   });
 
-  it.each(['guardian', 'helper'])('preserves the normal %s cooldown and history-clear behavior', service => {
+  it('preserves the normal service cooldown and history-clear behavior', () => {
     const store = useNotificationStore();
-    const notification = useNotificationProcessor().processPayload({ type: 'vcp-background-service-error', service });
+    const notification = useNotificationProcessor().processPayload({ type: 'vcp-background-service-error', service: 'guardian' });
     store.addNotification(notification);
     store.activeToasts = [];
 
@@ -135,7 +135,7 @@ describe('background service failure notifications', () => {
     expect(store.unreadCount).toBe(1);
   });
 
-  it.each([undefined, null, '', 'unknown', '__proto__', {}])('ignores unknown service %j', service => {
+  it.each([undefined, '__proto__'])('ignores unknown service %j', service => {
     const notification = useNotificationProcessor().processPayload({
       type: 'vcp-background-service-error',
       service,

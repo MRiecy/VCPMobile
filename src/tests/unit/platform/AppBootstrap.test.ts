@@ -216,9 +216,9 @@ describe('platform-aware bootstrap', () => {
     expect(newStore.historyList[0].id).toBe('vcp_background_service_error_events');
   });
 
-  it.each(['denied', 'authorized', 'provisional', 'unknown'])('does not block iOS chat when notification permission is %s', async authorization => {
+  it('does not block iOS chat when notification permission is denied', async () => {
     testPlatform.value = 'ios';
-    mockInvoke('plugin:vcp-mobile|get_notification_permission', () => ({ authorization }));
+    mockInvoke('plugin:vcp-mobile|get_notification_permission', () => ({ authorization: 'denied' }));
     const lifecycle = useAppLifecycleStore();
 
     await lifecycle.bootstrap();

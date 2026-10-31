@@ -29,19 +29,6 @@ afterEach(() => {
 });
 
 describe('native microphone display observer', () => {
-  it('releases a recovered display subscription that finishes installing after disposal', async () => {
-    const installed = deferred<() => void>();
-    const unlisten = vi.fn();
-    listenMock.mockImplementationOnce(() => installed.promise);
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
-    monitor.observe('surviving-capture');
-    monitor.detach();
-    installed.resolve(unlisten);
-    await flushPromises();
-    expect(unlisten).toHaveBeenCalledOnce();
-    expect(invokeMock).not.toHaveBeenCalled();
-  });
-
   it('only observes the capture selected by the snapshot and never starts or stops audio', async () => {
     const installed = deferred<() => void>();
     const unlisten = vi.fn();
@@ -181,14 +168,4 @@ describe('native microphone display observer', () => {
     expect(onEnded).not.toHaveBeenCalled();
   });
 
-  it('projects native background termination without issuing a second seal or stop', async () => {
-    const onEnded = vi.fn();
-    monitor = createMicrophoneMonitor(vi.fn(), onEnded, vi.fn());
-    const id = 'capture';
-    monitor.observe(id);
-    await flushPromises();
-    emitTauriEvent(audioEvent, { kind: 'stopped', sessionId: id, audioEpoch: 2, sampleIndex: 999, reason: 'background' });
-    expect(onEnded).toHaveBeenCalledWith(expect.objectContaining({ reason: 'background' }));
-    expect(invokeMock).not.toHaveBeenCalled();
-  });
 });

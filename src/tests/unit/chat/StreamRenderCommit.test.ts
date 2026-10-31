@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, disposePinia, setActivePinia } from "pinia";
 import { flushPromises } from "@vue/test-utils";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
-import { mockInvoke } from "@/tests/mocks/tauri";
+import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import type { AuroraRecoverySnapshot, ContentBlock, StreamEventDto } from "@/core/types/chat";
 
 const context = {
@@ -172,6 +172,7 @@ describe("stream render projection commits", () => {
     expect(current.tailOp).toBeUndefined();
     expect(current.tailSnapshot).toBeUndefined();
     expect(current.tailFrame).toBeUndefined();
+    expect(invokeMock.mock.calls.some(([command]) => command === "process_message_content")).toBe(false);
     expect(store.isMessageActive("agent-a", "agent", "topic-a", messageId)).toBe(false);
   });
 

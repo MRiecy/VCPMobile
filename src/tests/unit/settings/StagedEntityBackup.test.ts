@@ -3,6 +3,7 @@ import { createPinia, setActivePinia } from "pinia";
 import {
   STAGED_BACKUP_STORAGE_KEY,
   STAGED_BACKUP_TTL_MS,
+  isStagedPayloadValid,
   writeStagedEntityBackup,
   readStagedEntityBackup,
   applyImport,
@@ -32,21 +33,55 @@ afterEach(() => {
 });
 
 describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
+  describe("production staged storage validation", () => {
+    const now = 1761800000000;
+
+    it.each([
+      ["invalid JSON", "{broken"],
+      ["null", "null"],
+      ["array", "[]"],
+      ["missing timestamp", JSON.stringify({ version: 2 })],
+      ["string timestamp", JSON.stringify({ version: 2, timestamp: String(now) })],
+      ["non-finite timestamp serialized as null", JSON.stringify({ version: 2, timestamp: Infinity })],
+      ["old version", JSON.stringify({ version: 1, timestamp: now })],
+      ["string version", JSON.stringify({ version: "2", timestamp: now })],
+    ])("purges %s from staged storage", (_label, raw) => {
+      localStorage.setItem(STAGED_BACKUP_STORAGE_KEY, raw);
+      expect(readStagedEntityBackup(now)).toBeNull();
+      expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).toBeNull();
+    });
+
+    it.each([
+      [0, true],
+      [STAGED_BACKUP_TTL_MS, true],
+      [STAGED_BACKUP_TTL_MS + 1, false],
+      [-1, false],
+    ])("validates staged age %i at the clock and TTL boundaries", (age, valid) => {
+      writeStagedEntityBackup({ agentPreferences: { "agent-1": { mobileSystemPrompt: "pending" } } }, now - age);
+      const raw = localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)!;
+      expect(isStagedPayloadValid(JSON.parse(raw), now)).toBe(valid);
+      expect(readStagedEntityBackup(now)).toEqual(valid ? JSON.parse(raw) : null);
+      expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).toBe(valid ? raw : null);
+    });
+  });
+
   describe("checkAndPromptPendingConfigRestore", () => {
     it("returns false when no staged backup key exists", async () => {
       const result = await checkAndPromptPendingConfigRestore();
       expect(result).toBe(false);
     });
 
-    it("cleans up corrupted JSON and returns false", async () => {
-      localStorage.setItem(STAGED_BACKUP_STORAGE_KEY, "invalid-json-content-{{");
+    it.each(["invalid-json-content-{{", "null", '{"version":2,"timestamp":null}'])("purges malformed staged input %s before prompting", async raw => {
+      localStorage.setItem(STAGED_BACKUP_STORAGE_KEY, raw);
       const result = await checkAndPromptPendingConfigRestore();
       expect(result).toBe(false);
       expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).toBeNull();
     });
 
-    it("purges expired staged payload (> 7 days) and returns false", async () => {
-      const expiredTimestamp = Date.now() - (STAGED_BACKUP_TTL_MS + 5000);
+    it.each([STAGED_BACKUP_TTL_MS + 1, -1])("purges invalid staged age %i before prompting", async age => {
+      const now = 1761800000000;
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      const expiredTimestamp = now - age;
       localStorage.setItem(
         STAGED_BACKUP_STORAGE_KEY,
         JSON.stringify({
@@ -93,7 +128,9 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
       expect(readStagedEntityBackup()).not.toBeNull();
     });
 
-    it("prompts user and applies staged config when entities exist and user confirms", async () => {
+    it.each(["agent", "group"])("applies staged config at the TTL boundary when only a %s exists", async entity => {
+      const now = 1761800000000;
+      vi.spyOn(Date, "now").mockReturnValue(now);
       const agentPrefs = {
         "agent-alpha": { mobileSystemPrompt: "已同步移动端提示词", useTemperature: true },
       };
@@ -103,13 +140,15 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
       writeStagedEntityBackup({
         agentPreferences: agentPrefs,
         groupPreferences: groupPrefs,
-      });
+      }, now - STAGED_BACKUP_TTL_MS);
 
       const assistantStore = useAssistantStore();
-      assistantStore.agents = [
+      assistantStore.agents = entity === "agent" ? [
         { id: "agent-alpha", name: "Alpha", model: "gemini", avatarCalculatedColor: null },
-      ];
-      assistantStore.groups = [];
+      ] : [];
+      assistantStore.groups = entity === "group" ? [
+        { id: "group-dev", name: "Dev", avatarCalculatedColor: null, members: [], mode: "jev" },
+      ] : [];
 
       const overlayStore = useOverlayStore();
       vi.spyOn(overlayStore, "showConfirm").mockResolvedValue(true);
@@ -157,6 +196,9 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
           toastOnly: true,
         }),
       );
+      expect(await checkAndPromptPendingConfigRestore()).toBe(false);
+      expect(overlayStore.showConfirm).toHaveBeenCalledTimes(1);
+      expect(importSpy).toHaveBeenCalledTimes(1);
     });
 
     it("retains staged key in localStorage when user cancels prompt", async () => {
@@ -182,6 +224,20 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
       // Key must be retained
       expect(readStagedEntityBackup()).not.toBeNull();
       expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).not.toBeNull();
+      expect(await checkAndPromptPendingConfigRestore()).toBe(false);
+      expect(importSpy).not.toHaveBeenCalled();
+
+      vi.mocked(overlayStore.showConfirm).mockResolvedValue(true);
+      settingsStore.snapshot = { domains: {} as any, data: {} as any };
+      importSpy.mockResolvedValue({
+        result: { status: "saved", snapshot: settingsStore.snapshot },
+        missingGroups: false,
+        missingAgents: false,
+      });
+      vi.spyOn(assistantStore, "fetchAgentsAndGroups").mockResolvedValue(undefined);
+      expect(await checkAndPromptPendingConfigRestore()).toBe(true);
+      expect(importSpy).toHaveBeenCalledTimes(1);
+      expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).toBeNull();
     });
   });
 

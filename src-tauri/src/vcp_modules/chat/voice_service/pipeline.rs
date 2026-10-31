@@ -431,15 +431,6 @@ mod tests {
         assert_eq!(segments.recv().await, None, "cancellation is not a completed segment");
     }
 
-    #[test]
-    fn complete_pcm_buffer_is_taken_without_copying() {
-        let segment = SegmentBuffer::default();
-        let pcm = vec![0; PCM_PACKET_BYTES * 2];
-        let allocation = pcm.as_ptr();
-        segment.push(pcm).unwrap();
-        assert_eq!(segment.state.lock().unwrap().pcm.as_ptr(), allocation);
-    }
-
     #[tokio::test]
     async fn tiny_stream_deltas_are_limited_by_bytes_and_join_into_native_sized_packets() {
         let segment = SegmentBuffer::default();

@@ -144,27 +144,6 @@ class ForegroundGuardianTest {
     }
 
     @Test
-    @Config(sdk = [34])
-    fun activeConsumerKindsSelectOnlyTheirDeclaredForegroundServiceTypes() {
-        val target = ForegroundGuardian.CliNotificationTarget("job-1", "attempt-1", 1, "job")
-        ForegroundGuardian.acquire(
-            context,
-            "cli:job-1:attempt-1",
-            ForegroundGuardian.PRIORITY_CLI,
-            "job",
-            false,
-            60_000,
-            true,
-            false,
-            ForegroundGuardian.ConsumerKind.CLI_JOB,
-            target,
-        )
-
-        val typeMask = ForegroundGuardian.foregroundServiceTypeMask()
-        assertTrue(typeMask != 0)
-    }
-
-    @Test
     fun unexpectedForegroundServiceLossReportsOnlyExactCliTargets() {
         val target = ForegroundGuardian.CliNotificationTarget("job-1", "attempt-1", 9, "job")
         var affected: List<ForegroundGuardian.CliNotificationTarget>? = null

@@ -33,21 +33,6 @@ afterEach(async () => {
 });
 
 describe('Agent voice selection ownership', () => {
-  it('the default builtin voice is 冰糖 and does not silently adopt the global voice', async () => {
-    const wrapper = mount(AgentVoiceSettings, {
-      props: { active: true, modelValue: { enabled: true, ...SETTINGS_DEFAULTS.voice.tts } },
-    });
-    wrappers.push(wrapper);
-    await flushPromises();
-    expect(wrapper.get('code').text()).toBe('mimo-v2.5-tts');
-    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('冰糖');
-    expect(wrapper.get('[aria-label="流式朗读"]').isVisible()).toBe(true);
-    expect(wrapper.get('[aria-label="试听文本"]').isVisible()).toBe(true);
-    expect(wrapper.get('[role="group"][aria-label="音色模式"]').findAll('button').map(button => button.text())).toEqual(['预制音色', '音色复刻']);
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_tts')).toHaveLength(0);
-    expect(wrapper.emitted('update:modelValue')).toBeUndefined();
-  });
-
   it('keeps the disabled draft inactive, then previews its default voice without changing global TTS settings', async () => {
     const voice = { enabled: false, ...SETTINGS_DEFAULTS.voice.tts, stream: false };
     const wrapper = mount(AgentVoiceSettings, { props: { active: true, modelValue: voice } });

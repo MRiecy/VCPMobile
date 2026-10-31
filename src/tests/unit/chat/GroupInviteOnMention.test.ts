@@ -64,19 +64,13 @@ describe("invite_only 提及即邀约", () => {
     });
   });
 
-  it("auto-invites mentioned members in order of first appearance", async () => {
+  it("auto-invites mixed ASCII and full-width mentions in order of first appearance", async () => {
     const history = await setupInviteOnlyGroup();
-    await history.sendMessage("@Luna 和 @Nova 你们好");
+    await history.sendMessage("@Luna 和 ＠Nova 你们好");
     expect(invitedAgentIds).toEqual(["a2", "a1"]);
     const invitations = invokeMock.mock.calls.filter(([command]) => command === "invite_group_member_to_speak");
     expect(invitations).toHaveLength(1);
     expect(invitations[0][1]?.payload).toEqual({ groupId: "g1", topicId: "t1", agentIds: ["a2", "a1"] });
-  });
-
-  it("auto-invites on the full-width ＠ from Chinese IMEs", async () => {
-    const history = await setupInviteOnlyGroup();
-    await history.sendMessage("＠Nova 在吗");
-    expect(invitedAgentIds).toEqual(["a1"]);
   });
 
   it("shows guidance toast instead of inviting when nobody is mentioned", async () => {

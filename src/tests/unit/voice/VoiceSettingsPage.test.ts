@@ -810,7 +810,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/voice.wav');
     await closeCloneManager();
     await choose(wrapper, '音色模式', '预制音色');
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'delete_voice_clone_sample')).toHaveLength(0);
     await choose(wrapper, '音色模式', '音色复刻');
     await leaveVoiceSettings(wrapper);
     expect(database.voice.tts.cloneSampleId).toBe('new-sample');
@@ -905,7 +905,7 @@ describe('语音设置使用正式设置快照', () => {
     const asset = { ...cloneAsset('late-sample', 'late.mp3'), format: 'mp3' as const };
     pending.resolve(asset);
     await flushPromises();
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample' || command === 'delete_voice_clone_sample')).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'delete_voice_clone_sample')).toHaveLength(0);
     expect(useVoiceLibraryStore().samples).toEqual([asset]);
     expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/late.mp3');
     expect(updates()).toHaveLength(0);
@@ -928,10 +928,10 @@ describe('语音设置使用正式设置快照', () => {
     expect(updates()).toHaveLength(1);
     await wrapper.setProps({ active: false });
     await flushPromises();
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'delete_voice_clone_sample')).toHaveLength(0);
     pending.resolve(saved({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': asset.id }));
     await flushPromises();
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample' || command === 'delete_voice_clone_sample')).toHaveLength(0);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'delete_voice_clone_sample')).toHaveLength(0);
     expect(useVoiceLibraryStore().samples).toEqual([asset]);
     expect(useSettingsStore().settings?.voice.tts.cloneSampleId).toBe(asset.id);
   });

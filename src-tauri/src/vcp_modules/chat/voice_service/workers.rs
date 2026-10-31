@@ -315,26 +315,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wav_upload_preserves_original_container_and_checks_native_sample_count() {
-        let data = exported_wav();
-        let audio = prepare_audio(
-            data.clone(),
-            2,
-            VoiceInputEncoding::Wav,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(audio.bytes, data);
-        assert_eq!(audio.encoding, VoiceInputEncoding::Wav);
-        for encoding in [VoiceInputEncoding::Wav, VoiceInputEncoding::Mp3] {
-            let mismatch =
-                prepare_audio(data.clone(), 3, encoding, &CancellationToken::new()).await;
-            assert!(matches!(mismatch, Err(error) if error.contains("样本数量不匹配")));
-        }
-    }
-
-    #[tokio::test]
     async fn both_upload_formats_preserve_samples_across_riff_chunks() {
         let mut data = exported_wav();
         data.extend_from_slice(b"JUNK\x03\0\0\0abc\0data\x04\0\0\0\x05\x06\x07\x08");
@@ -345,6 +325,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(wav.bytes, data);
+        assert_eq!(wav.encoding, VoiceInputEncoding::Wav);
         let mp3 = prepare_audio(data.clone(), 4, VoiceInputEncoding::Mp3, &cancel)
             .await
             .unwrap();
@@ -353,6 +334,10 @@ mod tests {
             mp3.bytes,
             vcp_voice_mp3::encode_pcm16_mono(&[1, 2, 3, 4, 5, 6, 7, 8], || false).unwrap()
         );
+        for encoding in [VoiceInputEncoding::Wav, VoiceInputEncoding::Mp3] {
+            let mismatch = prepare_audio(data.clone(), 5, encoding, &cancel).await;
+            assert!(matches!(mismatch, Err(error) if error.contains("样本数量不匹配")));
+        }
 
         // An exact sample count does not excuse a malformed later RIFF chunk.
         data.extend_from_slice(b"JUNK\x08\0\0\0");

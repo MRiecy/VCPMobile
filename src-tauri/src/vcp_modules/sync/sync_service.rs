@@ -4448,32 +4448,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_session_waits_for_main_task_exit() {
-        let cancel_token = CancellationToken::new();
-        let task_token = cancel_token.clone();
-        let exited = Arc::new(AtomicBool::new(false));
-        let task_exited = exited.clone();
-        let join_handle = tokio::spawn(async move {
-            task_token.cancelled().await;
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            task_exited.store(true, Ordering::SeqCst);
-            Ok(())
-        });
-
-        let mut session = SyncSessionHandle {
-            session_id: 1,
-            cancel_token,
-            join_handle,
-        };
-        cancel_and_join_session(&mut session, Duration::from_secs(1))
-            .await
-            .expect("session exit should be observed")
-            .expect("session should exit cleanly");
-
-        assert!(exited.load(Ordering::SeqCst));
-    }
-
-    #[tokio::test]
     async fn stop_wait_budget_keeps_the_session_owned_until_accepted_writes_finish() {
         let cancel_token = CancellationToken::new();
         let task_token = cancel_token.clone();

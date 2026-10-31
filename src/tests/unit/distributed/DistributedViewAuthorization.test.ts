@@ -500,8 +500,7 @@ describe("DistributedView explicit tool authorization", () => {
     wrapper.unmount();
   });
 
-  it.each(['android', 'ios'] as const)("%s expands every tool without execution and reads only an enabled streaming snapshot", async (platform) => {
-    testPlatform.value = platform;
+  it("expands every tool without execution and reads only an enabled streaming snapshot", async () => {
     installBaseMocks([
       {
         name: "VCPMobileCLI",

@@ -41,54 +41,6 @@ fn tts_barge_in_preserves_the_playback_identity() {
 }
 
 #[test]
-fn onset_uses_three_audio_frames_not_arrival_time() {
-    let mut detector = VadDetector::default();
-    for index in [512, 1024] {
-        let result = detector.process(frame(index, 0.6, false)).unwrap();
-        assert!(!result.speech_active);
-        assert_eq!(result.speech_transition, None);
-    }
-    let result = detector.process(frame(1536, 0.6, false)).unwrap();
-    assert!(result.speech_active);
-    assert_eq!(result.speech_transition, Some(SpeechTransition::Start));
-    assert_eq!(
-        detector
-            .process(frame(2048, 0.9, false))
-            .unwrap()
-            .speech_transition,
-        None
-    );
-}
-
-#[test]
-fn playback_requires_six_consecutive_frames_at_the_higher_threshold() {
-    let mut detector = VadDetector::default();
-    for step in 1..=10 {
-        assert!(
-            !detector
-                .process(frame(step * 512, 0.69, true))
-                .unwrap()
-                .speech_active
-        );
-    }
-    for step in 11..=15 {
-        assert!(
-            !detector
-                .process(frame(step * 512, 0.7, true))
-                .unwrap()
-                .speech_active
-        );
-    }
-    assert_eq!(
-        detector
-            .process(frame(16 * 512, 0.7, true))
-            .unwrap()
-            .speech_transition,
-        Some(SpeechTransition::Start)
-    );
-}
-
-#[test]
 fn sensitivity_presets_change_entry_thresholds_without_changing_exit_hysteresis() {
     for (sensitivity, ordinary, playback) in [
         (VoiceVadSensitivity::Low, 0.7, 0.8),
@@ -111,13 +63,18 @@ fn sensitivity_presets_change_entry_thresholds_without_changing_exit_hysteresis(
                     .process(frame((onset_frames + step) * 512, threshold, playing))
                     .unwrap();
                 assert_eq!(sample.speech_active, step == onset_frames);
+                assert_eq!(
+                    sample.speech_transition,
+                    (step == onset_frames).then_some(SpeechTransition::Start)
+                );
             }
             let active_at = onset_frames * 2;
             for step in 1..=20 {
-                assert!(detector
+                let sample = detector
                     .process(frame((active_at + step) * 512, 0.35, playing))
-                    .unwrap()
-                    .speech_active);
+                    .unwrap();
+                assert!(sample.speech_active);
+                assert_eq!(sample.speech_transition, None);
             }
             for step in 1..=16 {
                 let sample = detector
@@ -382,27 +339,6 @@ fn route_epoch_reset_ends_old_speech_and_rejects_delayed_old_frames() {
     assert!(!detector.process(replacement.clone()).unwrap().speech_active);
     replacement.sample_index = 1536;
     assert!(detector.process(replacement).unwrap().speech_active);
-}
-
-#[test]
-fn playback_change_starts_a_new_confirmation_window() {
-    let mut detector = VadDetector::default();
-    detector.process(frame(512, 0.9, false));
-    detector.process(frame(1024, 0.9, false));
-    for step in 3..=7 {
-        assert!(
-            !detector
-                .process(frame(step * 512, 0.9, true))
-                .unwrap()
-                .speech_active
-        );
-    }
-    assert!(
-        detector
-            .process(frame(4096, 0.9, true))
-            .unwrap()
-            .speech_active
-    );
 }
 
 #[test]

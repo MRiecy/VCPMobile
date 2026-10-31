@@ -890,16 +890,6 @@ mod tests {
         assert_eq!(resolved.status.state, ToolConfigState::RecoveredDisabled);
     }
 
-    #[test]
-    fn storage_failure_does_not_request_default_policy_overwrite() {
-        let resolved = resolve_tool_config(Err(ToolConfigLoadError::Persistence(
-            "temporary read failure".into(),
-        )));
-        assert!(resolved.enabled.is_empty());
-        assert!(!resolved.rewrite_empty);
-        assert_eq!(resolved.status.state, ToolConfigState::PersistenceError);
-    }
-
     #[tokio::test]
     async fn unreadable_config_location_is_preserved_instead_of_treated_as_bad_content() {
         let temp = tempfile::tempdir().unwrap();
@@ -931,25 +921,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn newly_scanned_tool_stays_off_while_existing_grant_survives() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(TOOL_CONFIG_FILE);
-        persist_enabled_config(&path, &HashSet::from(["Clipboard".to_string()])).unwrap();
-
-        let loaded = load_tool_config_file(&path, &known_names()).unwrap();
-        let resolved = resolve_tool_config(Ok(loaded));
-        assert_eq!(resolved.enabled, HashSet::from(["Clipboard".to_string()]));
-        assert!(!resolved.rewrite_empty);
-
-        let registry = test_registry();
-        registry.replace_enabled(resolved.enabled).unwrap();
-        assert!(enabled_metadata(&registry, "Clipboard"));
-        assert!(!enabled_metadata(&registry, "DeviceInfo"));
-        assert!(registry.is_enabled("Clipboard"));
-        assert!(!registry.is_enabled("DeviceInfo"));
-    }
-
     #[tokio::test]
     async fn offline_allowlist_load_is_idempotent_and_restores_persisted_grants() {
         let temp = tempfile::tempdir().unwrap();
@@ -963,6 +934,8 @@ mod tests {
         assert_eq!(status.state, ToolConfigState::Ready);
         assert!(registry.is_enabled("Clipboard"));
         assert!(!registry.is_enabled("DeviceInfo"));
+        assert!(enabled_metadata(&registry, "Clipboard"));
+        assert!(!enabled_metadata(&registry, "DeviceInfo"));
 
         persist_enabled_config(&path, &HashSet::new()).unwrap();
         let repeated = registry

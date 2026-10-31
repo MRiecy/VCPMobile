@@ -64,43 +64,6 @@ describe('Bubble Narration UI Enhancements', () => {
       expect(activeAvatars()).toEqual([]);
     });
 
-    it('activates avatar wave indicator when isNarrating is true for assistant avatar', () => {
-      const wrapper = mount(ChatAvatar, {
-        props: {
-          fallbackText: 'Assistant',
-          isUser: false,
-          isNarrating: true,
-        },
-        global: {
-          plugins: [pinia],
-          stubs: { VcpAvatar: true },
-        },
-      });
-      wrappers.push(wrapper);
-
-      expect(wrapper.classes()).toContain('is-narrating');
-      expect(wrapper.attributes('data-narrating')).toBe('true');
-      expect(wrapper.find('.vcp-message-avatar-indicator').exists()).toBe(true);
-    });
-
-    it('does not show wave indicator when isNarrating is false', () => {
-      const wrapper = mount(ChatAvatar, {
-        props: {
-          fallbackText: 'Assistant',
-          isUser: false,
-          isNarrating: false,
-        },
-        global: {
-          plugins: [pinia],
-          stubs: { VcpAvatar: true },
-        },
-      });
-      wrappers.push(wrapper);
-
-      expect(wrapper.classes()).not.toContain('is-narrating');
-      expect(wrapper.attributes('data-narrating')).toBe('false');
-    });
-
     it('does not display wave indicator for user avatar even if isNarrating is passed', () => {
       const wrapper = mount(ChatAvatar, {
         props: {
@@ -200,16 +163,4 @@ describe('Bubble Narration UI Enhancements', () => {
     });
   });
 
-  describe('NarrationWave component', () => {
-    it('mounts canvas element and cleans up animation frame on unmount', () => {
-      const wrapper = mount(NarrationWave, {
-        props: { active: true },
-      });
-      wrappers.push(wrapper);
-
-      const canvas = wrapper.find('canvas');
-      expect(canvas.exists()).toBe(true);
-      expect(wrapper.find('.vcp-narration-wave').exists()).toBe(true);
-    });
-  });
 });

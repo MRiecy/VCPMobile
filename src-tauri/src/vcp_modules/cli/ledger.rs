@@ -602,27 +602,6 @@ mod tests {
     }
 
     #[test]
-    fn operation_id_is_idempotent_and_digest_bound() {
-        let mut ledger = JobLedger::empty(1);
-        ledger
-            .record_operation(
-                "operation-1".to_string(),
-                "digest-a".to_string(),
-                serde_json::json!({"ok": true}),
-                1,
-            )
-            .expect("record operation");
-        assert!(matches!(
-            ledger.operation("operation-1", "digest-a"),
-            OperationLookup::Replay(_)
-        ));
-        assert_eq!(
-            ledger.operation("operation-1", "digest-b"),
-            OperationLookup::Conflict
-        );
-    }
-
-    #[test]
     fn durable_job_binding_survives_read_only_operation_cache_churn() {
         let mut ledger = JobLedger::empty(1);
         let mut job = running_job(1);

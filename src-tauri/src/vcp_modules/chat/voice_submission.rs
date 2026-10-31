@@ -224,6 +224,9 @@ mod tests {
         assert!(old.is_cancelled());
         assert!(turns.try_acquire(target.clone()).is_err());
 
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        assert!(futures_util::poll!(&mut admission).is_pending());
+
         drop(old);
         let std::task::Poll::Ready(Ok(next)) = futures_util::poll!(&mut admission) else {
             panic!("release must resume admission without advancing the clock");
@@ -232,24 +235,6 @@ mod tests {
         cancellation.cancel();
         assert!(!next.is_cancelled(), "the group and voice origin have separate lifetimes");
         assert!(turns.try_acquire(target.clone()).is_err());
-        drop(next);
-        assert!(turns.try_acquire(target).is_ok());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn group_admission_waits_for_real_release_without_a_timer_deadline() {
-        let turns = ActiveGroupTurns::default();
-        let target = TopicKey::new("group", "group", "topic");
-        let old = turns.try_acquire(target.clone()).unwrap();
-        let cancellation = CancellationToken::new();
-        let mut admission = Box::pin(acquire_voice_group_turn(&turns, &target, &cancellation));
-        assert!(futures_util::poll!(&mut admission).is_pending());
-        tokio::time::advance(std::time::Duration::from_secs(30)).await;
-        assert!(futures_util::poll!(&mut admission).is_pending());
-        assert!(old.is_cancelled());
-        assert!(turns.try_acquire(target.clone()).is_err());
-        drop(old);
-        let next = admission.await.unwrap();
         drop(next);
         assert!(turns.try_acquire(target).is_ok());
     }

@@ -2008,143 +2008,50 @@ x' \\ y'
     }
 
     #[test]
-    fn test_complex_bold_quote_parsing() {
-        // 1. 测试单加粗块内包裹两对引号
-        let text_single_bold = "看哪些**“应该加粗的部分没有加粗”，或者“不该加粗的部分泄漏了”**";
-        let nodes_single_bold = parse_markdown_to_ast(text_single_bold);
-        assert_eq!(nodes_single_bold.len(), 1);
-        if let MarkdownNode::Paragraph { children, .. } = &nodes_single_bold[0] {
-            assert_eq!(children.len(), 2);
-            assert_eq!(children[0], InlineNode::text("看哪些".to_string()));
-            if let InlineNode::Strong {
-                children: strong_children,
-                ..
-            } = &children[1]
-            {
-                // \u{200b}, VcpCustom("quote"), Text("，或者"), VcpCustom("quote"), \u{200b}
-                assert_eq!(strong_children.len(), 5);
-                assert_eq!(strong_children[0], InlineNode::text("\u{200b}".to_string()));
-                assert_eq!(strong_children[4], InlineNode::text("\u{200b}".to_string()));
-
-                if let InlineNode::VcpCustom {
-                    kind,
-                    children: Some(q_ch),
-                    ..
-                } = &strong_children[1]
-                {
-                    assert_eq!(kind, "quote");
-                    assert_eq!(q_ch[0], InlineNode::text("“".to_string()));
-                    assert_eq!(
-                        q_ch[1],
-                        InlineNode::text("应该加粗的部分没有加粗".to_string())
-                    );
-                    assert_eq!(q_ch[2], InlineNode::text("”".to_string()));
-                }
-
-                assert_eq!(strong_children[2], InlineNode::text("，或者".to_string()));
-
-                if let InlineNode::VcpCustom {
-                    kind,
-                    children: Some(q_ch),
-                    ..
-                } = &strong_children[3]
-                {
-                    assert_eq!(kind, "quote");
-                    assert_eq!(q_ch[0], InlineNode::text("“".to_string()));
-                    assert_eq!(
-                        q_ch[1],
-                        InlineNode::text("不该加粗的部分泄漏了".to_string())
-                    );
-                    assert_eq!(q_ch[2], InlineNode::text("”".to_string()));
-                }
-            } else {
-                panic!("Expected Strong");
+    fn bold_quotes_preserve_their_inline_container_boundaries() {
+        let quote = |body: &str| expected_quote("“", vec![InlineNode::text(body.into())], "”");
+        let bold = |children| InlineNode::strong(children);
+        let edge = || InlineNode::text("\u{200b}".into());
+        for (input, mut expected) in [
+            (
+                "看哪些**“应该加粗”，或者“不该泄漏”**",
+                vec![
+                    InlineNode::text("看哪些".into()),
+                    bold(vec![
+                        edge(),
+                        quote("应该加粗"),
+                        InlineNode::text("，或者".into()),
+                        quote("不该泄漏"),
+                        edge(),
+                    ]),
+                ],
+            ),
+            (
+                "看哪些**“应该加粗”**，或者**“不该泄漏”**",
+                vec![
+                    InlineNode::text("看哪些".into()),
+                    bold(vec![edge(), quote("应该加粗"), edge()]),
+                    InlineNode::text("，或者".into()),
+                    bold(vec![edge(), quote("不该泄漏"), edge()]),
+                ],
+            ),
+            (
+                "正文**「加粗内容」**：",
+                vec![
+                    InlineNode::text("正文".into()),
+                    bold(vec![InlineNode::text("\u{200b}「加粗内容」\u{200b}".into())]),
+                    InlineNode::text("：".into()),
+                ],
+            ),
+        ] {
+            for node in &mut expected {
+                node.compute_hashes_recursively();
             }
-        }
-
-        // 2. 测试长文本行隔离及多层复杂嵌套
-        let text1 = "主人，如果真的是由于“跨容器截断”导致的 DOM 崩溃，我们在前端解析器的 `contentProcessor.js` 里，必须要加装一个**「自愈判定阀」**：\n\n> **核心逻辑**：只有当 `Marked.parser` 的当前 **AST 嵌套深度等于 0（`astDepth === 0`）**，且不处于任何未闭合的代码块/表格内部时，才允许执行 `<!--brk-->` 物理切片！\n> 如果在深度嵌套里遇到了 `<!--brk-->`，则将其自动**挂起并延后**，直到检测到当前容器完全 `</div>` 闭合，再在根节点上执行优雅 of “呼吸切片”！";
-        let nodes1 = parse_markdown_to_ast(text1);
-        assert_eq!(nodes1.len(), 2);
-
-        // 验证第一行中的“自愈判定阀”被正确加粗了
-        if let MarkdownNode::Paragraph { children, .. } = &nodes1[0] {
-            // “自愈判定阀”在第 6 个子节点（i = 5）
-            if let InlineNode::Strong {
-                children: strong_children,
-                ..
-            } = &children[5]
-            {
-                assert_eq!(strong_children.len(), 1);
-                assert_eq!(
-                    strong_children[0],
-                    InlineNode::text("\u{200b}「自愈判定阀」\u{200b}".to_string())
-                );
-            } else {
-                panic!("Expected Strong for self-cure valve");
-            }
-        }
-
-        // 3. 原本的四星号并排加粗引号测试
-        let text = "看哪些**“应该加粗的部分没有加粗”**，或者**“不该加粗的部分泄漏了”**";
-        let nodes = parse_markdown_to_ast(text);
-        assert_eq!(nodes.len(), 1);
-        if let MarkdownNode::Paragraph { children, .. } = &nodes[0] {
-            assert_eq!(children.len(), 4);
-            assert_eq!(children[0], InlineNode::text("看哪些".to_string()));
-            if let InlineNode::Strong {
-                children: strong_children,
-                ..
-            } = &children[1]
-            {
-                assert_eq!(strong_children.len(), 3);
-                assert_eq!(strong_children[0], InlineNode::text("\u{200b}".to_string()));
-                assert_eq!(strong_children[2], InlineNode::text("\u{200b}".to_string()));
-                if let InlineNode::VcpCustom {
-                    kind,
-                    children: Some(q_ch),
-                    ..
-                } = &strong_children[1]
-                {
-                    assert_eq!(kind, "quote");
-                    assert_eq!(
-                        q_ch[1],
-                        InlineNode::text("应该加粗的部分没有加粗".to_string())
-                    );
-                } else {
-                    panic!("Expected quote 1");
-                }
-            } else {
-                panic!("Expected Strong 1");
-            }
-
-            assert_eq!(children[2], InlineNode::text("，或者".to_string()));
-
-            if let InlineNode::Strong {
-                children: strong_children,
-                ..
-            } = &children[3]
-            {
-                assert_eq!(strong_children.len(), 3);
-                assert_eq!(strong_children[0], InlineNode::text("\u{200b}".to_string()));
-                assert_eq!(strong_children[2], InlineNode::text("\u{200b}".to_string()));
-                if let InlineNode::VcpCustom {
-                    kind,
-                    children: Some(q_ch),
-                    ..
-                } = &strong_children[1]
-                {
-                    assert_eq!(kind, "quote");
-                    assert_eq!(
-                        q_ch[1],
-                        InlineNode::text("不该加粗的部分泄漏了".to_string())
-                    );
-                } else {
-                    panic!("Expected quote 2");
-                }
-            } else {
-                panic!("Expected Strong 2");
-            }
+            let nodes = parse_markdown_to_ast(input);
+            let [MarkdownNode::Paragraph { children, .. }] = nodes.as_slice() else {
+                panic!("expected one paragraph for {input}: {nodes:?}");
+            };
+            assert_eq!(children.as_slice(), expected.as_slice(), "{input}");
         }
     }
 

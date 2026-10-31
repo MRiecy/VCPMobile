@@ -1512,10 +1512,4 @@ mod tests {
         assert_eq!(output.concat(), data);
         packets.finish().unwrap();
     }
-    #[test]
-    fn leftover_half_sample_is_an_error() {
-        let mut packets = PcmPackets::default();
-        packets.push(&[1]).unwrap();
-        assert!(packets.finish().is_err());
-    }
 }

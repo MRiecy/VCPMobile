@@ -1373,25 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn thought_tail_is_always_plain_text_regardless_of_size() {
-        // 小体量思维链：同样走纯文本投影，不做 md AST（** 保持原文）
-        let mut small = AuroraBuffer::new();
-        small.append_chunk("<think>**加粗不应被解析**");
-        assert_eq!(small.process_queue(), (false, true));
-        assert_eq!(
-            small.tail_projection.as_ref().map(|p| p.mode),
-            Some(TailRenderMode::Plain)
-        );
-        assert!(small.prev_tail_ast.is_empty());
-        assert!(matches!(
-            small.current_tail_wire_block(),
-            Some(StreamBlock::Thought {
-                ref content,
-                is_complete: false,
-                ..
-            }) if content == "**加粗不应被解析**"
-        ));
-
+    fn oversized_thought_tail_keeps_plain_text_and_incremental_appends() {
         // 超限思维链：不触发 64KB 降级（它本就恒为 Plain），且不受上限约束继续增量
         let mut buffer = AuroraBuffer::new();
         let body = "长".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 1);
@@ -1884,33 +1866,6 @@ mod tests {
             assert_eq!(fast_code, ref_code, "code mismatch for {tail:?}");
             assert_eq!(fast_lang, ref_lang, "lang mismatch for {tail:?}");
         }
-    }
-
-    #[test]
-    fn code_fence_tail_fast_path_drives_incremental_patch_flow() {
-        // 快速路径产出的节点必须无缝接入既有增量高亮管线：首帧 Add，严格追加帧 PatchCode
-        let mut buffer = AuroraBuffer::new();
-        buffer.append_chunk("```html\n<div>hi</div>\n");
-        buffer.process_queue();
-        assert_eq!(
-            buffer.tail_projection.as_ref().map(|p| p.block_type),
-            Some(TailBlockType::HtmlPreview)
-        );
-        let first = buffer.take_tail_frame().expect("first frame");
-        assert!(
-            matches!(first.mutations.as_slice(), [AstMutation::Add { .. }]),
-            "first frame must Add the code node, got {:?}",
-            first.mutations
-        );
-
-        buffer.append_chunk("<p>more</p>\n");
-        buffer.process_queue();
-        let second = buffer.take_tail_frame().expect("second frame");
-        assert!(
-            matches!(second.mutations.as_slice(), [AstMutation::PatchCode { .. }]),
-            "strict append must produce PatchCode, got {:?}",
-            second.mutations
-        );
     }
 
     #[test]
