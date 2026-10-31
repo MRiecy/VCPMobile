@@ -147,7 +147,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `eslint-plugin-prettier` | `^5.5.7` | 与 `prettier`/`eslint` 同步 | npm | 当前 lint 不启用 prettier/prettier 格式规则 |
 | `@types/node` | `^24.19.2` | 与 Node 主版本同步 | npm | 工具与测试使用的 Node 类型 |
 | `vitest` / `@vitest/coverage-v8` | `^5.0.5` / `^5.0.5` | 同步检查 | npm | 前端测试与覆盖率 |
-| `happy-dom` | `^21.0.3` | 与测试环境同步检查 | npm | DOM 测试环境；iframe fixture 明确使用无网络 `srcdoc` |
+| `happy-dom` | `^21.0.4` | 与测试环境同步检查 | npm | DOM 测试环境；iframe fixture 明确使用无网络 `srcdoc` |
 | `@vue/test-utils` | `^2.5.1` | 与 Vue 测试同步检查 | npm | Vue 组件测试 |
 | `@pinia/testing` | `^2.0.2` | 与 Pinia 同步检查 | npm | 与 Pinia 4 配套 |
 | `@vue/devtools-api` | `^8.2.1` | 与 Pinia 同步检查 | npm | 显式满足 Pinia 的开发工具 peer 依赖 |
