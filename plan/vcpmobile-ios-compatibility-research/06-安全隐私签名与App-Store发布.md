@@ -2,17 +2,9 @@
 
 > 2026-10-09 修订：沿用 D8/D13 的实验性未签名产物路线，将已批准的系统功能、分享扩展与后台专项纳入声明和用户签名输入；不扩大正式签名或付费 Team 范围。
 
-## 当前分发范围与工程输入
+## 实验性分发方案（2026-10-09）
 
-### 产物路线
-
-Tauri CLI 2.11 的[发布说明](https://v2.tauri.app/release/tauri-cli/v2.11.0/)增加了 `--no-sign` 和 `--archive-only`。G2 阶段验收在 GitHub Actions 中执行锁定 CLI 的 device release 构建：
-
-```text
-pnpm tauri ios build --target aarch64 --archive-only --no-sign --ci
-```
-
-首个用户产物从该 device archive 提取，按 D8 作为 Android Release 的实验性附属资产。G1 debug 接入检查及按需 Simulator 诊断统一见 07；实施发布时遵守仓库的明确发布授权规则。
+当时研究了 Tauri CLI 2.11 的无签名归档支持，并拟从 release device archive 提取用户自签资产。下图保留当时评估的打包路线。现行产物和签名说明见 [iOS 构建说明](../../docs/IOS_BUILD.md)。[Tauri 发布说明](https://v2.tauri.app/release/tauri-cli/v2.11.0/)
 
 ```text
 device .xcarchive / Products / Applications / <Product>.app

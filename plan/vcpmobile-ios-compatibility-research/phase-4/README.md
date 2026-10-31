@@ -42,7 +42,7 @@ Files/PHPicker/security scope/staging/ImageIO/CAS、拍照、相册保存、图�
 
 ## 实施与后续诊断
 
-导入 operation、系统操作结果、图像用途与临时资源释放已沿调用链连接。下一次手动 iOS stage diagnostics 使用 `phase=phase-4`，检查固定 Xcode 26.2 下的完整应用及分享扩展。
+本阶段沿生产调用链核对了导入、系统操作结果、图像用途和临时资源释放，尚待验证固定 Xcode 26.2 下的完整应用与分享扩展。
 
 各专题保留设计职责和实现依据；实际执行结果集中写入实施记录，不将计划中的验证项目自动记为通过。
 
@@ -50,4 +50,4 @@ Files/PHPicker/security scope/staging/ImageIO/CAS、拍照、相册保存、图�
 
 路径 containment/hash/TTL/取消/清理闭合；双向分享具有持久交接和消费确认；权限、系统完成结果与提示一致；iPhone/iPad 窗口输入与强渲染覆盖目标分支。用途声明、扩展与资源输入交 Phase 6 集成 G2。
 
-只登记实际执行的结果和仍待处理的问题；Apple 构建集中在 G1/G2 手动 Actions。进入下一阶段依据具体依赖和问题归属，不因独立待办阻断其他工作。
+操作入口见 [iOS 构建说明](../../../docs/IOS_BUILD.md)，阶段记录只登记对应提交实际取得的构建或运行证据。

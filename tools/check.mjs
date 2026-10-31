@@ -69,6 +69,7 @@ async function checkRelease() {
     checkGeneratedTrees,
     () => run('rustfmt', 'cargo', ['fmt', '--all', '--', '--check'], backend),
     checkSources,
+    () => pnpm('iOS project and archive checks', ['check:ios']),
     () => run('Clippy', 'cargo', ['clippy', '--locked', '--workspace', '--lib', '--tests', '--', '-D', 'warnings'], backend),
     () => pnpm('frontend tests', ['test:run']),
     () => run('Rust unit tests', 'cargo', ['test', '--locked', '--workspace', '--lib'], backend),

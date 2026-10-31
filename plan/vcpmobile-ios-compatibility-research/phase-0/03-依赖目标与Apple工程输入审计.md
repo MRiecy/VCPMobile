@@ -99,7 +99,7 @@ cargo tree --locked --offline --target aarch64-apple-ios -i swift-rs --depth 2
 
 `xcode_script.rs` 明确区分 device `aarch64-apple-ios` 与 simulator `aarch64-apple-ios-sim`，使用 Xcode 传入 SDK 并编译 Rust 库；`libapp.a` 为工程输入名称，不能要求更改现有 `vcp_mobile_lib` crate 名来迎合它。[锁定 Xcode script](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-cli/src/mobile/ios/xcode_script.rs)。
 
-| 输入/输出 | 唯一维护位置或规则 | 阶段 |
+| 输入/输出 | Phase 0 当时规划的维护位置或规则 | 阶段 |
 |---|---|---|
 | Tauri Apple 配置 | 受版本管理的 `src-tauri/tauri.ios.conf.json`；写 minimum、bundle/framework/resource 平台输入 | Phase 2 |
 | 插件 Swift | 受版本管理的 `src-tauri/plugins/vcp-mobile/ios/Package.swift`、`Sources/**` | Phase 2/4/5 |
@@ -117,18 +117,7 @@ CLI build 按顺序合并生成 Info.plist、版本值、根 `Info.plist`、`Inf
 
 **G1/G2 容易漏掉的前置项**：同一 `build.rs::run` 在非 `--open` 时调用 `ensure_ios_runtime_installed()`；`ios/mod.rs` 通过 `xcrun simctl list runtimes --json` 检查 iOS runtime 名称。因此 device archive 也要求 runner 已安装 iOS runtime。这是锁定 CLI 的预检查依赖，不增加固定 Simulator 旅程。Phase 2 工程准备记录 runner 库存，G1/G2 再核对实际安装状态。[CLI iOS 环境预检查](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.11.4/crates/tauri-cli/src/mobile/ios/mod.rs)。
 
-当时已落实的 ignore 规则包括：
-
-```gitignore
-/src-tauri/gen/apple/
-/src-tauri/plugins/vcp-mobile/.tauri/
-/src-tauri/plugins/vcp-mobile/ios/.build/
-/src-tauri/plugins/vcp-mobile/ios/.swiftpm/
-*.p12
-*.p8
-*.mobileprovision
-*.provisionprofile
-```
+当时的 ignore 规则覆盖整棵 Apple 生成目录、插件缓存和签名材料。现在的原生工程输入和生成边界见 [iOS 构建说明](../../../docs/IOS_BUILD.md)。
 
 保留配置源、Swift 源、plist、xcprivacy、entitlements 和受控 resolution 输入可追踪；不使用 `*.plist`、`*.swift`、`*.entitlements` 之类宽泛规则。最终 Bundle ID、task identifier 前缀及 entitlement 改写仍按 D13 由 Phase 6 打包和用户签名说明联动。
 

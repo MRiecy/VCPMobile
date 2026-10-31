@@ -1,0 +1,92 @@
+name: iOS Device Archive
+run-name: iOS ${{ inputs.profile }} archive · ${{ github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Build profile
+        type: choice
+        default: release
+        options: [release, debug]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-archive-${{ github.ref }}-${{ inputs.profile }}
+  cancel-in-progress: true
+
+jobs:
+  device-archive:
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      IOS_ARCHIVE_PROFILE: ${{ inputs.profile }}
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Load pinned toolchain versions
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' .github/toolchain.env >> "$GITHUB_ENV"
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Select Xcode and install XcodeGen
+        run: |
+          developer_dir="/Applications/Xcode_${IOS_XCODE_VERSION}.app/Contents/Developer"
+          sudo -n xcode-select --switch "$developer_dir"
+          echo "DEVELOPER_DIR=$developer_dir" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+          cd "$RUNNER_TEMP"
+          curl --fail --show-error --location --output xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${IOS_XCODEGEN_VERSION}/xcodegen.zip"
+          echo "$IOS_XCODEGEN_SHA256  xcodegen.zip" | shasum -a 256 --check
+          tar -xf xcodegen.zip
+          chmod +x xcodegen/bin/xcodegen
+          ./xcodegen/bin/xcodegen --version
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Install the Rust device target
+        run: rustup target add aarch64-apple-ios
+      - name: Set up Python for ONNX Runtime
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Build the voice runtime for iPhoneOS
+        run: |
+          python3 -m venv "$RUNNER_TEMP/voice-venv"
+          source "$RUNNER_TEMP/voice-venv/bin/activate"
+          python -m pip install --disable-pip-version-check -r src-tauri/runtime-assets/voice/requirements-build.txt
+          python src-tauri/runtime-assets/voice/build_runtime.py ios --cache-dir "$RUNNER_TEMP/voice-cache"
+      - name: Generate the Xcode project
+        run: pnpm tauri ios init --ci --skip-targets-install
+      - name: Check the Apple project and archive tools
+        run: pnpm check:ios
+      - name: Build unsigned device archive
+        run: node tools/ios/build-archive.mjs "$IOS_ARCHIVE_PROFILE"
+      - name: Verify and package the archive
+        run: node tools/ios/verify-archive.mjs src-tauri/gen/apple "$RUNNER_TEMP/ios-artifacts"
+      - name: Upload verified archive and manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-${{ inputs.profile }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ios-artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

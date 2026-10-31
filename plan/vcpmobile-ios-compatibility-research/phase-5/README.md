@@ -23,7 +23,7 @@
 |---|---|
 | `pnpm check` | 通过；Vue/TypeScript 与 host Rust 静态检查，不编译 Swift |
 | `cargo test --locked -p tauri-plugin-vcp-mobile --lib` | 5 项通过；覆盖原生 receiver 保活、故障快照及文件边界，属于 host 执行证据 |
-| `python -B src-tauri/ios/scripts/test_g1.py` | 7 项通过；验证实际扩展源码复制、编译清单、目标隔离及诊断输出，不调用 Apple 构建 |
+| 当时的 Apple 工程输入测试 | 7 项通过，覆盖扩展源码装配、target 隔离和诊断输出，未执行 Apple 构建 |
 | 差异与入口核对 | 差异检查通过；36 个原生命令入口完整唯一，功能迁移未增加 SwiftPM target |
 | Apple/iOS | 本轮未取得编译、链接或原生运行证据；固定工具链的 G1 及 Phase 6 集成/打包仍待执行 |
 
@@ -58,4 +58,4 @@ Phase 2 native 接入、Phase 3 attempt/terminal/settle 契约；与 Phase 4 可
 
 显式任务租约与原业务终态保持一致；获取失败、中断、正常结束和取消均有对应资源处理；无请求时音频和任务常亮均释放。仅声明实际使用的 audio 后台模式。源码审查、后续编译结果及未验证的后台行为分别记录，并入 G2；不将静音播放或常亮表述成严格后台保证。
 
-只登记实际执行的结果和仍待处理的问题；Apple 构建集中在 G1/G2 手动 Actions。进入下一阶段依据具体依赖和问题归属，不因独立待办阻断其他工作。
+操作入口见 [iOS 构建说明](../../../docs/IOS_BUILD.md)，阶段记录只登记对应提交实际取得的构建或运行证据。

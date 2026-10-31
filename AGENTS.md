@@ -30,7 +30,7 @@
 - **Android WebView 基线**：内核须为 117 或更新版本，与 Android minSdk 26 分别管理；共享前端 JS/CSS 目标为 `chrome117` / `safari26.0`。启动后的兼容说明复用“帮助与指引”，不承担旧内核启动失败前的检测或兜底。
 - **iOS 运行与构建基线**：
   - **最低系统**：iOS/iPadOS 26.0（Tauri 配置与项目 Swift manifest 同步维护，高于 26.0 的 API 须处理实际 availability 与运行条件；早期 15.0 历史记录不再约束当前产品）。
-  - **实施与审计**：严格沿用 `plan/vcpmobile-ios-compatibility-research/09-Magi综合裁决与待决策清单.md` 的 D1–D19。Windows 环境执行日常源码审计，Apple 构建统一复用 `ios-g1.yml` 的 device archive 链进行按需诊断，G1 接入与 G2 集成/打包分别验收。
+  - **实施与审计**：沿用 `plan/vcpmobile-ios-compatibility-research/09-Magi综合裁决与待决策清单.md` 的产品裁决。Windows 上运行 `pnpm check:ios` 检查输入与归档校验逻辑，Apple device archive 在 GitHub Actions 手动构建。见 [iOS 构建说明](docs/IOS_BUILD.md)。
   - **测试与签名边界**：不建设项目 iOS 实机测试体系，正式签名与付费 Team 均不在项目范围内；Android 正式链路继续保留，双端构建结果分别独立记录。
   - **功能范围依据**：遵循 [跨平台开发规范](docs/CROSS_PLATFORM_DEVELOPMENT.md)；功能范围与权限提示以 [Phase 2 功能权限与提示审议表](plan/vcpmobile-ios-compatibility-research/phase-2/09-功能权限与提示审议表.md) 为权威依据，新增意见优先于旧延期和隐藏建议。
 ---
@@ -131,7 +131,7 @@ VCPMobile/
 
 ### 2.2 移动端原生插件（`tauri-plugin-vcp-mobile`）
 
-`src-tauri/plugins/vcp-mobile/` 是移动端原生能力边界。修改该子树前先读取其 [`AGENTS.md`](src-tauri/plugins/vcp-mobile/AGENTS.md)，再从当前 Rust、Kotlin、Swift、TypeScript 或 C++ 生产代码追踪实际入口与所有者。iOS 工程输入与 G1 脚本在 `src-tauri/ios/`；生成树仍可重建，阶段证据见对应 `phase-2/` 文档。
+`src-tauri/plugins/vcp-mobile/` 是移动端原生能力边界。修改该子树前先读取其 [`AGENTS.md`](src-tauri/plugins/vcp-mobile/AGENTS.md)，再从当前 Rust、Kotlin、Swift、TypeScript 或 C++ 生产代码追踪实际入口与所有者。iOS 的版本管理输入与 XcodeGen 工程模板在 `src-tauri/gen/apple/`，维护边界见 [iOS 构建说明](docs/IOS_BUILD.md)。
 
 ---
 

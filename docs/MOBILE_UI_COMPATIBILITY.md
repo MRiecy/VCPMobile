@@ -123,7 +123,7 @@ interface NativeInsetsSnapshot {
 
 ## 6. 可检测契约
 
-以下保留 Android UI 改动的验证要求。iOS 日常按源码入口、目标 cfg、字段、分支和资源释放逐条审计，必要时运行 host 辅助检查；Apple 构建只在 G1/G2 阶段通过 GitHub Actions 手动执行。项目现在及后续均不建设 iOS 实机测试体系，也不将下节 Android 设备矩阵扩展为 iOS 门禁。具体执行边界见 [07](../plan/vcpmobile-ios-compatibility-research/07-CI测试矩阵与无设备验证边界.md)。
+以下列出 Android UI 改动的验证要求。iOS 日常按源码入口、目标 cfg、字段、分支和资源释放逐条审计，必要时运行 host 辅助检查。需要 Apple 编译证据时手动运行 GitHub Actions 归档。项目不建设 iOS 实机测试体系。见 [iOS 构建说明](IOS_BUILD.md)。
 
 修改 Android shell、侧栏、Overlay、CSS fallback 或 Insets 时，按根规范完成 `pnpm check`，并围绕本次尚未确定的问题选择验证。布局变化关注实际窗口与抽屉可达性；构建或样式转换关注生产生成物；Insets 变化关注单位、键盘净增量和事件重放；消息界面变化关注受影响的渲染与交互。无需为无关改动重复整套测试矩阵。
 

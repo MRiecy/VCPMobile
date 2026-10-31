@@ -1,6 +1,6 @@
-# Share Extension 工程与交接输入
+# Share Extension 的输入与交付
 
-`g1.py overlay` 将本目录顶层的实际 Swift 源码和配套声明复制至生成树的 `VCPShare/`，添加独立 iOS 26.0 `app-extension` target，并由主 target 以 embed dependency 嵌入 `PlugIns/VCPShare.appex`。复制与编译使用同一份源码清单，不链接 Tauri 主插件；`APPLICATION_EXTENSION_API_ONLY=YES`。版本读取当前 Tauri 配置，默认 `CFBundleVersion` 与产品版本一致。
+本目录是独立的 iOS 分享扩展 target。主应用将扩展嵌入 `PlugIns/VCPShare.appex`。扩展使用系统分享接口接收数据，经 App Group 容器交给主应用，原生代码分别负责以下步骤。
 
 - `ShareViewController.swift`：原生界面、系统输入与 `extensionContext` 完成/取消回传。
 - `ShareAcquisition.swift`：provider 获取、有界复制、取消、在途读取排空与唯一终态裁决；异步工作持有自身，UI 回调弱引用控制器。
@@ -16,12 +16,4 @@
 
 Darwin 通知只提示重新读取当前槽位；启动/READY/回前台也会对账。进程终止后，未被持有的 receiving lease 表示获取已中断，显示失败；ready/draft 从本次原件恢复。终态先于文件校验处理，重复发送返回原 message ID。旧目录是待清理副本，不是分享队列。
 
-Phase 6 重签时需要一起核对：
-
-- 主 bundle ID：`com.vcp.avatar`；扩展 bundle ID：`com.vcp.avatar.share`。
-- 两个 target 的 `com.apple.security.application-groups`：`group.com.vcp.avatar`。
-- 主 `Info.ios.plist` 与扩展 `Info.plist` 的 `VCPShareAppGroup` 必须同步改写；修改组名时，两份最终 entitlement/profile 也必须一致。
-- 保留嵌入的 `.appex`、扩展入口类和 `com.apple.share-services` activation rule；不能只签主可执行文件。
-- 主/扩展版本与最低 iOS 26.0 一致。G1 会核对实际 archive 中的嵌入位置和 Info 字段。
-
-无签 archive 只能证明工程编译/嵌入结构。App Group 授权、重签工具是否保留扩展、系统分享列表、provider 与真实用户交互仍取决于最终安装；本项目不建立 iOS 实机测试体系。
+工程归档、安装者自签和两个 target 的 App Group 配置见 [iOS 构建说明](../../../../docs/IOS_BUILD.md)。

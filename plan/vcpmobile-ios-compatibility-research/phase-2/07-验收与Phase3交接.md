@@ -50,7 +50,7 @@ Android 检查中出现一条 vendored tao `window.rs::hit_test` dead_code 警�
 
 ## 4. G1 尚待执行
 
-[workflow](../../../.github/workflows/ios-g1.yml) 与 [工程说明](../../../src-tauri/ios/README.md) 已可审查。当前源码工作已恢复；推送和手动 G1 没有因此自动执行，实际运行仍按用户授权。取得 Apple 编译/链接及 archive 后再记录对应输入和结果。
+当时已提供手动工作流和工程说明，本轮没有推送或触发 Apple 构建。当前维护入口见 [iOS 构建说明](../../../docs/IOS_BUILD.md)。
 
 G1 提供 Swift/Objective-C 类型与 ABI、iOS Rust 编译、实际链接/配置/资源的工具诊断和 device archive，不再检查人工三 root 集合。产物审查与编译结果分开，build-only 不能证明系统回调已经执行；具体诊断按真实 owner 修复。
 

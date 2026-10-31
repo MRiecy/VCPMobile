@@ -23,7 +23,7 @@
 | 当前工具 | Vitest + happy-dom / cargo test + Criterion / JUnit + Robolectric + MockK / Node.js + adb | ✅ 已落地 |
 | 当前 CI | 单一 `.github/workflows/ci.yml` 执行前端、Rust、生成树、Android JVM 与审计门禁 | ✅ 已落地 |
 | 设备证据 | 具名 Android 设备截图、触控与 WebView 证据 | `DEVICE-EVIDENCE-PENDING` |
-| iOS 验收 | Windows 源码审计；Apple 构建仅在 G1/G2 手动 Actions 执行；现在及后续均不建设 iOS 实机测试体系 | D14/D16；不套用 Android 设备门禁 |
+| iOS 验收 | Windows 源码审计与工程输入检查，GitHub Actions 手动构建 Apple 归档。项目不建设 iOS 实机测试体系 | [iOS 构建说明](IOS_BUILD.md) |
 
 ---
 

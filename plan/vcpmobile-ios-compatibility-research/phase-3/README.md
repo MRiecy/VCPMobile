@@ -58,7 +58,7 @@
 3. Apple 明确将 Scene 因通知建立的响应放在 [connectionOptions.notificationResponse](https://developer.apple.com/documentation/uikit/uiscene/connectionoptions/notificationresponse)；锁定 tao 的首 Scene 不发 `SceneRequested`。本轮 `NativeNotificationSceneBridge.swift` 已在插件初始化时对现有 `TaoSceneDelegate` 的 `scene:willConnectToSession:options:` 接入一次精确转发：先将响应交给原通知 owner 暂存，再完整调用原 IMP，窗口建立仍由 tao 持有。冷/热两条来源使用同一去重与保留的最新快照，不复制 Scene owner。
 4. 上述 hook 的 ABI 按 [Apple Objective-C runtime 声明](https://github.com/apple-oss-distributions/objc4/blob/main/runtime/runtime.h)核对：原 IMP 的 C 函数参数含 receiver、selector 和三个对象参数；`imp_implementationWithBlock` 的 block 仅含 receiver 与三个对象参数，没有 selector。安装必须保留原 IMP、每次转发原方法且保持进程内一次安装；实现落盘后复核实际错误与释放分支。此处为源码设计依据，不代表冷启动通知已经在 iOS 执行验证。
 
-5. 工程输入已由根代理接入：LAN、定位、运动用途声明；配置中的 Network/UserNotifications/CoreMotion/CoreLocation 四个 framework（Metal 已由锁定 CLI 模板提供）；DiskSpace `85F4.1`。锁定 [CLI build](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-cli/src/mobile/ios/build.rs)在 archive 前合并 `Info.ios.plist`，[CLI 配置](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-cli/src/mobile/ios/mod.rs)将 framework 列表送入生成模板，现有 `g1.py::overlay` 复制隐私文件并加入 resources；未改 workflow。这里只确认生成链有实际消费者，最终 bundle 装配仍待 Apple 构建。
+5. 工程输入已由根代理接入：LAN、定位、运动用途声明；配置中的 Network/UserNotifications/CoreMotion/CoreLocation 四个 framework（Metal 已由锁定 CLI 模板提供）；DiskSpace `85F4.1`。锁定 [CLI build](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-cli/src/mobile/ios/build.rs)在 archive 前合并 `Info.ios.plist`，[CLI 配置](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-cli/src/mobile/ios/mod.rs)将 framework 列表送入生成模板，当时使用工程覆盖脚本复制隐私文件并加入 resources，该轮未修改工作流。这里只确认生成链有实际消费者，最终 bundle 装配仍待 Apple 构建。
 
 ### 独立复审发现与处理
 
@@ -98,4 +98,4 @@ NativeDevice/Sensors 的第二轮源码审查覆盖了 Mach 计数/指针容量�
 
 成功/取消/错误 terminal、旧 generation、取消后写入和持久化有明确 owner 与证据；Chat/手动 Sync 不在恢复前台时擅自重发。P3-2 至 P3-5 的真实授权、部分数据缺失、通知点击、节点停止和无原生 API 工具的结果均进入现有消费者；源码完成、host 检查和 Apple 构建分别记录。
 
-只登记实际执行的结果和仍待处理的问题；Apple 构建集中在 G1/G2 手动 Actions。进入下一阶段依据具体依赖和问题归属，不因独立待办阻断其他工作。
+操作入口见 [iOS 构建说明](../../../docs/IOS_BUILD.md)，阶段记录只登记对应提交实际取得的构建或运行证据。

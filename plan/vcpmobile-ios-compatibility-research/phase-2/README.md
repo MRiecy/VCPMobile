@@ -61,4 +61,4 @@ producer→subscribe→bootstrap、窗口恢复和真实注册失败重放已接
 
 完成源码接入闭合，并取得手动 Actions G1 debug device archive 的编译/链接/资源/注册诊断。G1 可独立提供构建事实，不以运行期问题全部修复作为启动前提；禁止以 host check 宣称 Apple 编译通过。
 
-只登记实际执行的结果和仍待处理的问题；Apple 构建集中在 G1/G2 手动 Actions。进入下一阶段依据具体依赖和问题归属，不因独立待办阻断其他工作。
+操作入口见 [iOS 构建说明](../../../docs/IOS_BUILD.md)，阶段记录只登记对应提交实际取得的构建或运行证据。

@@ -10,7 +10,7 @@
 
 2026-10-17：用户批准六项兼容复审修复，并选择 iOS SSE 原生循环静音音频的尽力保活，接受系统中断；常亮维持同步和预渲染刷新两类场景。源码实施及边界见 [Phase 5 收口记录](./phase-5/03-兼容复审修复与iOS尽力保活.md)。本轮按用户要求不执行检查、测试或构建，后续再安排验证和 Phase 6 打包。
 
-2026-10-16：已有 [Phase 3/debug 诊断归档](https://github.com/MRiecy/VCPMobile/actions/runs/38884164944)，提交 `a8482b60`，实际使用 Xcode 16.4 / SDK 18.5。已固定 [iOS stage diagnostics](../../src-tauri/ios/README.md) 使用 Xcode 26.2；修正后及 Phase 4/5 后续源码尚无 Apple 构建结果。G1/G2 的验收职责保留。
+2026-10-16，提交 `a8482b60` 的诊断归档实际使用 Xcode 16.4 / SDK 18.5。该记录对应当次提交与工具版本。[原始运行](https://github.com/MRiecy/VCPMobile/actions/runs/38884164944) · [现行 iOS 构建说明](../../docs/IOS_BUILD.md)
 
 2026-10-09：沿既有 `plugin-os` 同步身份与 Vue 运行时分支进入 Phase 3，接入共同通知权限、本 App 本地通知/冷启动点击、设备/传感器、剪贴板与 iOS Distributed，并处理 Chat 输出接管、Sync/LAN 生命周期。具体源码结果和当时本地验证见阶段三记录，不以源码或 host 检查宣称原生运行已通过。
 

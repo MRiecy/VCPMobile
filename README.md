@@ -46,7 +46,7 @@
 - **零依赖增量同步** — WebSocket + HTTP 双通道直连桌面端，SHA-256 哈希差异比对，不经过任何第三方云
 - **Cyber-Physical 节点** — 14 项原生设备能力工具，让手机成为 AI 可直接调用的分布式计算节点
 
-> **支持范围**：当前生产平台为 Android `arm64-v8a` 触控手机、平板与按窗口宽度响应的折叠屏（minSdk 26），要求设备当前使用的 Android WebView 为 Chromium 117 或更新版本。系统版本不等于 WebView 版本；应用启动后的“指引帮助”提供兼容说明。iPhone/iPad 兼容已进入 [Phase 0–6 分期实施](plan/vcpmobile-ios-compatibility-research/08-分期实施路线图与验收门禁.md)，目标为复用 Vue/Rust 核心的实验性用户自签产物，尚未交付 iOS 构建。不支持桌面端、Android TV 或其他 Android ABI；桌面用户请使用 VCPChat。Vite 预览、host Rust 编译与现有非 Android fallback 不构成 iOS 实现或桌面产品入口。完整规范见 [`docs/MOBILE_UI_COMPATIBILITY.md`](docs/MOBILE_UI_COMPATIBILITY.md)。共享前端构建目标为 `chrome117` / `safari26.0`，WebKit 交互适配按阶段推进。
+> **支持范围**：当前生产平台为 Android `arm64-v8a` 触控手机、平板与按窗口宽度响应的折叠屏（minSdk 26），要求设备当前使用的 Android WebView 为 Chromium 117 或更新版本。系统版本不等于 WebView 版本；应用启动后的“指引帮助”提供兼容说明。iPhone/iPad 实验客户端复用 Vue/Rust 核心，最低支持 iOS/iPadOS 26.0，可手动构建无签名归档并自行签名安装。不支持桌面端、Android TV 或其他 Android ABI；桌面用户请使用 VCPChat。Vite 预览、host Rust 编译与现有非 Android fallback 不构成 iOS 实现或桌面产品入口。共享前端构建目标为 `chrome117` / `safari26.0`，WebKit 交互适配按阶段推进。详见 [iOS 构建说明](docs/IOS_BUILD.md) 和 [移动端 UI 兼容性规范](docs/MOBILE_UI_COMPATIBILITY.md)。
 
 <div align="center">
   <img src=".github/assets/aurora-line.svg" width="100%" height="6" alt="" />

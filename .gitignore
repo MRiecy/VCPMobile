@@ -69,8 +69,14 @@ src-tauri/gen/android/app/src/main/assets/
 src-tauri/plugins/**/android/build/
 src-tauri/plugins/**/android/.tauri/
 
-# iOS generated project and local SwiftPM state (recreated from maintained inputs)
-/src-tauri/gen/apple/
+# Tauri generates the Apple scaffold and .xcodeproj around these project inputs.
+/src-tauri/gen/apple/*
+!/src-tauri/gen/apple/project.yml.hbs
+!/src-tauri/gen/apple/VCPResources/
+!/src-tauri/gen/apple/VCPShare/
+!/src-tauri/gen/apple/Assets.xcassets/
+/src-tauri/gen/apple/Assets.xcassets/*
+!/src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/
 /src-tauri/plugins/vcp-mobile/.tauri/
 /src-tauri/plugins/vcp-mobile/ios/.build/
 /src-tauri/plugins/vcp-mobile/ios/.swiftpm/

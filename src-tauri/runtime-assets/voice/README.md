@@ -8,7 +8,7 @@
 - ONNX Runtime `1.24.2`：固定 upstream commit；模型先以 `Fixed` + ARM 优化转换成 ORT flatbuffer，再生成**每个算子的类型白名单**。
 - 每次输入 `input: float32[1,576]`（64 个历史 context + 512 个新样本）、`state: float32[2,1,128]` 和 `sr: int64 scalar=16000`；输出 `output` 与 `stateN`。断流/新会话必须清零 state/context。
 - Session 使用 CPU、单线程、顺序执行、关闭线程自旋；优化已在导出时完成，原生会话禁用运行期 graph optimization。模型不适用于 8kHz 或多路 batch。
-- Android 从 `assets/voice/silero_vad.ort` 加载；iOS 由 G1 的 Xcode 工程输入将整个共享 `assets/voice` 作为 App 的 `voice` 目录资源嵌入，由 `Bundle.main` 加载。资源归 App 所有，避免 swift-rs 仅链接静态库而未复制 SwiftPM 资源包。
+- Android 从 `assets/voice/silero_vad.ort` 加载。iOS 将共享的 `assets/voice` 作为主应用的 `voice` 目录资源嵌入，由 `Bundle.main` 加载。
 
 ## 裁剪范围
 
@@ -40,7 +40,7 @@ python3 -m pip install -r src-tauri/runtime-assets/voice/requirements-build.txt
 python3 src-tauri/runtime-assets/voice/build_runtime.py ios --cache-dir /tmp/vcpmobile-silero-runtime --jobs 6
 ```
 
-项目 G1 可重放工程入口先执行此步骤。`Runtime/`、`OrtObjC/` 是可再生成的本地构建输入，已按精确路径忽略；原始模型派生产物、配置、许可证和构建入口在此目录维护。SwiftPM 的 C++17 与 `SPM_BUILD` 配置沿用官方绑定要求。成功后另写 `ios/build-report.json` 记录实际 arm64 静态库与 XCFramework 大小/哈希；Windows 不生成虚假 Apple 构建报告。
+Apple 归档工作流先构建裁剪运行库，再由 SwiftPM 消费 `Runtime/` 和 `OrtObjC/`。原始模型派生产物、配置、许可证和构建入口在此目录维护。SwiftPM 的 C++17 与 `SPM_BUILD` 沿用官方绑定要求。成功后生成 `ios/build-report.json`，记录实际 arm64 静态库与 XCFramework 大小和哈希。见 [iOS 构建说明](../../../docs/IOS_BUILD.md)。
 
 已有锁定源码/构建目录可传 `--source-dir`、`--build-dir` 复用。`apple-inputs` 只复制 Apple 源码与资源，供 Windows 源码审计，**不产生 Apple 编译/链接证据**。
 

@@ -1,0 +1,116 @@
+# Based on the Tauri CLI 2.12.3 iOS project template (Apache-2.0 OR MIT).
+name: {{app.name}}
+options:
+  bundleIdPrefix: {{app.identifier}}
+  deploymentTarget:
+    iOS: "{{apple.ios-version}}"
+fileGroups: [{{join file-groups}}]
+configs:
+  debug: debug
+  release: release
+settings:
+  base:
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGNING_ALLOWED: "NO"
+    MARKETING_VERSION: "{{apple.bundle-version-short}}"
+    CURRENT_PROJECT_VERSION: "{{apple.bundle-version}}"
+    {{#if apple.development-team}}
+    DEVELOPMENT_TEAM: "{{apple.development-team}}"
+    {{/if}}
+targets:
+  {{app.name}}_iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Assets.xcassets
+      - path: Externals
+        excludes: ["**/*.a"]
+      - path: {{app.name}}_iOS
+      - path: {{app.asset-dir}}
+        buildPhase: resources
+        type: folder
+      - path: LaunchScreen.storyboard
+      - path: VCPResources/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: ../../runtime-assets/voice/assets/voice
+        buildPhase: resources
+        type: folder
+    info:
+      path: {{app.name}}_iOS/Info.plist
+      properties:
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiredDeviceCapabilities: [arm64, metal]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        {{~#each apple.plist-pairs}}
+        {{this.key}}: {{this.value}}{{/each}}
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      base:
+        PRODUCT_NAME: "{{app.stylized-name}}"
+        PRODUCT_BUNDLE_IDENTIFIER: {{app.identifier}}
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: VCPShare/AppGroups.entitlements
+        INFOPLIST_KEY_VCPShareAppGroup: group.com.vcp.avatar
+        ENABLE_BITCODE: false
+        ARCHS: [{{join ios-valid-archs}}]
+        VALID_ARCHS: {{~#each ios-valid-archs}} {{this}} {{/each}}
+        LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+      configs:
+        debug:
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+          STRIP_INSTALLED_PRODUCT: NO
+    dependencies:
+      - target: VCPShare
+        embed: true
+      - framework: {{lib-output-file-name}}
+        embed: false
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: Security.framework
+      - sdk: UIKit.framework
+      - sdk: WebKit.framework
+      {{~#each ios-frameworks}}
+      - sdk: {{this}}.framework{{/each}}
+    preBuildScripts:
+      - name: Build Rust Code
+        script: |
+          {{shell-escape tauri-binary}} {{tauri-binary-args-str}} -v --platform "${PLATFORM_DISPLAY_NAME:?}" --sdk-root "${SDKROOT:?}" --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration "${CONFIGURATION:?}" ${FORCE_COLOR} ${ARCHS:?}
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/{{lib-output-file-name}}
+          - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/{{lib-output-file-name}}
+  VCPShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: VCPShare
+        includes: ["*.swift"]
+      - path: VCPShare/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: {{app.identifier}}.share
+        INFOPLIST_FILE: VCPShare/Info.plist
+        CODE_SIGN_ENTITLEMENTS: VCPShare/AppGroups.entitlements
+        SWIFT_VERSION: "5.0"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
