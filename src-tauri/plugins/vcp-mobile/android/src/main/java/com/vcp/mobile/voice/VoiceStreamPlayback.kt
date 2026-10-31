@@ -2,6 +2,7 @@ package com.vcp.mobile.voice
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioRouting
 import android.media.AudioTrack
 import android.media.VolumeShaper
 import android.os.Build
@@ -207,7 +208,7 @@ internal class VoiceStreamPlayback(
             runCatching { sink?.fadeOut() }
                 .onFailure { Log.w("VcpVoiceOutput", "fade_failed id=$id", it) }
         }
-        releaseTrack()
+        sink?.close()
         // Closing a shaper removes its gain; never do that while its track can still sound.
         sink?.closeFade()
         routePause.set(true)
@@ -237,6 +238,12 @@ internal class VoiceStreamPlayback(
     private inner class Sink(val profile: VoiceOutputProfile) : AutoCloseable {
         private val rate = if (profile.legacySco) 16_000 else 24_000
         private val player: AudioTrack
+        private val routeListener = AudioRouting.OnRoutingChangedListener { source ->
+            if (track.get() === source && (source as AudioTrack).playState == AudioTrack.PLAYSTATE_PLAYING) {
+                val actual = source.routedDevice
+                if (actual != null && !VoiceAudioRouting.sameMediaRoute(profile.headphones, actual)) lease.routeChanged(profile)
+            }
+        }
         private var written = 0L
         private val messageStarts = ArrayDeque<Pair<Long, String>>()
         fun markMessage(id: String, pendingFrames: Long) { messageStarts.addLast((written + pendingFrames) to id) }
@@ -244,6 +251,7 @@ internal class VoiceStreamPlayback(
         private var wraps = 0L
         private var progress = SystemClock.elapsedRealtime()
         private var started = false
+        private var verifyHeadphones = profile.headphones != null
         private var reportedPlaying = false
         private var primingConfigured = false
         private var startThreshold = 0
@@ -270,9 +278,10 @@ internal class VoiceStreamPlayback(
                 check(normalBufferFrames > 0) { "voice_playback_buffer_unavailable" }
                 track.set(player)
                 published = true
+                if (profile.headphones != null) player.addOnRoutingChangedListener(routeListener, null)
                 if (stopped.get()) throw InterruptedException("cancelled:voice_playback")
             } catch (error: Throwable) {
-                if (!published || track.compareAndSet(player, null)) runCatching { player.release() }
+                if (published) close() else runCatching { player.release() }
                 throw error
             }
         }
@@ -349,6 +358,13 @@ internal class VoiceStreamPlayback(
             if (head != lastHead) {
                 lastHead = head; progress = SystemClock.elapsedRealtime()
                 if (started && !stopped.get()) {
+                    if (verifyHeadphones) {
+                        if (!VoiceAudioRouting.sameMediaRoute(profile.headphones, player.routedDevice)) {
+                            lease.routeChanged(profile)
+                            throw IllegalStateException("audio_route_changed")
+                        }
+                        verifyHeadphones = false
+                    }
                     if (restoreBuffer) {
                         check(player.setBufferSizeInFrames(normalBufferFrames) > 0) { "voice_playback_buffer_restore_failed" }
                         restoreBuffer = false
@@ -398,12 +414,11 @@ internal class VoiceStreamPlayback(
             if (reportedPlaying != value) { reportedPlaying = value; playingChanged(value) }
             reportMessage(renderedMessage.takeIf { value })
         }
-        override fun close() { if (track.compareAndSet(player, null)) release(player) }
-    }
-
-    private fun releaseTrack() {
-        val player = track.getAndSet(null) ?: return
-        release(player)
+        override fun close() {
+            if (!track.compareAndSet(player, null)) return
+            if (profile.headphones != null) player.removeOnRoutingChangedListener(routeListener)
+            release(player)
+        }
     }
 
     private fun release(player: AudioTrack) {

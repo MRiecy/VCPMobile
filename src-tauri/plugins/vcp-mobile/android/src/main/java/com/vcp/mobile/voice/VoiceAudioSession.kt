@@ -2,17 +2,19 @@ package com.vcp.mobile.voice
 
 import android.app.Activity
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
-internal data class VoiceOutputProfile(val generation: Long, val usage: Int, val legacySco: Boolean)
+internal data class VoiceOutputProfile(val generation: Long, val usage: Int, val legacySco: Boolean,
+    val headphones: AudioDeviceInfo? = null)
 
 /** Audio routing survives microphone mute. Only call boundaries change communication/media mode. */
 internal class VoiceAudioSession(private val activity: Activity) {
-    private data class Route(val generation: Long, val communication: Boolean, val routing: VoiceAudioRouting,
+    private data class Route(val generation: Long, val forCall: Boolean, val headphones: AudioDeviceInfo?, val routing: VoiceAudioRouting,
         val name: AtomicReference<String> = AtomicReference("unknown"))
     private val main = Handler(Looper.getMainLooper())
     private val route = AtomicReference<Route?>(null)
@@ -55,7 +57,7 @@ internal class VoiceAudioSession(private val activity: Activity) {
     inner class InputLease internal constructor(val callId: String, internal val changed: (String) -> Unit,
         internal val interrupted: (String) -> Unit) : AutoCloseable {
         private val closed = AtomicBoolean(false)
-        fun awaitReady(stopped: () -> Boolean) { awaitProfile({ closed.get() || stopped() }) }
+        fun awaitReady(stopped: () -> Boolean): VoiceOutputProfile = awaitProfile { closed.get() || stopped() }
         fun bindRecordingSession(id: Int) { route.get()?.routing?.bindRecordingSession(id) }
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
@@ -67,6 +69,9 @@ internal class VoiceAudioSession(private val activity: Activity) {
         private val closed = AtomicBoolean(false)
         fun awaitReady(stopped: () -> Boolean): VoiceOutputProfile = awaitProfile { closed.get() || stopped() }
         fun isCurrent(profile: VoiceOutputProfile): Boolean = !closed.get() && route.get()?.generation == profile.generation
+        fun routeChanged(profile: VoiceOutputProfile) = onMain {
+            if (isCurrent(profile)) interrupt("audio_route_changed")
+        }
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
             onMain { outputs.remove(this); reconcile() }
@@ -106,9 +111,12 @@ internal class VoiceAudioSession(private val activity: Activity) {
                 if (route.get() !== selected) continue
                 throw error
             }
-            if (route.get() === selected && !stopped()) return VoiceOutputProfile(selected.generation,
-                if (selected.communication) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA,
-                selected.communication && Build.VERSION.SDK_INT < 31 && selected.name.get() == "bluetooth")
+            if (route.get() === selected && !stopped()) {
+                val communication = selected.forCall && selected.headphones == null
+                return VoiceOutputProfile(selected.generation,
+                    if (communication) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA,
+                    communication && Build.VERSION.SDK_INT < 31 && selected.name.get() == "bluetooth", selected.headphones)
+            }
         }
         throw InterruptedException("cancelled:voice_audio_route")
     }
@@ -116,9 +124,9 @@ internal class VoiceAudioSession(private val activity: Activity) {
     private fun reconcile() {
         if (destroyed || suspended) return
         val needed = (call != null && callAudioActivated) || inputs.isNotEmpty() || outputs.isNotEmpty()
-        val communication = call != null || inputs.isNotEmpty()
+        val forCall = call != null || inputs.isNotEmpty()
         val existing = physicalRoute
-        if (needed && !transitioning && existing?.communication == communication) return
+        if (needed && !transitioning && existing?.forCall == forCall) return
         val request = ++generation
         if (!needed) {
             transitioning = false
@@ -132,17 +140,19 @@ internal class VoiceAudioSession(private val activity: Activity) {
             onMain {
                 if (request != generation || destroyed || suspended) return@onMain
                 physicalRoute?.routing?.close()
-                lateinit var next: Route
-                val hardware = VoiceAudioRouting(activity, changed = { name ->
-                    if (route.get() === next) {
-                        next.name.set(name)
-                        inputs.toList().forEach { it.changed(name) }
-                    }
-                }, interrupted = ::interrupt, communication = communication)
-                next = Route(request, communication, hardware)
-                physicalRoute = next
-                route.set(next)
+                physicalRoute = null
                 try {
+                    val headphones = if (forCall) VoiceAudioRouting.mediaHeadphones(activity) else null
+                    lateinit var next: Route
+                    val hardware = VoiceAudioRouting(activity, changed = { name ->
+                        if (route.get() === next) {
+                            next.name.set(name)
+                            inputs.toList().forEach { it.changed(name) }
+                        }
+                    }, interrupted = ::interrupt, forCall = forCall, headphones = headphones)
+                    next = Route(request, forCall, headphones, hardware)
+                    physicalRoute = next
+                    route.set(next)
                     hardware.open()
                     transitioning = false
                 } catch (error: Throwable) {

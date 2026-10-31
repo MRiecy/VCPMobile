@@ -115,7 +115,7 @@ final class NativeVoicePlayback {
         self.format = format
     }
 
-    /// Renderers may change at call entry/exit, never at in-call mic mute.
+    /// Renderers may change when switching between playback and microphone hardware.
     /// Retain unconfirmed chunks; stop callbacks from the former node
     /// cannot acknowledge audio belonging to the replacement node.
     func bind(_ player: AVAudioPlayerNode?) {

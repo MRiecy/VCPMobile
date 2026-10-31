@@ -2,27 +2,38 @@ import AVFoundation
 import Foundation
 
 /// Sole hardware/session owner. A call reservation itself does not instantiate
-/// an input node. Once authorized, the VP graph remains fixed through mute;
+/// an input node. The communication graph stays hardware-muted across turns;
 /// output-only playback never touches input or requests record permission.
 final class NativeVoiceRenderer {
     private let token = UUID()
     private(set) var engine: AVAudioEngine?
     private(set) var speechPlayer: AVAudioPlayerNode?
-    private(set) var isVoice = false
+    private(set) var route: NativeVoiceRoute = .playback
+    var isVoice: Bool { route != .playback }
     private var observations: [NSObjectProtocol] = []
     var onPlayer: ((AVAudioPlayerNode?) -> Void)?
     var onFault: ((String) -> Void)?
 
     func ensure(voice: Bool) throws {
         dispatchPrecondition(condition: .onQueue(.main))
-        if let engine = engine, engine.isRunning, isVoice == voice { return }
+        let coordinator = NativeAudioSessionCoordinator.shared
+        if let engine = engine, engine.isRunning, isVoice == voice {
+            guard route.matches(coordinator.session) else {
+                onFault?("audio_route_changed")
+                throw voiceAudioFailure("audio_route_changed")
+            }
+            return
+        }
         destroy(releaseSession: false)
         do {
-            try NativeAudioSessionCoordinator.shared.acquireVoice(token, recording: voice)
+            route = try coordinator.acquireVoice(token, recording: voice)
             let engine = AVAudioEngine()
             self.engine = engine
-            isVoice = voice
             if voice {
+                // Attach the hardware input before preparing either capture graph.
+                _ = engine.inputNode
+            }
+            if route == .communication {
                 do { try engine.inputNode.setVoiceProcessingEnabled(true) }
                 catch { throw voiceAudioFailure(voiceAudioReason(error, fallback: "voice_processing_failed")) }
                 guard engine.inputNode.isVoiceProcessingEnabled, engine.outputNode.isVoiceProcessingEnabled else {
@@ -43,6 +54,7 @@ final class NativeVoiceRenderer {
             engine.prepare()
             try engine.start()
             guard engine.isRunning else { throw voiceAudioFailure("audio_engine_not_running") }
+            guard route.matches(coordinator.session) else { throw voiceAudioFailure("audio_route_changed") }
             installObservers(engine)
             onPlayer?(speech)
         } catch {
@@ -51,9 +63,9 @@ final class NativeVoiceRenderer {
         }
     }
 
-    func mute() {
+    func setInputMuted(_ muted: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
-        if isVoice { engine?.inputNode.isVoiceProcessingInputMuted = true }
+        if route == .communication { engine?.inputNode.isVoiceProcessingInputMuted = muted }
     }
 
     func destroy(releaseSession: Bool = true) {
@@ -65,7 +77,7 @@ final class NativeVoiceRenderer {
         engine?.stop()
         engine?.reset()
         engine = nil
-        isVoice = false
+        route = .playback
         if releaseSession { NativeAudioSessionCoordinator.shared.releaseVoice(token) }
     }
 
@@ -80,10 +92,11 @@ final class NativeVoiceRenderer {
         watch(AVAudioSession.routeChangeNotification, engine: engine) { [weak self] note in
             let session = NativeAudioSessionCoordinator.shared.session
             let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
-            if raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) == .categoryChange,
-               let self = self,
-               (self.isVoice && session.category == .playAndRecord && session.mode == .voiceChat)
-                || (!self.isVoice && session.category == .playback && session.mode == .default) { return nil }
+            if let route = self?.route, route.matches(session) {
+                // Our category/input requests may deliver notifications after the graph starts.
+                if case .headphones = route { return nil }
+                if raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) == .categoryChange { return nil }
+            }
             return "audio_route_changed"
         }
         watch(.AVAudioEngineConfigurationChange, engine: engine, object: engine) { _ in "audio_configuration_changed" }

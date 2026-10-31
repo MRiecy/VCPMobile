@@ -117,8 +117,8 @@ final class NativeVoiceAudio {
         renderer.onPlayer = { [weak self] player in self?.playback?.bind(player) }
         renderer.onFault = { [weak self] reason in
             guard let self = self else { return }
-            self.finish(reason: reason, error: true)
             self.playback?.cancelCurrent(reason: reason, immediately: true)
+            self.finish(reason: reason, error: true)
             self.renderer.destroy()
         }
     }
@@ -219,14 +219,12 @@ final class NativeVoiceAudio {
         // A logical call exit must not destroy audio that is finishing its fade.
         // The terminal output status rechecks the latest owners after it stops.
         guard playback?.isStopping != true else { return }
-        if callId != nil, renderer.isVoice { return }
+        if callId != nil, renderer.isVoice, active != nil || renderer.route == .communication { return }
         if playback?.ownsPlayback == true {
-            if callId == nil {
-                do { try renderer.ensure(voice: false) }
-                catch {
-                    playback?.cancelCurrent(reason: voiceAudioReason(error, fallback: "voice_playback_failed"), immediately: true)
-                    renderer.destroy()
-                }
+            do { try renderer.ensure(voice: false) }
+            catch {
+                playback?.cancelCurrent(reason: voiceAudioReason(error, fallback: "voice_playback_failed"), immediately: true)
+                renderer.destroy()
             }
         } else { renderer.destroy() }
     }
@@ -317,12 +315,13 @@ final class NativeVoiceAudio {
             try renderer.ensure(voice: true)
             guard let engine = renderer.engine else { throw voiceAudioFailure("audio_engine_not_running") }
             run.engine = engine
-            run.aecState = "enabled"
+            let session = NativeAudioSessionCoordinator.shared.session
+            run.aecState = (renderer.route == .communication || session.isEchoCancelledInputEnabled) ? "enabled" : "unavailable"
             let format = engine.inputNode.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else {
                 throw voiceAudioFailure("microphone_format_unavailable")
             }
-            run.route = routeName(NativeAudioSessionCoordinator.shared.session.currentRoute)
+            run.route = routeName(session.currentRoute)
             let sampleRate = format.sampleRate
             worker.async { [weak self, weak run] in
                 guard let self = self, let run = run else { return }
@@ -372,15 +371,19 @@ final class NativeVoiceAudio {
             finish(reason: "background", error: false)
             return
         }
+        guard renderer.route.matches(NativeAudioSessionCoordinator.shared.session) else {
+            pipe.stop()
+            finish(reason: "audio_route_changed", error: true)
+            return
+        }
         run.pipe = pipe
         publishOutputStatus(outputId, playing: outputPlaying)
-        // The input is tapped after Voice Processing. It is never connected to
-        // the output mixer: only independent TTS is rendered.
+        // Only TTS is connected to the output mixer. Input stays on its capture path.
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [pipe] buffer, _ in
             pipe.accept(buffer)
         }
         run.tapped = true
-        engine.inputNode.isVoiceProcessingInputMuted = false
+        renderer.setInputMuted(false)
         guard engine.isRunning else { finish(reason: "audio_engine_not_running", error: true); return }
         let invoke = run.startInvoke
         run.startInvoke = nil
@@ -436,12 +439,14 @@ final class NativeVoiceAudio {
         rememberCancellation(run.sessionId)
         run.cancelled.store(true, ordering: .releasing)
         run.pipe?.stopAccepting()
-        renderer.mute()
+        renderer.setInputMuted(true)
         run.playbackCaptureState.playing.store(false, ordering: .releasing)
         if run.tapped { run.engine?.inputNode.removeTap(onBus: 0); run.tapped = false }
         for token in run.observations { NotificationCenter.default.removeObserver(token) }
         run.observations.removeAll()
         run.engine = nil
+        // This graph has no VP hardware mute. Release its input when the tap closes.
+        if case .headphones = renderer.route { reconcileRenderer() }
         let pipe = run.pipe
         worker.async { [self, pipe, run] in
             let completed: (UInt64, String?) -> Void = { [self, run] sampleIndex, sealFailure in

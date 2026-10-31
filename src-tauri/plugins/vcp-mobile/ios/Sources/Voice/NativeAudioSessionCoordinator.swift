@@ -1,6 +1,21 @@
 import AVFoundation
 import Foundation
 
+enum NativeVoiceRoute: Equatable {
+    case playback, communication, headphones(String)
+
+    func matches(_ session: AVAudioSession) -> Bool {
+        switch self {
+        case .playback: return session.category == .playback && session.mode == .default
+        case .communication: return session.category == .playAndRecord && session.mode == .voiceChat
+        case .headphones(let uid):
+            return session.category == .playAndRecord && session.mode == .default
+                && session.currentRoute.outputs.first?.uid == uid
+                && session.currentRoute.inputs.first?.portType == .builtInMic
+        }
+    }
+}
+
 /// Main-queue ownership of the app's shared audio session. The real renderer
 /// (VP call or output-only speech) takes priority over silent keepalive, including
 /// setup/teardown when engine.isRunning cannot identify the current owner.
@@ -15,22 +30,51 @@ final class NativeAudioSessionCoordinator {
             && session.categoryOptions.contains(.mixWithOthers)
     }
 
-    func acquireVoice(_ owner: UUID, recording: Bool = true) throws {
+    private var headphoneOutput: AVAudioSessionPortDescription? {
+        guard let output = session.currentRoute.outputs.first else { return nil }
+        switch output.portType {
+        case .bluetoothA2DP, .bluetoothLE, .headphones: return output
+        default: return nil
+        }
+    }
+
+    private func clearInputPreferences() throws {
+        guard session.category == .playAndRecord, session.mode == .default else { return }
+        if session.preferredInput?.portType == .builtInMic { try session.setPreferredInput(nil) }
+        if session.prefersEchoCancelledInput { try session.setPrefersEchoCancelledInput(false) }
+    }
+
+    func acquireVoice(_ owner: UUID, recording: Bool) throws -> NativeVoiceRoute {
         dispatchPrecondition(condition: .onQueue(.main))
         guard voiceOwner == nil || voiceOwner == owner else { throw voiceAudioFailure("audio_session_busy") }
         voiceOwner = owner
         NativeBackgroundExecution.shared.yieldToVoice()
         keepaliveActivated = false
         do {
+            let previousHeadphones = headphoneOutput
+            try clearInputPreferences()
             if recording {
+                // Find the media route before voiceChat can select a paired HFP microphone.
+                try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothA2DP])
+                try session.setActive(true)
+                if let output = headphoneOutput ?? previousHeadphones {
+                    guard let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }) else {
+                        throw voiceAudioFailure("audio_route_unavailable")
+                    }
+                    try session.setPreferredInput(mic)
+                    if session.isEchoCancelledInputAvailable {
+                        try session.setPrefersEchoCancelledInput(true)
+                    }
+                    return .headphones(output.uid)
+                }
                 try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
             } else {
                 try session.setCategory(.playback, mode: .default, options: [])
             }
             try session.setActive(true)
+            return recording ? .communication : .playback
         } catch {
-            voiceOwner = nil
-            NativeBackgroundExecution.shared.voiceDidReleaseSession()
+            releaseVoice(owner)
             throw error
         }
     }
@@ -41,6 +85,8 @@ final class NativeAudioSessionCoordinator {
         // The caller has already stopped input and output before relinquishing
         // its reservation. Never deactivate a session configured by another user.
         if session.category == .playAndRecord || session.category == .playback {
+            do { try clearInputPreferences() }
+            catch { NSLog("[VcpVoice] Reset input preferences: %@", error.localizedDescription) }
             do { try session.setActive(false, options: [.notifyOthersOnDeactivation]) }
             catch { NSLog("[VcpVoice] Session deactivation: %@", error.localizedDescription) }
         }
