@@ -28,7 +28,7 @@ pub use call::{
     voice_call_list_inputs, voice_call_select_input, VoiceCallState,
 };
 pub use document::{allocate_voice_document, connect_voice_document, VoiceDocumentState};
-#[cfg(any(target_os = "android", target_os = "ios", test))]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 pub use input::handle_audio_event;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 pub use input::invalidate_document;

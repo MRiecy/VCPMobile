@@ -909,12 +909,12 @@ pub fn verify_apk_signature<R: Runtime>(
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
 
-        return plugin_handle
+        plugin_handle
             .run_mobile_plugin::<ApkSignatureVerification>(
                 "verifyApkSignature",
                 serde_json::json!({ "path": path }),
             )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e));
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))
     }
     #[cfg(target_os = "ios")]
     {
@@ -943,7 +943,7 @@ pub fn can_install_packages<R: Runtime>(app: AppHandle<R>) -> Result<bool, Strin
                 serde_json::json!({}),
             )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        return Ok(result.allowed);
+        Ok(result.allowed)
     }
     #[cfg(target_os = "ios")]
     {

@@ -491,7 +491,7 @@ pub async fn restart_or_exit_app(
             .ok_or("main window not found")?;
         let res = window.as_ref().with_webview(move |webview| {
             webview.jni_handle().exec(move |env, activity, _webview| {
-                match restart_android_app(env, &activity) {
+                match restart_android_app(env, activity) {
                     Ok(_) => {
                         let _ = tx.send(());
                     }
@@ -509,7 +509,7 @@ pub async fn restart_or_exit_app(
         }
 
         // 等待 JNI 线程成功调用并完成 startActivity Binder IPC
-        if let Ok(_) = rx.await {
+        if rx.await.is_ok() {
             // 给系统 Binder 一点时间刷盘并调度拉起新进程，然后自杀
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }

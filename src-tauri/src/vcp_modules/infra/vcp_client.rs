@@ -354,6 +354,9 @@ pub struct ActiveRequestEntry {
     released: CancellationToken,
 }
 
+type ChatEventFeed = Arc<dyn Fn(&StreamEvent) + Send + Sync>;
+type ChatListenerLookup = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 #[derive(Default)]
 struct RequestOutputState {
     channel: Option<Channel<StreamEvent>>,
@@ -362,8 +365,8 @@ struct RequestOutputState {
     consumer_revision: u64,
     owner_released: bool,
     origin_user_message_id: Option<String>,
-    chat_feed: Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>,
-    has_chat_listener: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    chat_feed: Option<ChatEventFeed>,
+    has_chat_listener: Option<ChatListenerLookup>,
     pending_terminal: Option<Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>>,
     discarded: bool,
 }
@@ -977,7 +980,7 @@ struct ActiveGroupTurnEntry {
     released: Arc<Notify>,
     channel: std::sync::Mutex<Option<Channel<StreamEvent>>>,
     origin_user_message_id: std::sync::Mutex<Option<String>>,
-    chat_feed: std::sync::Mutex<Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>>,
+    chat_feed: std::sync::Mutex<Option<ChatEventFeed>>,
     session: std::sync::Mutex<Option<Arc<crate::vcp_modules::group::group_session::GroupSession>>>,
 }
 
@@ -3641,7 +3644,8 @@ async fn recover_active_generation<R: Runtime>(
     }
 
     let db = app.state::<DbState>();
-    let pending: Option<(Option<String>, bool, Option<String>, i64, Option<String>)> = sqlx::query_as(
+    type PendingGenerationRow = (Option<String>, bool, Option<String>, i64, Option<String>);
+    let pending: Option<PendingGenerationRow> = sqlx::query_as(
         "SELECT m.agent_id, ag.stop_requested, ag.stop_partial_content, ag.created_at, m.name \
          FROM active_generations ag \
          JOIN messages m ON m.owner_type = ag.owner_type AND m.owner_id = ag.owner_id \
@@ -3760,7 +3764,8 @@ async fn emit_persisted_terminal<R: Runtime>(
     output: &RequestOutput,
 ) -> Result<(), String> {
     let db = app.state::<DbState>();
-    let row: Option<(String, String, i64, Option<String>, Option<String>, i64)> = sqlx::query_as(
+    type PersistedTerminalRow = (String, String, i64, Option<String>, Option<String>, i64);
+    let row: Option<PersistedTerminalRow> = sqlx::query_as(
         "SELECT m.content, m.finish_reason, m.timestamp, m.agent_id, m.name, t.updated_at
          FROM messages m JOIN topics t ON t.owner_type = m.owner_type AND t.owner_id = m.owner_id
            AND t.topic_id = m.topic_id

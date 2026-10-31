@@ -126,36 +126,6 @@ pub(super) fn write_cache_blocking<R: Runtime, T: Serialize>(
     cached.payload
 }
 
-#[cfg(test)]
-mod cache_tests {
-    use super::*;
-
-    #[test]
-    fn cache_read_checks_kind_schema_and_file_budget() {
-        let directory = tempfile::tempdir_in("tests").unwrap();
-        let path = directory.path().join("cached.json");
-        let value = serde_json::json!({
-            "schemaVersion": CACHE_SCHEMA_VERSION,
-            "kind": "video-jpeg",
-            "payload": ["first", "duplicate"]
-        });
-        let bytes = serde_json::to_vec(&value).unwrap();
-        std::fs::write(&path, &bytes).unwrap();
-        assert!(read_cache_file::<Vec<String>>(&path, "video-jpeg-dedup-v1", 1024).is_none());
-        assert_eq!(
-            read_cache_file::<Vec<String>>(&path, "video-jpeg", bytes.len() as u64),
-            Some(vec!["first".into(), "duplicate".into()]),
-        );
-        assert!(
-            read_cache_file::<Vec<String>>(&path, "video-jpeg", bytes.len() as u64 - 1).is_none()
-        );
-        let mut old_schema = value;
-        old_schema["schemaVersion"] = serde_json::json!(CACHE_SCHEMA_VERSION - 1);
-        std::fs::write(&path, serde_json::to_vec(&old_schema).unwrap()).unwrap();
-        assert!(read_cache_file::<Vec<String>>(&path, "video-jpeg", 1024).is_none());
-    }
-}
-
 pub(super) fn read_output_file(
     output_dir: &Path,
     path: &Path,
@@ -320,5 +290,35 @@ where
     {
         let _ = (app, source, command, max_bytes, consume);
         Err("音视频附件处理仅在 Android/iOS 中可用".into())
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_read_checks_kind_schema_and_file_budget() {
+        let directory = tempfile::tempdir_in("tests").unwrap();
+        let path = directory.path().join("cached.json");
+        let value = serde_json::json!({
+            "schemaVersion": CACHE_SCHEMA_VERSION,
+            "kind": "video-jpeg",
+            "payload": ["first", "duplicate"]
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read_cache_file::<Vec<String>>(&path, "video-jpeg-dedup-v1", 1024).is_none());
+        assert_eq!(
+            read_cache_file::<Vec<String>>(&path, "video-jpeg", bytes.len() as u64),
+            Some(vec!["first".into(), "duplicate".into()]),
+        );
+        assert!(
+            read_cache_file::<Vec<String>>(&path, "video-jpeg", bytes.len() as u64 - 1).is_none()
+        );
+        let mut old_schema = value;
+        old_schema["schemaVersion"] = serde_json::json!(CACHE_SCHEMA_VERSION - 1);
+        std::fs::write(&path, serde_json::to_vec(&old_schema).unwrap()).unwrap();
+        assert!(read_cache_file::<Vec<String>>(&path, "video-jpeg", 1024).is_none());
     }
 }

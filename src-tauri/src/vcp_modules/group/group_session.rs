@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_QUEUED_MEMBERS: usize = 254;
 const MAX_PENDING_INPUTS: usize = 32;
 
+pub(crate) type SelectedSpeaker = (String, Option<Arc<GroupReplyScope>>);
+
 pub(crate) struct GroupReplyScope {
     pub origin: String,
     pub cancellation: CancellationToken,
@@ -317,10 +319,7 @@ impl GroupSession {
         Ok(())
     }
 
-    pub(crate) fn next_speaker(
-        &self,
-        revision: u64,
-    ) -> Result<Option<(String, Option<Arc<GroupReplyScope>>)>, String> {
+    pub(crate) fn next_speaker(&self, revision: u64) -> Result<Option<SelectedSpeaker>, String> {
         let mut state = self.state.lock().map_err(|e| e.to_string())?;
         if state.closed
             || self.cancellation.is_cancelled()

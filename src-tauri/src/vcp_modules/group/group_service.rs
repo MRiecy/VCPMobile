@@ -1793,9 +1793,11 @@ mod local_settings_tests {
             serde_json::to_value(&parsed).expect("serialize patch"),
             normalized
         );
-        let mut current = GroupLocalSettings::default();
-        current.chat_mode = GroupChatMode::Jev;
-        current.context_message_window_size = 321;
+        let mut current = GroupLocalSettings {
+            chat_mode: GroupChatMode::Jev,
+            context_message_window_size: 321,
+            ..Default::default()
+        };
         current.mode_settings.sequential.speaker_order = vec!["a".into(), "b".into()];
         current.mode_settings.jev.navigator_prompt = "keep current navigator".into();
         current.mode_settings.jev.max_autonomous_rounds = 77;
@@ -1832,10 +1834,12 @@ mod local_settings_tests {
 
     #[test]
     fn backup_defaults_invalid_fields_and_discards_unknown_fields_without_resetting_siblings() {
-        let mut current = GroupLocalSettings::default();
-        current.chat_mode = GroupChatMode::Jev;
-        current.enable_context_message_window = true;
-        current.context_message_window_size = 321;
+        let mut current = GroupLocalSettings {
+            chat_mode: GroupChatMode::Jev,
+            enable_context_message_window: true,
+            context_message_window_size: 321,
+            ..Default::default()
+        };
         current.mode_settings.jev.history_window = 19;
         current.mode_settings.jev.max_autonomous_rounds = 71;
         let patch = GroupLocalSettingsPatch::parse(&serde_json::json!({

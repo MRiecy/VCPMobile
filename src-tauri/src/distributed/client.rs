@@ -1643,7 +1643,6 @@ mod tests {
                 registered_tools: 3,
                 session_id: 7,
                 last_error: Some("previous connection failure".to_string()),
-                ..DistributedStatus::default()
             };
             let cancel_token = CancellationToken::new();
             let session_token = cancel_token.clone();

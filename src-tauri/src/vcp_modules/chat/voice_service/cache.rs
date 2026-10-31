@@ -622,14 +622,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 4);
-        let times = times.lock().unwrap();
         let observed: Vec<_> = times
+            .lock()
+            .unwrap()
             .windows(2)
             .map(|pair| pair[1].duration_since(pair[0]).as_millis())
             .collect();
         assert_eq!(observed, [50, 100, 200]);
-        let paths = paths.lock().unwrap();
-        assert!(paths.iter().all(|path| path == &paths[0]));
+        {
+            let paths = paths.lock().unwrap();
+            assert!(paths.iter().all(|path| path == &paths[0]));
+        }
         assert_eq!(file_names(temp.path()).await, [format!("{key}.wav")]);
     }
 

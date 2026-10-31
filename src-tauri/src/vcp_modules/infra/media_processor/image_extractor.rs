@@ -141,13 +141,13 @@ pub fn derive_image<R: Runtime>(
             let _ = std::fs::remove_file(&path);
             return Err(error);
         }
-        return Ok(DerivedImage {
+        Ok(DerivedImage {
             path: result.path,
             mime: result.mime,
             size: result.size,
             width: result.width,
             height: result.height,
-        });
+        })
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {

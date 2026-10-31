@@ -56,9 +56,8 @@ impl<R: Runtime> ForegroundLease<R> {
                     "screenKeepOn": screen_keep_on,
                 }),
             )
-            .map_err(|error| {
-                crate::events::report_service_failure(app, "guardian", &error);
-                error
+            .inspect_err(|error| {
+                crate::events::report_service_failure(app, "guardian", error);
             })?;
             log::info!("[VcpMobilePlugin] iOS task resource acquired: tag={tag}, label={label}");
         }
@@ -119,9 +118,8 @@ pub fn acquire_foreground_inner<R: Runtime>(
                 )
                 .map_err(|e| format!("acquireForeground failed: {}", e))
         })();
-        result.map_err(|error| {
-            crate::events::report_service_failure(_app, "guardian", &error);
-            error
+        result.inspect_err(|error| {
+            crate::events::report_service_failure(_app, "guardian", error);
         })?;
     }
 
@@ -141,9 +139,8 @@ pub fn release_foreground_inner<R: Runtime>(_app: &AppHandle<R>, tag: &str) -> R
         "releaseBackgroundExecution",
         serde_json::json!({ "tag": tag }),
     )
-    .map_err(|error| {
-        crate::events::report_service_failure(_app, "guardian", &error);
-        error
+    .inspect_err(|error| {
+        crate::events::report_service_failure(_app, "guardian", error);
     })?;
 
     #[cfg(target_os = "android")]
@@ -158,9 +155,8 @@ pub fn release_foreground_inner<R: Runtime>(_app: &AppHandle<R>, tag: &str) -> R
                 )
                 .map_err(|e| format!("releaseForeground failed: {}", e))
         })();
-        result.map_err(|error| {
-            crate::events::report_service_failure(_app, "guardian", &error);
-            error
+        result.inspect_err(|error| {
+            crate::events::report_service_failure(_app, "guardian", error);
         })?;
     }
 
@@ -220,9 +216,8 @@ pub fn start_helper_service<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
                 .run_mobile_plugin::<serde_json::Value>("startHelperService", serde_json::json!({}))
                 .map_err(|e| format!("startHelperService failed: {}", e))
         })();
-        result.map_err(|error| {
-            crate::events::report_service_failure(&app, "helper", &error);
-            error
+        result.inspect_err(|error| {
+            crate::events::report_service_failure(&app, "helper", error);
         })?;
     }
     log::info!("[VcpMobilePlugin] start_helper_service called");

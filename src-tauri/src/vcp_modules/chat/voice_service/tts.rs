@@ -3110,7 +3110,7 @@ mod tests {
         stop_bubble_for_messages(
             app.handle(),
             &TopicKey::new("agent", "a", "other"),
-            &[source.message_id.clone()],
+            std::slice::from_ref(&source.message_id),
         )
         .await
         .unwrap();
@@ -3118,9 +3118,13 @@ mod tests {
             .await
             .unwrap();
         assert!(!narration.cancel.is_cancelled());
-        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()])
-            .await
-            .unwrap();
+        stop_bubble_for_messages(
+            app.handle(),
+            &source.topic,
+            std::slice::from_ref(&source.message_id),
+        )
+        .await
+        .unwrap();
         assert!(narration.cancel.is_cancelled());
         assert!(state.0.lock().unwrap().current.is_none());
     }
@@ -3155,9 +3159,13 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()])
-            .await
-            .unwrap();
+        stop_bubble_for_messages(
+            app.handle(),
+            &source.topic,
+            std::slice::from_ref(&source.message_id),
+        )
+        .await
+        .unwrap();
         assert!(start_tts_session(
             app.handle().clone(),
             "late".into(),

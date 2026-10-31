@@ -1112,7 +1112,7 @@ mod cache_generation_tests {
         prefs.insert("a1".to_string(), AgentLocalSettingsPatch(patch_map));
 
         let mut tx = pool.begin().await.unwrap();
-        let missing = import_agent_local_settings(&mut *tx, &prefs).await.unwrap();
+        let missing = import_agent_local_settings(&mut tx, &prefs).await.unwrap();
         tx.commit().await.unwrap();
 
         assert!(!missing, "已有实体不应标记为 missing");
@@ -1207,7 +1207,7 @@ mod cache_generation_tests {
         prefs.insert("tombstone_1".to_string(), AgentLocalSettingsPatch(patch2));
 
         let mut tx = pool.begin().await.unwrap();
-        let missing = import_agent_local_settings(&mut *tx, &prefs).await.unwrap();
+        let missing = import_agent_local_settings(&mut tx, &prefs).await.unwrap();
         tx.commit().await.unwrap();
 
         // 验证 missing 标志

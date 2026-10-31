@@ -1652,10 +1652,10 @@ pub async fn open_file(
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        return tauri_plugin_vcp_mobile::system::open_file_native(
+        tauri_plugin_vcp_mobile::system::open_file_native(
             app_handle, clean_path, None, None, file_name,
         )
-        .await;
+        .await
     }
 
     // 使用 tauri-plugin-opener 的原生能力

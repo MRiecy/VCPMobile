@@ -201,7 +201,6 @@ pub(crate) async fn process_prepared_agent_chat_message(
         &history,
         &topic_key,
         &agent_config.name,
-        "agent",
         effective_prompt,
         None,
         reply_policy.as_deref(),

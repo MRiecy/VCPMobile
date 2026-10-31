@@ -64,7 +64,7 @@ pub fn encode_pcm16_mono(
     if pcm.is_empty() {
         return Err(EncodeError::EmptyInput);
     }
-    if pcm.len() % 2 != 0 {
+    if !pcm.len().is_multiple_of(2) {
         return Err(EncodeError::InvalidPcmLength);
     }
     let sample_count = pcm.len() / 2;

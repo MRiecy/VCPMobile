@@ -30,7 +30,7 @@ pub(super) struct SegmentBuffer {
 impl SegmentBuffer {
     pub(super) fn push(&self, pcm: Vec<u8>) -> Result<(), String> {
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
-        if state.finished || pcm.len() % 2 != 0 {
+        if state.finished || !pcm.len().is_multiple_of(2) {
             return Err("语音分段的 PCM 数据无效。".into());
         }
         if state.pcm.len().saturating_add(pcm.len()) > MAX_PCM_BYTES {

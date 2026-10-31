@@ -56,7 +56,7 @@ fn read_pcm16_mono(
             }
             format_found = true;
         } else if id == b"data" {
-            if size % 2 != 0 {
+            if !size.is_multiple_of(2) {
                 return Err(invalid());
             }
             sample_count += size / 2;

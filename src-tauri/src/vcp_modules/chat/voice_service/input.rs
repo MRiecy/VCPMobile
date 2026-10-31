@@ -1098,6 +1098,13 @@ pub async fn stop_voice_call_inputs(app: AppHandle, call_id: String) -> Result<(
     Ok(())
 }
 
+#[cfg_attr(
+    all(test, not(any(target_os = "android", target_os = "ios"))),
+    expect(
+        dead_code,
+        reason = "The native event channel is only installed on mobile"
+    )
+)]
 pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
     let id = match event {
         VoiceAudioEvent::Frame(event) => &event.frame.session_id,
@@ -1213,12 +1220,10 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
                 .map(|window| (capture.turn.clone(), window))
                 .collect();
         }
-        if finished {
-            if inner.capture.take().is_some() {
-                // Custom short pauses and long onset confirmation must not
-                // let the next utterance export already-submitted audio.
-                inner.allowed_after = frame.sample_index;
-            }
+        if finished && inner.capture.take().is_some() {
+            // Custom short pauses and long onset confirmation must not
+            // let the next utterance export already-submitted audio.
+            inner.allowed_after = frame.sample_index;
         }
         input
             .pending_exports

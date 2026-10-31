@@ -618,7 +618,7 @@ fn validate_wav(
             let Some((_, align)) = audio_format else {
                 return Err(invalid_wav());
             };
-            if size % align != 0 {
+            if !size.is_multiple_of(align) {
                 return Err(invalid_wav());
             }
             data_bytes = data_bytes.checked_add(size).ok_or_else(invalid_wav)?;
@@ -643,7 +643,7 @@ fn read_u32(bytes: &[u8]) -> u32 {
 
 /// Wrap a completed PCM16/24k/mono response in a conventional 44-byte WAV header.
 pub(super) fn pcm_wav(pcm: &[u8]) -> Result<Vec<u8>, String> {
-    if pcm.is_empty() || pcm.len() % 2 != 0 || pcm.len() > MAX_PCM_BYTES {
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) || pcm.len() > MAX_PCM_BYTES {
         return Err(format!(
             "待缓存的 PCM 音频为空、不完整或超过 {} MiB 上限。",
             MAX_PCM_BYTES / (1024 * 1024)

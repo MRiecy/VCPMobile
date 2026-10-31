@@ -20,12 +20,12 @@ pub(crate) async fn orchestrate_chat_context(
     history: &[ChatMessage],
     topic: &TopicKey,
     agent_name: &str,
-    scope: &str, // "agent" | "group"
     base_system_prompt: String,
     invite_prompt: Option<String>,
     reply_policy: Option<&VoiceReplyPolicy>,
 ) -> Result<Vec<Value>, String> {
     // One normalized snapshot drives both time anchoring and rule injection.
+    let scope = topic.owner_type.as_str();
     let rules = crate::vcp_modules::chat::context_injection::fetch_active_rules(db, scope).await?;
     let enable_time_anchoring = rules.iter().any(|rule| rule.id == "time_anchoring_v2");
 
@@ -367,7 +367,6 @@ mod voice_policy_tests {
                 &history,
                 &topic,
                 "成员",
-                scope,
                 "角色规则".into(),
                 invite.clone(),
                 Some(&reply_policy),
@@ -386,7 +385,6 @@ mod voice_policy_tests {
                 &history,
                 &topic,
                 "成员",
-                scope,
                 "角色规则".into(),
                 invite,
                 None,
@@ -401,18 +399,10 @@ mod voice_policy_tests {
     async fn blank_voice_rules_are_injected_without_defaults_or_protocol_instructions() {
         let pool = pool_with_tail_rule().await;
         let topic = TopicKey::new("agent", "owner", "topic");
-        let ordinary = orchestrate_chat_context(
-            &pool,
-            &[],
-            &topic,
-            "成员",
-            "agent",
-            String::new(),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let ordinary =
+            orchestrate_chat_context(&pool, &[], &topic, "成员", String::new(), None, None)
+                .await
+                .unwrap();
         assert_eq!(ordinary.last().unwrap()["content"], "Tavern tail");
         for rules in ["", " \n\t", "占位中"] {
             let reply_policy = policy(VoiceTtsMode::Builtin, rules);
@@ -421,7 +411,6 @@ mod voice_policy_tests {
                 &[],
                 &topic,
                 "成员",
-                "agent",
                 String::new(),
                 None,
                 Some(&reply_policy),

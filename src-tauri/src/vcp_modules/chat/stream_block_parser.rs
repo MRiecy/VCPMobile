@@ -435,8 +435,8 @@ impl StreamBlockParser {
                         // 因为后面已经紧跟了特种块，说明 before 物理上已全部输出完毕。
                         // 强制将 md_tail 沉淀为 stable 块，绝不阻碍后续特种块的闭合解析！
                         let nodes =
-                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&md_tail);
-                        let hash = HashAggregator::compute_content_hash(&md_tail);
+                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast(md_tail);
+                        let hash = HashAggregator::compute_content_hash(md_tail);
                         blocks.push(StreamBlock::markdown(md_tail.to_owned(), Some(nodes), hash));
                     }
                 }

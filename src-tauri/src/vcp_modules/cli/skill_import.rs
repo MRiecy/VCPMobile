@@ -756,12 +756,16 @@ fn validate_archive_path(value: &str) -> Result<PathBuf, SkillError> {
 }
 
 fn validate_archive_kind(file: &zip::read::ZipFile<'_, File>) -> Result<(), SkillError> {
+    // ZIP stores Unix mode bits independently of the host's libc mode_t.
+    const TYPE_MASK: u32 = 0o170000;
+    const DIRECTORY: u32 = 0o040000;
+    const REGULAR_FILE: u32 = 0o100000;
     if let Some(mode) = file.unix_mode() {
-        let kind = mode & libc::S_IFMT as u32;
+        let kind = mode & TYPE_MASK;
         let expected = if file.is_dir() {
-            libc::S_IFDIR as u32
+            DIRECTORY
         } else {
-            libc::S_IFREG as u32
+            REGULAR_FILE
         };
         if kind != 0 && kind != expected {
             return Err(SkillError::integrity(

@@ -80,7 +80,7 @@ fn file_box(
 }
 
 fn static_avif_brand(reader: &mut impl Read, bytes: u64) -> ProbeResult<()> {
-    if bytes < 8 || bytes % 4 != 0 {
+    if bytes < 8 || !bytes.is_multiple_of(4) {
         return Err(invalid("invalid ftyp length"));
     }
     let mut brand = [0; 4];
@@ -251,11 +251,8 @@ fn parse_meta(mut bytes: &[u8], remaining: &mut usize, max_pixels: u64) -> Probe
                     return Err(invalid("duplicate pitm"));
                 }
             }
-            b"iprp" => {
-                if properties.replace(item.body).is_some() {
-                    return Err(invalid("duplicate iprp"));
-                }
-            }
+            b"iprp" if properties.is_some() => return Err(invalid("duplicate iprp")),
+            b"iprp" => properties = Some(item.body),
             _ => {}
         }
     }

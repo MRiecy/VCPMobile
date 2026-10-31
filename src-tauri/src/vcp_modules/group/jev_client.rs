@@ -523,6 +523,7 @@ async fn perform_attempt(
 mod tests {
     use super::super::jev_protocol::JevQuestion;
     use super::*;
+    use crate::vcp_modules::infra::settings_manager::types::JevProviderConfig;
     use axum::extract::State;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
@@ -603,13 +604,16 @@ mod tests {
     }
 
     fn config(url: &str) -> JevConfig {
-        let mut config = JevConfig::default();
-        config.enabled = true;
-        config.typesafe.api_url = url.into();
-        config.typesafe.api_key = "fixture-first， fixture-second|".into();
-        config.typesafe.model = "fixture-model".into();
-        config.retry_base_delay_ms = 1;
-        config
+        JevConfig {
+            enabled: true,
+            typesafe: JevProviderConfig {
+                api_url: url.into(),
+                api_key: "fixture-first， fixture-second|".into(),
+                model: "fixture-model".into(),
+            },
+            retry_base_delay_ms: 1,
+            ..Default::default()
+        }
     }
 
     fn request() -> JevDecisionRequest {
@@ -940,9 +944,11 @@ mod tests {
                 "~typesafe/jev-latest",
             ),
         ] {
-            let mut config = JevConfig::default();
-            config.enabled = true;
-            config.provider = provider;
+            let mut config = JevConfig {
+                enabled: true,
+                provider,
+                ..Default::default()
+            };
             for blank in ["", " \t "] {
                 config.typesafe.api_url = blank.into();
                 config.openrouter.api_url = blank.into();

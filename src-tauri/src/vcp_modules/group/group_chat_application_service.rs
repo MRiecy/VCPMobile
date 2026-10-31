@@ -179,7 +179,6 @@ async fn run_group_speaker_turn<R: Runtime>(
         &full_history_for_context[history_start..],
         &topic_key,
         &agent_name,
-        "group",
         base_system_prompt,
         invite_prompt_processed,
         params.reply_policy,
@@ -648,7 +647,7 @@ fn extract_group_mentions(content: &str, members: &[(String, String)]) -> Vec<St
     }
     // Match the existing composer precedence: one longest name per occurrence,
     // then preserve appearance order and invite each member once.
-    candidates.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    candidates.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
     let text = content.to_lowercase();
     let mut offset = 0;
     let mut seen = std::collections::BTreeSet::new();
@@ -1089,6 +1088,7 @@ mod group_turn_tests {
     use super::*;
     use crate::vcp_modules::agent_types::AgentConfig;
     use crate::vcp_modules::group_types::GroupConfig;
+    use crate::vcp_modules::infra::settings_manager::types::{JevConfig, JevProviderConfig};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1306,11 +1306,16 @@ mod group_turn_tests {
         let runtime = session.decision_context(0).unwrap().unwrap();
         let request =
             Arc::new(build_jev_request(&members, &group, &runtime, &BTreeMap::new()).unwrap());
-        let mut config = crate::vcp_modules::infra::settings_manager::types::JevConfig::default();
-        config.enabled = true;
-        config.typesafe.api_url = format!("{endpoint}/decision");
-        config.typesafe.api_key = "fixture-key".into();
-        config.max_retries = 0;
+        let config = JevConfig {
+            enabled: true,
+            typesafe: JevProviderConfig {
+                api_url: format!("{endpoint}/decision"),
+                api_key: "fixture-key".into(),
+                ..Default::default()
+            },
+            max_retries: 0,
+            ..Default::default()
+        };
         let response = crate::vcp_modules::group::jev_client::decide(
             &config,
             request.clone(),

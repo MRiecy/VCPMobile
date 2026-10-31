@@ -321,172 +321,6 @@ pub(crate) fn parse_jev_decision(
     Ok((selected, reason))
 }
 
-#[cfg(test)]
-mod jev_budget_tests {
-    use super::*;
-
-    fn empty_request() -> JevDecisionRequest {
-        JevDecisionRequest {
-            state: serde_json::json!({"recentMessages": []}),
-            questions: BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn escaped_unicode_budget_keeps_whole_recent_messages_and_never_skips_a_gap() {
-        let newest = ChatMessage {
-            id: "new".into(),
-            role: "user".into(),
-            content: "中\"\\\n\u{0001}".into(),
-            ..Default::default()
-        };
-        let newest_bytes = serde_json::to_vec(&JevHistoryMessage::from(&newest))
-            .unwrap()
-            .len();
-        let mut request = empty_request();
-        append_jev_history(
-            &mut request,
-            vec![
-                ChatMessage {
-                    id: "old".into(),
-                    content: "short".into(),
-                    ..Default::default()
-                },
-                ChatMessage {
-                    id: "gap".into(),
-                    content: "x".repeat(512),
-                    ..Default::default()
-                },
-                newest.clone(),
-            ],
-            newest_bytes + 200,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .unwrap();
-        let messages = request.state["recentMessages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["id"], "new");
-        assert_eq!(messages[0]["text"], newest.content);
-        assert_eq!(
-            serde_json::to_vec(&request.state["recentMessages"])
-                .unwrap()
-                .len(),
-            newest_bytes + 2
-        );
-
-        let mut exact = empty_request();
-        append_jev_history(
-            &mut exact,
-            vec![newest.clone()],
-            newest_bytes,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .unwrap();
-        assert_eq!(exact.state["recentMessages"].as_array().unwrap().len(), 1);
-        let mut too_small = empty_request();
-        append_jev_history(
-            &mut too_small,
-            vec![newest],
-            newest_bytes - 1,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .unwrap();
-        assert!(too_small.state["recentMessages"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn budget_includes_inter_message_commas_and_preserves_chronological_order() {
-        let messages = ["a", "b"].map(|id| ChatMessage {
-            id: id.into(),
-            content: "正文".into(),
-            ..Default::default()
-        });
-        let total = messages
-            .iter()
-            .map(|message| {
-                serde_json::to_vec(&JevHistoryMessage::from(message))
-                    .unwrap()
-                    .len()
-            })
-            .sum::<usize>()
-            + 1;
-        let mut request = empty_request();
-        append_jev_history(
-            &mut request,
-            messages.to_vec(),
-            total,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .unwrap();
-        assert_eq!(request.state["recentMessages"][0]["id"], "a");
-        assert_eq!(request.state["recentMessages"][1]["id"], "b");
-        let mut request = empty_request();
-        append_jev_history(
-            &mut request,
-            messages.to_vec(),
-            total - 1,
-            &tokio_util::sync::CancellationToken::new(),
-        )
-        .unwrap();
-        assert_eq!(request.state["recentMessages"].as_array().unwrap().len(), 1);
-        assert_eq!(request.state["recentMessages"][0]["id"], "b");
-    }
-
-    #[test]
-    fn unavailable_probability_fallback_uses_group_order_only_when_configured() {
-        let members = vec![
-            AgentConfig {
-                id: "first".into(),
-                ..Default::default()
-            },
-            AgentConfig {
-                id: "second".into(),
-                ..Default::default()
-            },
-        ];
-        let mut group = GroupConfig::default();
-        assert_eq!(
-            fallback_jev_decision(&members, &group),
-            (vec![], Some("network_fallback_stop".into()))
-        );
-        group.local_settings.mode_settings.jev.fallback_policy = JevFallbackPolicy::TopSpeaker;
-        group.local_settings.mode_settings.sequential.speaker_order =
-            vec!["second".into(), "first".into()];
-        assert_eq!(
-            fallback_jev_decision(&members, &group),
-            (vec!["first".into()], None)
-        );
-        assert_eq!(
-            fallback_jev_decision(&[], &group),
-            (vec![], Some("no_active_members".into()))
-        );
-    }
-
-    #[test]
-    fn cancelled_history_preparation_does_not_publish_a_partial_window() {
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        cancellation.cancel();
-        let mut request = empty_request();
-        assert!(append_jev_history(
-            &mut request,
-            vec![ChatMessage {
-                content: "history".into(),
-                ..Default::default()
-            }],
-            1024,
-            &cancellation
-        )
-        .is_err());
-        assert!(request.state["recentMessages"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-    }
-}
-
 /// NatureRandom 决策引擎
 pub fn determine_naturerandom_speakers(
     active_members: &[AgentConfig],
@@ -719,4 +553,170 @@ pub fn determine_naturerandom_speakers(
     });
 
     speakers
+}
+
+#[cfg(test)]
+mod jev_budget_tests {
+    use super::*;
+
+    fn empty_request() -> JevDecisionRequest {
+        JevDecisionRequest {
+            state: serde_json::json!({"recentMessages": []}),
+            questions: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn escaped_unicode_budget_keeps_whole_recent_messages_and_never_skips_a_gap() {
+        let newest = ChatMessage {
+            id: "new".into(),
+            role: "user".into(),
+            content: "中\"\\\n\u{0001}".into(),
+            ..Default::default()
+        };
+        let newest_bytes = serde_json::to_vec(&JevHistoryMessage::from(&newest))
+            .unwrap()
+            .len();
+        let mut request = empty_request();
+        append_jev_history(
+            &mut request,
+            vec![
+                ChatMessage {
+                    id: "old".into(),
+                    content: "short".into(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "gap".into(),
+                    content: "x".repeat(512),
+                    ..Default::default()
+                },
+                newest.clone(),
+            ],
+            newest_bytes + 200,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        let messages = request.state["recentMessages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], "new");
+        assert_eq!(messages[0]["text"], newest.content);
+        assert_eq!(
+            serde_json::to_vec(&request.state["recentMessages"])
+                .unwrap()
+                .len(),
+            newest_bytes + 2
+        );
+
+        let mut exact = empty_request();
+        append_jev_history(
+            &mut exact,
+            vec![newest.clone()],
+            newest_bytes,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(exact.state["recentMessages"].as_array().unwrap().len(), 1);
+        let mut too_small = empty_request();
+        append_jev_history(
+            &mut too_small,
+            vec![newest],
+            newest_bytes - 1,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        assert!(too_small.state["recentMessages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn budget_includes_inter_message_commas_and_preserves_chronological_order() {
+        let messages = ["a", "b"].map(|id| ChatMessage {
+            id: id.into(),
+            content: "正文".into(),
+            ..Default::default()
+        });
+        let total = messages
+            .iter()
+            .map(|message| {
+                serde_json::to_vec(&JevHistoryMessage::from(message))
+                    .unwrap()
+                    .len()
+            })
+            .sum::<usize>()
+            + 1;
+        let mut request = empty_request();
+        append_jev_history(
+            &mut request,
+            messages.to_vec(),
+            total,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(request.state["recentMessages"][0]["id"], "a");
+        assert_eq!(request.state["recentMessages"][1]["id"], "b");
+        let mut request = empty_request();
+        append_jev_history(
+            &mut request,
+            messages.to_vec(),
+            total - 1,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(request.state["recentMessages"].as_array().unwrap().len(), 1);
+        assert_eq!(request.state["recentMessages"][0]["id"], "b");
+    }
+
+    #[test]
+    fn unavailable_probability_fallback_uses_group_order_only_when_configured() {
+        let members = vec![
+            AgentConfig {
+                id: "first".into(),
+                ..Default::default()
+            },
+            AgentConfig {
+                id: "second".into(),
+                ..Default::default()
+            },
+        ];
+        let mut group = GroupConfig::default();
+        assert_eq!(
+            fallback_jev_decision(&members, &group),
+            (vec![], Some("network_fallback_stop".into()))
+        );
+        group.local_settings.mode_settings.jev.fallback_policy = JevFallbackPolicy::TopSpeaker;
+        group.local_settings.mode_settings.sequential.speaker_order =
+            vec!["second".into(), "first".into()];
+        assert_eq!(
+            fallback_jev_decision(&members, &group),
+            (vec!["first".into()], None)
+        );
+        assert_eq!(
+            fallback_jev_decision(&[], &group),
+            (vec![], Some("no_active_members".into()))
+        );
+    }
+
+    #[test]
+    fn cancelled_history_preparation_does_not_publish_a_partial_window() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let mut request = empty_request();
+        assert!(append_jev_history(
+            &mut request,
+            vec![ChatMessage {
+                content: "history".into(),
+                ..Default::default()
+            }],
+            1024,
+            &cancellation
+        )
+        .is_err());
+        assert!(request.state["recentMessages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
 }

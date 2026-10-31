@@ -695,6 +695,10 @@ mod tests {
                 let events = socket_tx.clone();
                 sockets.spawn(async move {
                     let mut path = String::new();
+                    #[expect(
+                        clippy::result_large_err,
+                        reason = "Tungstenite's handshake callback fixes the HTTP error type"
+                    )]
                     let mut socket = tokio_tungstenite::accept_hdr_async(
                         stream,
                         |request: &Request, response: Response| {

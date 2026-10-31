@@ -845,8 +845,10 @@ mod tests {
                 "../../../migrations/0104_group_local_settings.sql"
             ))
             .expect("create local settings schema");
-        let mut local = crate::vcp_modules::group_types::GroupLocalSettings::default();
-        local.chat_mode = crate::vcp_modules::group_types::GroupChatMode::Jev;
+        let mut local = crate::vcp_modules::group_types::GroupLocalSettings {
+            chat_mode: crate::vcp_modules::group_types::GroupChatMode::Jev,
+            ..Default::default()
+        };
         local.mode_settings.sequential.speaker_order = vec!["b".into(), "a".into()];
         local.mode_settings.jev.history_window = 23;
         let raw = serde_json::to_string(&local).expect("encode local settings");

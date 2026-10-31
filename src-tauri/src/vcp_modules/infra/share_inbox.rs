@@ -1745,7 +1745,7 @@ mod tests {
         let (acquired_tx, acquired_rx) = mpsc::channel();
         let waiting_path = path.clone();
         let waiter = std::thread::spawn(move || {
-            let result = (|| -> Result<(), &'static str> {
+            let result: Result<(), &'static str> = {
                 let lease = File::options()
                     .read(true)
                     .write(true)
@@ -1759,7 +1759,7 @@ mod tests {
                 lock_file(&lease).unwrap();
                 acquired_tx.send(()).unwrap();
                 Err("import failed after acquiring its lease")
-            })();
+            };
             assert!(result.is_err());
         });
         waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
