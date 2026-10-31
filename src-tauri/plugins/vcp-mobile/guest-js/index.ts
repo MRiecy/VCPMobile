@@ -31,7 +31,7 @@ export interface PickedFiles {
   errors: { name: string; message: string }[];
 }
 
-export type PickFileMode = 'file' | 'camera' | 'gallery' | 'avatar' | 'config';
+export type PickFileMode = 'file' | 'camera' | 'gallery' | 'avatar' | 'config' | 'voiceSample';
 
 export function pickFile(mode?: PickFileMode, options?: { operationId?: string; maxBytes?: number }): Promise<PickedFile> {
   return invoke<PickedFile>('plugin:vcp-mobile|pick_file', { mode, ...options });

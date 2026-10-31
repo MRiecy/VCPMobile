@@ -15,7 +15,11 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::{io::AsyncReadExt, sync::{Mutex, OwnedMutexGuard}};
 use tokio_util::sync::CancellationToken;
 
-pub(super) const MAX_SAMPLE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CLONE_BASE64_BYTES: usize = 10_000_000;
+const MAX_SAMPLE_BYTES: u64 = (MAX_CLONE_BASE64_BYTES / 4 * 3) as u64;
+const SAMPLE_TOO_LARGE: &str = "参考音频超过 7.5 MB，Base64 编码后会超出 MiMo 的 10 MB 上限。";
+// Previously imported originals remain valid library entries and can still be auditioned locally.
+pub(super) const MAX_STORED_SAMPLE_BYTES: u64 = 32 * 1024 * 1024;
 static SAMPLE_FILES: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
 /// Serializes publication, reads and explicit deletion of local audio assets.
@@ -242,9 +246,6 @@ fn valid_mp3(bytes: &[u8]) -> bool {
 }
 
 fn detect_format(data: &[u8]) -> Result<CloneSampleFormat, String> {
-    if data.is_empty() || data.len() as u64 > MAX_SAMPLE_BYTES {
-        return Err(format!("声音样本为空或超过 {} MiB。", MAX_SAMPLE_BYTES / (1024 * 1024)));
-    }
     if valid_wav(data) {
         return Ok(CloneSampleFormat::Wav);
     }
@@ -411,7 +412,9 @@ fn encode_sample(
     format: CloneSampleFormat,
     cancel: &CancellationToken,
 ) -> Result<PreparedCloneSample, String> {
-    let mut data_url = String::with_capacity(bytes.len().div_ceil(3) * 4 + 32);
+    let encoded_len = bytes.len().div_ceil(3) * 4;
+    if encoded_len > MAX_CLONE_BASE64_BYTES { return Err(SAMPLE_TOO_LARGE.into()); }
+    let mut data_url = String::with_capacity(encoded_len + 32);
     data_url.push_str("data:");
     data_url.push_str(format.mime());
     data_url.push_str(";base64,");
@@ -431,12 +434,13 @@ fn encode_sample(
     })
 }
 
-async fn read_sample(root: &Path, id: &str) -> Result<Option<(VoiceCloneModelDto, Vec<u8>)>, String> {
+async fn read_sample(root: &Path, id: &str, max_bytes: u64) -> Result<Option<(VoiceCloneModelDto, Vec<u8>)>, String> {
     if id.is_empty() {
         return Ok(None);
     }
     let Some(metadata) = read_metadata(root, id).await? else { return Ok(None); };
-    let bytes = bounded_read(&registry::audio_path(root, &metadata)?, MAX_SAMPLE_BYTES).await?;
+    if metadata.file_bytes > max_bytes { return Err(SAMPLE_TOO_LARGE.into()); }
+    let bytes = bounded_read(&registry::audio_path(root, &metadata)?, max_bytes).await?;
     tokio::task::spawn_blocking(move || {
         if detect_format(&bytes)? != metadata.format || bytes.len() as u64 != metadata.file_bytes
             || hex::encode(Sha256::digest(&bytes)) != metadata.file_hash {
@@ -463,13 +467,14 @@ pub(super) async fn prepare_clone_sample<R: Runtime>(
     id: &str,
     cancel: &CancellationToken,
 ) -> Result<Option<PreparedCloneSample>, String> {
-    let Some((metadata, bytes)) = read_clone_sample_audio(app, id, cancel).await? else { return Ok(None); };
+    let Some((metadata, bytes)) = read_clone_sample_audio(app, id, MAX_SAMPLE_BYTES, cancel).await? else { return Ok(None); };
     encode_prepared(bytes, metadata.format, cancel).await.map(Some)
 }
 
 pub(super) async fn read_clone_sample_audio<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
+    max_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<Option<(VoiceCloneModelDto, Vec<u8>)>, String> {
     let guard = tokio::select! {
@@ -479,7 +484,7 @@ pub(super) async fn read_clone_sample_audio<R: Runtime>(
     };
     // Await the real read/hash owner before releasing the library lock. A token
     // cancels admission and subsequent work, never abandons a running IO owner.
-    let result = read_sample(&guard.root, id).await;
+    let result = read_sample(&guard.root, id, max_bytes).await;
     if cancel.is_cancelled() {
         return Err(super::network::CANCELLED.into());
     }
@@ -547,9 +552,10 @@ mod tests {
     fn sample_budget_and_cancel_apply_before_submission() {
         let mut bytes = mp3();
         bytes.resize(MAX_SAMPLE_BYTES as usize, 0);
-        assert!(detect_format(&bytes).is_ok());
+        let prepared = encode_sample(bytes.clone(), CloneSampleFormat::Mp3, &CancellationToken::new()).unwrap();
+        assert_eq!(prepared.data_url.split_once(',').unwrap().1.len(), 10_000_000);
         bytes.push(0);
-        assert!(detect_format(&bytes).is_err());
+        assert!(encode_sample(bytes, CloneSampleFormat::Mp3, &CancellationToken::new()).is_err());
         let cancel = CancellationToken::new();
         cancel.cancel();
         assert!(encode_sample(mp3(), CloneSampleFormat::Mp3, &cancel).is_err());
@@ -583,7 +589,7 @@ mod tests {
         tokio::fs::write(&source, &bytes).await.unwrap();
 
         let sample = import_picked(&root, &source, "声音", None).await.unwrap();
-        let (metadata, read) = read_sample(&root, &sample.id).await.unwrap().unwrap();
+        let (metadata, read) = read_sample(&root, &sample.id, MAX_SAMPLE_BYTES).await.unwrap().unwrap();
         assert_eq!(read, bytes);
         assert_eq!(metadata.format, CloneSampleFormat::Wav);
 
@@ -591,8 +597,19 @@ mod tests {
         tokio::fs::write(&source, &bytes).await.unwrap();
         assert!(import_picked(&root, &source, "声音", None).await.is_err());
 
+        // Older versions allowed larger originals. One such entry must not lock
+        // the library, and local playback and deletion still own its original.
+        let mut legacy = sample.clone();
+        legacy.id = uuid::Uuid::new_v4().simple().to_string();
+        legacy.file_bytes = bytes.len() as u64;
+        legacy.file_hash = hex::encode(Sha256::digest(&bytes));
+        registry::publish(&root, legacy.clone(), &bytes).await.unwrap();
+        assert!(read_sample(&root, &legacy.id, MAX_SAMPLE_BYTES).await.unwrap_err().contains("10 MB"));
+        assert_eq!(read_sample(&root, &legacy.id, MAX_STORED_SAMPLE_BYTES).await.unwrap().unwrap().1, bytes);
+        assert!(registry::delete(&root, &legacy.id).await.unwrap());
+
         tokio::fs::write(registry::audio_path(&root, &sample).unwrap(), &bytes).await.unwrap();
-        assert!(read_sample(&root, &sample.id).await.is_err());
+        assert!(read_sample(&root, &sample.id, MAX_SAMPLE_BYTES).await.is_err());
     }
 
     #[tokio::test]
@@ -650,7 +667,7 @@ mod tests {
         let reopened = registry::load(&root).await.unwrap();
         assert_eq!(reopened.samples.len(), 3);
         for sample in [&first, &second, &third] {
-            assert_eq!(read_sample(&root, &sample.id).await.unwrap().unwrap().1, wav());
+            assert_eq!(read_sample(&root, &sample.id, MAX_SAMPLE_BYTES).await.unwrap().unwrap().1, wav());
         }
         assert_eq!(
             tokio::fs::read(unknown.join("do-not-delete"))
@@ -671,7 +688,7 @@ mod tests {
         let mut corrupt = wav();
         corrupt[47] ^= 1;
         tokio::fs::write(&audio, &corrupt).await.unwrap();
-        assert!(read_sample(&root, &existing.id).await.is_err());
+        assert!(read_sample(&root, &existing.id, MAX_SAMPLE_BYTES).await.is_err());
         tokio::fs::write(root.join("registry.json"), b"{broken").await.unwrap();
         assert!(registry::load(&root).await.is_err());
         assert!(import_picked(&root, &source, "新声音", None).await.is_err());
@@ -685,11 +702,11 @@ mod tests {
         let source = temp.path().join("spoken.wav");
         tokio::fs::write(&source, wav()).await.unwrap();
         let sample = import_picked(&root, &source, "声音", Some("spoken.wav")).await.unwrap();
-        let (metadata, bytes) = read_sample(&root, &sample.id).await.unwrap().unwrap();
+        let (metadata, bytes) = read_sample(&root, &sample.id, MAX_SAMPLE_BYTES).await.unwrap().unwrap();
         assert_eq!(metadata.duration_ms, 1);
         let prepared = encode_prepared(bytes, metadata.format, &CancellationToken::new()).await.unwrap();
         assert!(registry::delete(&root, &sample.id).await.unwrap());
-        assert!(read_sample(&root, &sample.id).await.unwrap().is_none());
+        assert!(read_sample(&root, &sample.id, MAX_SAMPLE_BYTES).await.unwrap().is_none());
         assert!(!registry::delete(&root, &sample.id).await.unwrap());
         assert_eq!(STANDARD.decode(prepared.data_url.split_once(',').unwrap().1).unwrap(), wav());
     }

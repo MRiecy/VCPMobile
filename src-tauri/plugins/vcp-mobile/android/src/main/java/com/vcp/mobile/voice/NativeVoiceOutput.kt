@@ -21,12 +21,13 @@ class VoicePlaybackArgs { var playbackId: String = "" }
 @InvokeArg
 class StartVoicePlaybackArgs { var playbackId: String = ""; var startupFrames: Int = 0 }
 @InvokeArg
-class AppendVoicePlaybackArgs { var playbackId: String = ""; var pcmBase64: String = "" }
+class AppendVoicePlaybackArgs { var playbackId: String = ""; var pcmBase64: String = ""; var messageId: String? = null }
 
 /** Plugin-scoped output; it never requests microphone permission or reads capture state. */
 internal class NativeVoiceOutput(
     private val audioSession: VoiceAudioSession,
     private val playbackStarted: (String) -> Unit,
+    private val messageChanged: (String, String?) -> Unit,
 ) {
     data class Snapshot(val playbackId: String? = null, val playing: Boolean = false)
     private class Reply(private val invoke: Invoke) {
@@ -69,6 +70,8 @@ internal class NativeVoiceOutput(
         val output = Output(args.playbackId, lease)
         output.player = VoiceStreamPlayback(args.playbackId, args.startupFrames, lease, worker, started = { onMain {
             if (current.get() === output && !destroyed) playbackStarted(output.id)
+        } }, messageChanged = { message -> onMain {
+            if (current.get() === output && !destroyed) messageChanged(output.id, message)
         } }, playingChanged = { playing -> onMain {
             if (current.get() === output) state.set(Snapshot(output.id.takeIf { playing }, playing))
         } }, ended = { error -> onMain {
@@ -104,7 +107,7 @@ internal class NativeVoiceOutput(
             ShortArray(bytes.size / 2).also { ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(it) }
         } catch (_: Exception) { invoke.deliverError("invalid_voice_playback_chunk"); return@onMain }
         val reply = Reply(invoke)
-        output.player.append(samples) { error -> complete(output, reply, error) }
+        output.player.append(samples, args.messageId) { error -> complete(output, reply, error) }
     }
 
     fun finishVoicePlayback(invoke: Invoke) = onMain {

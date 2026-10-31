@@ -27,6 +27,7 @@ import {
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle, Square, Volume2 } from "@lucide/vue";
 import { useBubbleNarration } from './voice/useBubbleNarration';
+import { useVoiceCallStore } from './voice/voiceCallStore';
 import { useMessageTailRenderer } from './composables/useMessageTailRenderer';
 import { separateMessageStyles, stableMessageStyles, standaloneStyleSource } from './utils/messageStyles';
 import { createMarkdownPresentation } from './utils/markdownPresentation';
@@ -68,6 +69,7 @@ const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 const chatPreferences = useChatPreferencesStore();
 const bubbleNarration = useBubbleNarration();
+const voiceCall = useVoiceCallStore();
 
 let rendererDisposed = false;
 const {
@@ -126,6 +128,7 @@ const shell = computed(() => props.message.shell);
 
 const isNarratingCurrentMessage = computed(() => {
   if (shell.value?.isUser) return false;
+  if (voiceCall.speakingMessageId === props.message.id) return true;
   const activeKey = bubbleNarration.activeMessageKey;
   if (!activeKey || activeKey.messageId !== props.message.id) return false;
   const currentConv = sessionStore.currentConversationKey;

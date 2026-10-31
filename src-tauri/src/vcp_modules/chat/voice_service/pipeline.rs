@@ -123,6 +123,8 @@ impl SegmentBuffer {
 
 pub(super) trait SegmentSource {
     type Piece;
+    /// The chat message owning the piece most recently returned by next().
+    fn message_id(&self) -> Option<&str> { None }
     fn next(
         &mut self,
         cancel: &CancellationToken,
@@ -130,6 +132,8 @@ pub(super) trait SegmentSource {
 }
 
 pub(super) trait PacketConsumer {
+    fn mark_message(&mut self, _message_id: String) {}
+
     fn append(
         &mut self,
         pcm: Vec<u8>,
@@ -160,7 +164,7 @@ where
     C: PacketConsumer,
 {
     let local = cancel.child_token();
-    let (sender, mut receiver) = mpsc::channel::<Arc<SegmentBuffer>>(PREFETCH_SEGMENTS);
+    let (sender, mut receiver) = mpsc::channel(PREFETCH_SEGMENTS);
     let produce = async {
         let result: Result<(), String> = async {
             loop {
@@ -173,7 +177,7 @@ where
                     return Ok(());
                 };
                 let segment = Arc::new(SegmentBuffer::default());
-                permit.send(segment.clone());
+                permit.send((source.message_id().map(str::to_owned), segment.clone()));
                 // Do not select/drop prepare: cache IO and decode workers own
                 // their cancellation and must be awaited to actual completion.
                 prepare(piece, segment.clone(), local.clone()).await?;
@@ -189,16 +193,21 @@ where
     };
     let consume = async {
         let result: Result<(), String> = async {
+            let mut last_message = None;
             loop {
                 let segment = tokio::select! {
                     biased;
                     _ = local.cancelled() => return Err(CANCELLED.into()),
                     segment = receiver.recv() => segment,
                 };
-                let Some(segment) = segment else {
+                let Some((mut message, segment)) = segment else {
                     return Ok(());
                 };
                 while let Some(pcm) = segment.next(&local).await? {
+                    if let Some(id) = message.take().filter(|id| Some(id) != last_message.as_ref()) {
+                        consumer.mark_message(id.clone());
+                        last_message = Some(id);
+                    }
                     consumer.append(pcm, &local).await?;
                 }
                 consumer.end_segment(&local).await?;

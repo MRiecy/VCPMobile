@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
+import MessageRenderer from '../../../features/chat/MessageRenderer.vue';
 import ChatAvatar from '../../../features/chat/components/ChatAvatar.vue';
 import InputEnhancer from '../../../features/chat/InputEnhancer.vue';
 import NarrationWave from '../../../features/chat/components/NarrationWave.vue';
 import { useBubbleNarration } from '../../../features/chat/voice/useBubbleNarration';
+import { useVoiceCallStore } from '../../../features/chat/voice/voiceCallStore';
+import type { VoiceCallSnapshot } from '../../../features/chat/voice/voiceConversation';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
-import { mockInvoke } from '../../mocks/tauri';
+import { emitTauriEvent, mockInvoke } from '../../mocks/tauri';
 
 let pinia: Pinia;
 const wrappers: VueWrapper[] = [];
@@ -29,6 +32,38 @@ afterEach(async () => {
 
 describe('Bubble Narration UI Enhancements', () => {
   describe('ChatAvatar narration waveform indicator', () => {
+    it('follows the audible group message across recovery, speaker changes and interruption', async () => {
+      useChatSessionStore().setConversation({ id: 'group', type: 'group' }, 'topic');
+      const snapshot: VoiceCallSnapshot = {
+        callId: 'call', target: { ownerId: 'group', ownerType: 'group', topicId: 'topic' },
+        revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
+        replyState: 'finished', ttsState: 'speaking', speakingMessageId: 'first',
+        partial: '', error: null, notice: null, inputSessionId: null, lastPersistedMessageId: 'second',
+      };
+      mockInvoke('allocate_voice_document', () => 'document-1');
+      mockInvoke('get_voice_conversation_snapshot', () => snapshot);
+      const rows = [['earlier', 'alice'], ['first', 'alice'], ['second', 'bob']].map(([id, agentId]) =>
+        mount(MessageRenderer, {
+          props: { message: { id, agentId, role: 'assistant', timestamp: 1, content: '正文', blocks: [],
+            shell: { isUser: false, displayName: agentId, avatarColor: '#888' } } },
+          global: { plugins: [pinia], directives: { longpress: {} }, stubs: { VcpAvatar: true } },
+        }));
+      wrappers.push(...rows);
+      const activeAvatars = () => rows.filter(row => row.get('.vcp-message-avatar').attributes('data-narrating') === 'true')
+        .map(row => row.attributes('data-message-id'));
+      await useVoiceCallStore().recover();
+      await flushPromises();
+      expect(activeAvatars()).toEqual(['first']);
+
+      emitTauriEvent('vcp-voice-call', { ...snapshot, revision: 2, speakingMessageId: 'second' });
+      emitTauriEvent('vcp-voice-call', snapshot);
+      await flushPromises();
+      expect(activeAvatars()).toEqual(['second']);
+      emitTauriEvent('vcp-voice-call', { ...snapshot, revision: 3, ttsState: 'cancelled', speakingMessageId: undefined });
+      await flushPromises();
+      expect(activeAvatars()).toEqual([]);
+    });
+
     it('activates avatar wave indicator when isNarrating is true for assistant avatar', () => {
       const wrapper = mount(ChatAvatar, {
         props: {

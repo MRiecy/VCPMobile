@@ -182,12 +182,11 @@ impl Registry {
         Ok(())
     }
 
-    fn observe_playback_started(&self, id: &str) -> Option<&Arc<TtsJob>> {
+    fn playing_job(&self, id: &str) -> Option<&Arc<TtsJob>> {
         let job = self.current.as_ref().filter(|slot| slot.id == id)?.job.as_ref()?;
         if !job.player_started.load(Ordering::Acquire)
             || job.cancel.is_cancelled()
             || job.terminal.load(Ordering::Acquire)
-            || job.playback_observed.swap(true, Ordering::AcqRel)
         {
             return None;
         }
@@ -477,7 +476,7 @@ fn emit<R: Runtime>(
     stage: &'static str,
     message: Option<String>,
 ) {
-    super::call::tts_status(app, &job.id, stage, message.as_deref());
+    super::call::tts_status(app, &job.id, stage, message.as_deref(), None);
     let _ = app.emit(
         TTS_EVENT,
         TtsEvent {
@@ -497,9 +496,20 @@ pub fn handle_playback_event<R: Runtime>(
 ) {
     let Some(state) = app.try_state::<TtsServiceState>() else { return };
     let Ok(registry) = state.0.lock() else { return };
-    let tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent::Started { playback_id } = event;
-    if let Some(job) = registry.observe_playback_started(&playback_id) {
-        emit(app, job, "status", "speaking", None);
+    use tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent;
+    match event {
+        NativeVoicePlaybackEvent::Started { playback_id } => {
+            if let Some(job) = registry.playing_job(&playback_id) {
+                if !job.playback_observed.swap(true, Ordering::AcqRel) {
+                    emit(app, job, "status", "speaking", None);
+                }
+            }
+        }
+        NativeVoicePlaybackEvent::Message { playback_id, message_id } => {
+            if registry.playing_job(&playback_id).is_some() {
+                super::call::tts_status(app, &playback_id, "speaking", None, message_id);
+            }
+        }
     }
 }
 
@@ -579,13 +589,9 @@ pub(super) fn request_stop<R: Runtime>(app: &AppHandle<R>, id: &str) {
 
 async fn flush_player<R: Runtime>(app: &AppHandle<R>, job: &TtsJob) -> Result<(), String> {
     let _stop = job.stop_lock.lock().await;
-    if job.player_started.swap(false, Ordering::AcqRel) {
-        if let Err(error) =
-            tauri_plugin_vcp_mobile::voice::stop_playback(app.clone(), job.id.clone()).await
-        {
-            job.player_started.store(true, Ordering::Release);
-            return Err(error);
-        }
+    if job.player_started.load(Ordering::Acquire) {
+        tauri_plugin_vcp_mobile::voice::stop_playback(app.clone(), job.id.clone()).await?;
+        job.player_started.store(false, Ordering::Release);
     }
     Ok(())
 }
@@ -732,7 +738,7 @@ async fn start_narration<R: Runtime>(
             }
         }
         NarrationSource::Sample(sample_id) => {
-            match samples::read_clone_sample_audio(&app, &sample_id, &cancel).await {
+            match samples::read_clone_sample_audio(&app, &sample_id, samples::MAX_STORED_SAMPLE_BYTES, &cancel).await {
                 Ok(Some((_, bytes))) => {
                     sample_audio = Some(bytes);
                     Ok(PreparedNarration {
@@ -1010,7 +1016,7 @@ async fn speak_inner<R: Runtime>(
         app, narration, speech_queue: VecDeque::new(), chat_finished: false,
         current_voice: None, last_spoken_voice: None,
     };
-    let mut player = NativeConsumer { app, narration, started: false };
+    let mut player = NativeConsumer { app, narration, started: false, message_marker: None };
     if let Some(audio) = sample_audio {
         audio_codec::decode_stream(audio.into(), &narration.cancel, &mut player).await?;
         return player.finish().await;
@@ -1072,11 +1078,15 @@ struct NarrationReader<'a, R: Runtime> {
     // the fixed truncation notice. Prefetched pieces own their own Arc leases;
     // a group turn never accumulates every imported audio file.
     current_voice: Option<(String, Arc<PreparedVoice>)>,
-    last_spoken_voice: Option<Arc<PreparedVoice>>,
+    last_spoken_voice: Option<(String, Arc<PreparedVoice>)>,
 }
 
 impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
     type Piece = NarrationPiece;
+
+    fn message_id(&self) -> Option<&str> {
+        self.last_spoken_voice.as_ref().map(|(id, _)| id.as_str())
+    }
 
     async fn next(&mut self, cancel: &CancellationToken) -> Result<Option<NarrationPiece>, String> {
         loop {
@@ -1111,7 +1121,7 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                         // task's explanation. Reuse the last playable voice;
                         // without one, honor the already chosen global voice.
                         let voice = if let Some((message_id, agent_id, _)) = &speaker {
-                            if let Some(voice) = &self.last_spoken_voice {
+                            if let Some((_, voice)) = &self.last_spoken_voice {
                                 Some(voice.clone())
                             } else {
                                 // A message containing only suppressed syntax
@@ -1128,6 +1138,7 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                                     Arc::new(prepare_voice(self.app, self.narration.config.clone(), cancel).await?)
                                 };
                                 if !voice.config.has_selected_voice() { continue; }
+                                self.last_spoken_voice = Some((message_id.clone(), voice.clone()));
                                 Some(voice)
                             }
                         } else { None };
@@ -1143,13 +1154,11 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                             if group { continue; }
                             return Err("当前未选择朗读音色，请先选择音色。".into());
                         }
+                        self.last_spoken_voice.clone_from(&self.current_voice);
                         self.current_voice.as_ref().map(|(_, voice)| voice.clone())
                     } else {
                         None
                     };
-                    if let Some(voice) = &voice {
-                        self.last_spoken_voice = Some(voice.clone());
-                    }
                     return Ok(Some(NarrationPiece { text, guidance, voice }));
                 }
                 ReplyPiece::Finished => return Ok(None),
@@ -1221,9 +1230,12 @@ struct NativeConsumer<'a, R: Runtime> {
     app: &'a AppHandle<R>,
     narration: &'a Arc<TtsJob>,
     started: bool,
+    message_marker: Option<String>,
 }
 
 impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
+    fn mark_message(&mut self, message_id: String) { self.message_marker = Some(message_id); }
+
     async fn append(&mut self, pcm: Vec<u8>, cancel: &CancellationToken) -> Result<(), String> {
         if !self.started {
             // Mark before async admission so stop can install its native
@@ -1241,7 +1253,7 @@ impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
         // native handoff without splitting and rebuilding the PCM upstream.
         for packet in pcm.chunks(PCM_PACKET_BYTES) {
             playback_call(cancel, tauri_plugin_vcp_mobile::voice::append_playback(
-                self.app.clone(), self.narration.id.clone(), STANDARD.encode(packet))).await?;
+                self.app.clone(), self.narration.id.clone(), STANDARD.encode(packet), self.message_marker.take())).await?;
         }
         Ok(())
     }
@@ -1735,7 +1747,9 @@ mod tests {
         };
         let first = reader.next(&narration.cancel).await.unwrap().unwrap();
         assert_eq!(first.text, body);
+        assert_eq!(reader.message_id(), Some("first"));
         let notice = reader.next(&narration.cancel).await.unwrap().unwrap();
+        assert_eq!(reader.message_id(), Some("first"));
         assert_eq!(notice.text, "语音内容过长，剩余内容已截断");
         assert!(notice.guidance.is_none());
         assert!(Arc::ptr_eq(first.voice.as_ref().unwrap(), notice.voice.as_ref().unwrap()));

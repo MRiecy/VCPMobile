@@ -89,7 +89,7 @@ const toggleEditor = () => {
 };
 
 const handleAttachToggle = () => {
-  if (props.suspended || historyStore.editingMessage || historyStore.isSubmitting) return;
+  if (props.suspended || historyStore.isSubmitting) return;
   // 附件选择沿原输入区展开，避免 112px 菜单挤掉键盘上方的编辑/发送区域。
   collapseEditor();
   toggleAttachMenu();
@@ -452,13 +452,13 @@ const handleKeydown = (e: KeyboardEvent) => {
 };
 
 const triggerFilePick = async (mode: 'camera' | 'gallery' | 'file') => {
-  if (props.disabled || historyStore.editingMessage || historyStore.isSubmitting) return;
+  if (props.disabled || historyStore.isSubmitting) return;
   emit('attach');
   await attachmentStore.handleAttachment(mode);
 };
 
 const removeStagedAttachment = (index: number) => {
-  if (historyStore.isSubmitting || historyStore.editingMessage) return;
+  if (historyStore.isSubmitting) return;
   attachmentStore.removeStaged(index);
 };
 
@@ -544,6 +544,24 @@ onUnmounted(() => {
     <GroupStopAllButton v-if="!isExpanded" />
 
     <div class="input-context">
+    <!-- 编辑重发状态横条 -->
+    <div
+      v-if="historyStore.editingMessage && !isExpanded"
+      class="editing-message-bar flex items-center justify-between px-3 py-1.5 mb-2 mx-1 rounded-xl bg-blue-500/10 border border-blue-500/20 text-xs text-blue-500 dark:text-blue-400"
+    >
+      <div class="flex items-center gap-1.5 min-w-0">
+        <span class="i-heroicons-pencil-square text-sm shrink-0"></span>
+        <span class="truncate font-medium">正在编辑重发历史消息</span>
+      </div>
+      <button
+        type="button"
+        @click="historyStore.cancelEditResend()"
+        class="shrink-0 ml-2 px-2 py-0.5 rounded-md hover:bg-blue-500/15 active:scale-95 transition-all text-blue-500/80 hover:text-blue-500 font-medium"
+      >
+        取消
+      </button>
+    </div>
+
     <!-- 群组邀请与 JEV 会话控制 -->
     <GroupInviteBar />
 
@@ -666,7 +684,7 @@ onUnmounted(() => {
         <div class="input-actions flex items-center shrink-0 mb-0.5 relative gap-1.5">
           <!-- 展开附件按钮 -->
           <button
-            v-if="!isExpanded && !historyStore.editingMessage"
+            v-if="!isExpanded"
             v-longpress="openTarvenSelector"
             v-guide="'chat-plus-button'"
             @click="handleAttachToggle"

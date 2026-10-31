@@ -11,11 +11,12 @@ internal class VoicePlaybackQueue(
     private val capacityFrames: Int = 240_000, // 10 seconds at 24 kHz; startup uses its own watermark.
     private val startupFrames: Int,
 ) {
-    data class Read(val samples: ShortArray?, val finished: Boolean, val segmentEnd: Boolean = false)
-    private data class Waiting(val samples: ShortArray, val admitted: (String?) -> Unit)
+    data class Read(val samples: ShortArray?, val finished: Boolean, val segmentEnd: Boolean, val messageId: String?)
+    private data class Waiting(val samples: ShortArray, val messageId: String?, val admitted: (String?) -> Unit)
     private val lock = Object()
     private val samples = ShortArray(capacityFrames)
     private val segmentEnds = ArrayDeque<Long>()
+    private val messageStarts = ArrayDeque<Pair<Long, String>>()
     private var readIndex = 0
     private var bufferedFrames = 0
     private var acceptedFrames = 0L
@@ -28,7 +29,8 @@ internal class VoicePlaybackQueue(
 
     init { require(startupFrames in 1..capacityFrames) }
 
-    private fun accept(input: ShortArray) {
+    private fun accept(input: ShortArray, messageId: String?) {
+        if (messageId != null) messageStarts.addLast(acceptedFrames to messageId)
         val offset = (readIndex + bufferedFrames) % capacityFrames
         val first = minOf(input.size, capacityFrames - offset)
         input.copyInto(samples, offset, 0, first)
@@ -39,15 +41,15 @@ internal class VoicePlaybackQueue(
         lock.notifyAll()
     }
 
-    fun append(samples: ShortArray, admitted: (String?) -> Unit) {
+    fun append(samples: ShortArray, messageId: String? = null, admitted: (String?) -> Unit) {
         val result = synchronized(lock) {
             when {
                 samples.isEmpty() || samples.size > minOf(16_384, capacityFrames) -> "voice_playback_invalid_pcm"
                 cancelled != null -> cancelled
                 sealed -> "voice_playback_already_finished"
                 waiting != null -> "voice_playback_backpressure"
-                samples.size <= capacityFrames - bufferedFrames -> { accept(samples); "" }
-                waiting == null -> { waiting = Waiting(samples, admitted); null }
+                samples.size <= capacityFrames - bufferedFrames -> { accept(samples, messageId); "" }
+                waiting == null -> { waiting = Waiting(samples, messageId, admitted); null }
                 else -> "voice_playback_backpressure"
             }
         }
@@ -64,6 +66,9 @@ internal class VoicePlaybackQueue(
             cancelled?.let { throw IllegalStateException(it) }
             var count = if (startupOpen || sealed) minOf(bufferedFrames, 16_384) else 0
             segmentEnds.firstOrNull()?.let { count = minOf(count.toLong(), it - consumedFrames).toInt() }
+            val messageId = if (count > 0 && messageStarts.peekFirst()?.first == consumedFrames)
+                messageStarts.removeFirst().second else null
+            messageStarts.peekFirst()?.let { count = minOf(count.toLong(), it.first - consumedFrames).toInt() }
             val chunk = if (count > 0) ShortArray(count).also { output ->
                 val first = minOf(count, capacityFrames - readIndex)
                 samples.copyInto(output, 0, readIndex, readIndex + first)
@@ -75,9 +80,9 @@ internal class VoicePlaybackQueue(
             val segmentEnd = segmentEnds.firstOrNull() == consumedFrames
             if (segmentEnd) segmentEnds.removeFirst()
             waiting?.takeIf { it.samples.size <= capacityFrames - bufferedFrames }?.let {
-                waiting = null; accept(it.samples); promoted = it
+                waiting = null; accept(it.samples, it.messageId); promoted = it
             }
-            Read(chunk, sealed && bufferedFrames == 0 && waiting == null && segmentEnds.isEmpty(), segmentEnd)
+            Read(chunk, sealed && bufferedFrames == 0 && waiting == null && segmentEnds.isEmpty(), segmentEnd, messageId)
         }
         promoted?.admitted?.invoke(null)
         return result
@@ -110,6 +115,7 @@ internal class VoicePlaybackQueue(
             cancelled = reason
             bufferedFrames = 0
             segmentEnds.clear()
+            messageStarts.clear()
             val pending = waiting
             waiting = null
             lock.notifyAll()
@@ -125,6 +131,7 @@ internal class VoiceLegacyScoResampler {
     private var inputIndex = -1L
     private var inputCount = 0L
     private var outputCount = 0L
+    val pendingOutputFrames: Long get() = inputCount * 2 / 3 - outputCount
     private var finished = false
     private val phases = Array(2) { phase ->
         DoubleArray(32) { index ->

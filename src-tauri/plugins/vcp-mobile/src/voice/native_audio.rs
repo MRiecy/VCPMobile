@@ -47,7 +47,7 @@ pub async fn start_playback<R: Runtime>(
 }
 
 pub async fn append_playback<R: Runtime>(
-    app: AppHandle<R>, playback_id: String, pcm_base64: String,
+    app: AppHandle<R>, playback_id: String, pcm_base64: String, message_id: Option<String>,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
     // The native boundary also validates decoded PCM alignment and size.
@@ -55,7 +55,7 @@ pub async fn append_playback<R: Runtime>(
         return Err("voice_playback_chunk_invalid".into());
     }
     native_call(app, "appendVoicePlayback", serde_json::json!({
-        "playbackId": playback_id, "pcmBase64": pcm_base64,
+        "playbackId": playback_id, "pcmBase64": pcm_base64, "messageId": message_id,
     }), None).await
 }
 

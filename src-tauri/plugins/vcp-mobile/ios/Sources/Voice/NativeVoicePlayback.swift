@@ -14,22 +14,34 @@ final class NativeVoicePlayback {
     private struct Chunk {
         let key = UUID()
         let buffer: AVAudioPCMBuffer
+        let messageId: String?
         var frames: Int { Int(buffer.frameLength) }
     }
     private final class PendingFrames {
         private var samples = [Float](repeating: 0, count: NativeVoicePlayback.capacityFrames)
         private var head = 0
         private(set) var count = 0
+        private var consumed: Int64 = 0
+        private var messageStarts: [(frame: Int64, id: String)] = []
+        private var messageId: String?
 
-        func append(_ input: [Float]) {
+        func append(_ input: [Float], messageId: String?) {
             precondition(input.count <= samples.count - count)
+            if let id = messageId { messageStarts.append((consumed + Int64(count), id)) }
             for (offset, sample) in input.enumerated() {
                 samples[(head + count + offset) % samples.count] = sample
             }
             count += input.count
         }
 
-        func take(_ frames: Int, format: AVAudioFormat) throws -> Chunk {
+        func take(_ requested: Int, format: AVAudioFormat) throws -> Chunk {
+            var frames = requested
+            if let marker = messageStarts.first, marker.frame == consumed {
+                messageId = messageStarts.removeFirst().id
+                // Confirm the first audible block of each speaker within 20 ms of rendered audio.
+                frames = min(frames, NativeVoicePlayback.minimumChunkFrames)
+            }
+            if let next = messageStarts.first { frames = min(frames, Int(next.frame - consumed)) }
             guard frames > 0, frames <= count,
                   let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
                   let output = buffer.floatChannelData?[0] else {
@@ -39,7 +51,8 @@ final class NativeVoicePlayback {
             for index in 0..<frames { output[index] = samples[(head + index) % samples.count] }
             head = (head + frames) % samples.count
             count -= frames
-            return Chunk(buffer: buffer)
+            consumed += Int64(frames)
+            return Chunk(buffer: buffer, messageId: messageId)
         }
     }
     private final class Playback {
@@ -54,6 +67,7 @@ final class NativeVoicePlayback {
         var flushTail = false
         var startedReported = false
         var rendererPlaying = false
+        var reportedMessage: String?
         var append: Append?
         var finish: Invoke?
         var finishing = false
@@ -62,10 +76,11 @@ final class NativeVoicePlayback {
     private final class Append {
         weak var owner: Playback?
         let encoded: String
+        let messageId: String?
         var invoke: Invoke?
         var samples: [Float]?
-        init(owner: Playback, encoded: String, invoke: Invoke) {
-            self.owner = owner; self.encoded = encoded; self.invoke = invoke
+        init(owner: Playback, encoded: String, messageId: String?, invoke: Invoke) {
+            self.owner = owner; self.encoded = encoded; self.messageId = messageId; self.invoke = invoke
         }
         func reject(_ reason: String) { let pending = invoke; invoke = nil; pending?.reject(reason) }
         func resolve() { let pending = invoke; invoke = nil; pending?.resolve() }
@@ -94,6 +109,7 @@ final class NativeVoicePlayback {
     private var disposed = false
     var onStatus: ((String?, Bool) -> Void)?
     var onStarted: ((String) -> Void)?
+    var onMessage: ((String, String?) -> Void)?
 
     init(format: AVAudioFormat) {
         self.format = format
@@ -112,6 +128,7 @@ final class NativeVoicePlayback {
         self.player = player
         if let current = active {
             current.rendererPlaying = false
+            reportMessage(nil, current: current)
             onStatus?(current.id, false)
             if current.startupReleased, player != nil {
                 for chunk in current.queued { schedule(chunk, current: current) }
@@ -144,7 +161,7 @@ final class NativeVoicePlayback {
         invoke.resolve()
     }
 
-    func append(id: String, pcmBase64: String, invoke: Invoke) {
+    func append(id: String, pcmBase64: String, messageId: String?, invoke: Invoke) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let current = active, current.id == id, !current.finishing, !disposed else {
             invoke.reject("cancelled:voice_playback"); return
@@ -155,7 +172,7 @@ final class NativeVoicePlayback {
         guard current.append == nil, waitingDecode == nil else {
             invoke.reject("voice_playback_append_busy"); return
         }
-        let request = Append(owner: current, encoded: pcmBase64, invoke: invoke)
+        let request = Append(owner: current, encoded: pcmBase64, messageId: messageId, invoke: invoke)
         current.append = request
         waitingDecode = request
         decodeNext()
@@ -208,7 +225,7 @@ final class NativeVoicePlayback {
         guard active === current else { return }
         if let append = current.append, let samples = append.samples,
            player != nil, current.bufferedFrames + samples.count <= Self.capacityFrames {
-            current.pending.append(samples)
+            current.pending.append(samples, messageId: append.messageId)
             current.segmentHasAudio = true
             current.append = nil
             append.samples = nil
@@ -247,6 +264,7 @@ final class NativeVoicePlayback {
             if !current.queued.isEmpty, !player.isPlaying { player.play() }
         }
         onStatus?(current.id, current.rendererPlaying && !current.queued.isEmpty)
+        if current.queued.isEmpty { reportMessage(nil, current: current) }
         if current.finishing, current.bufferedFrames == 0, current.append == nil {
             let completion = current.finish
             current.finish = nil
@@ -275,9 +293,16 @@ final class NativeVoicePlayback {
                     self.onStarted?(current.id)
                 }
                 current.queuedFrames -= current.queued.remove(at: index).frames
+                self.reportMessage(chunk.messageId, current: current)
                 self.admit(current)
             }
         }
+    }
+
+    private func reportMessage(_ id: String?, current: Playback) {
+        guard current.reportedMessage != id else { return }
+        current.reportedMessage = id
+        onMessage?(current.id, id)
     }
 
     func endSegment(id: String, invoke: Invoke) {
@@ -324,6 +349,7 @@ final class NativeVoicePlayback {
         }
         active = nil
         rememberClosed(current.id)
+        reportMessage(nil, current: current)
         current.append?.reject(reason)
         if waitingDecode === current.append { waitingDecode = nil }
         current.append = nil

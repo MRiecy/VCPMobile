@@ -12,6 +12,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -76,10 +77,11 @@ class VoiceStreamPlaybackTest {
         unmockkAll()
     }
 
-    private fun start(startupFrames: Int = 5_760, onPlaying: (Boolean) -> Unit = {}): VoiceStreamPlayback {
+    private fun start(startupFrames: Int = 5_760, onMessage: (String?) -> Unit = {}, onPlaying: (Boolean) -> Unit = {}): VoiceStreamPlayback {
         val ready = CountDownLatch(1)
         val output = VoiceStreamPlayback("test", startupFrames, lease, executor,
-            started = { progressEvents.incrementAndGet() }, playingChanged = onPlaying, ended = {})
+            started = { progressEvents.incrementAndGet() }, messageChanged = onMessage,
+            playingChanged = onPlaying, ended = {})
         current = output
         output.start { assertNull(it); ready.countDown() }
         assertTrue("start acknowledges resources without PCM", ready.await(2, TimeUnit.SECONDS))
@@ -104,6 +106,27 @@ class VoiceStreamPlaybackTest {
         assertEquals(source.toList(), pcm)
         assertEquals(listOf(source.size), starts)
         assertEquals(1, progressEvents.get())
+    }
+
+    @Test fun switchesMessageOnlyWhenThePlaybackHeadPassesItsFirstFrame() {
+        val head = AtomicInteger(0)
+        val messages = LinkedBlockingQueue<String>()
+        every { player.playbackHeadPosition } answers { synchronized(pcm) { minOf(head.get(), pcm.size) } }
+        val output = start(startupFrames = 1, onMessage = { messages.add(it ?: "idle") })
+        output.append(ShortArray(40), "first") { assertNull(it) }
+        output.endSegment { assertNull(it) }
+        output.append(ShortArray(40), "second") { assertNull(it) }
+        output.endSegment { assertNull(it) }
+        verify(timeout = 2_000) { player.play() }
+        assertTrue(messages.isEmpty())
+        head.set(40)
+        assertEquals("first", messages.poll(2, TimeUnit.SECONDS))
+        assertFalse(messages.contains("second"))
+        head.set(41)
+        assertEquals("second", messages.poll(2, TimeUnit.SECONDS))
+        head.set(80)
+        finish(output)
+        assertEquals("idle", messages.poll(2, TimeUnit.SECONDS))
     }
 
     @Test fun largeDriverCapacityDoesNotDelayChatStartupAndRestoresAfterHeadProgress() {

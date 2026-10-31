@@ -122,6 +122,17 @@ class FilePickerBatchTest {
 
     private fun drain() { runtime.domains.fileIoExecutor.submit { }.get(10, TimeUnit.SECONDS) }
 
+    @Test fun voiceSampleRequestsOnlyMp3AndWavDocuments() {
+        start(mode = "voiceSample")
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, launched.action)
+        assertEquals("audio/*", launched.type)
+        assertTrue(launched.hasCategory(Intent.CATEGORY_OPENABLE))
+        assertFalse(launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+        val types = launched.getStringArrayExtra(Intent.EXTRA_MIME_TYPES)!!.toSet()
+        assertTrue(types.containsAll(listOf("audio/mpeg", "audio/wav", "audio/x-wav")))
+        assertTrue(types.all { it in setOf("audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave") })
+    }
+
     @Test @Config(sdk = [34])
     fun galleryUsesFrameworkPhotoPickerWithMultipleSelectionAndImportsBothImages() {
         val invoke = start(mode = "gallery")

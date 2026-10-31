@@ -67,6 +67,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const serviceMessage = ref('');
   const partialText = ref('');
   const ttsState = ref<VoiceCallSnapshot['ttsState']>('idle');
+  const speakingMessageId = ref<string | null>(null);
   let microphoneGeneration = 0;
   let microphoneStopReason: string | null = null;
 
@@ -89,6 +90,8 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       conversation.value = snapshot?.active && session.currentConversationKey
         ? { ...session.currentConversationKey } : null;
       ttsState.value = snapshot?.ttsState ?? 'idle';
+      speakingMessageId.value = snapshot?.active && snapshot.ttsState === 'speaking'
+        ? snapshot.speakingMessageId ?? null : null;
       const reasonChanged = microphoneStopReason !== (snapshot?.micStopReason ?? null);
       microphoneStopReason = snapshot?.micStopReason ?? null;
       captureState.value = snapshot?.active ? snapshot.micState : 'closed';
@@ -191,7 +194,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   return {
     active, microphoneState, level, bands,
     playbackActive, errorMessage, serviceState, serviceMessage, partialText,
-    ttsState,
+    ttsState, speakingMessageId,
     start, end, toggleMicrophone, recover,
   };
 });

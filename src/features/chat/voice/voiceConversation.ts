@@ -14,6 +14,7 @@ export interface VoiceCallSnapshot {
   inputState: 'idle' | 'recording' | 'transcribing' | 'submitting' | 'error';
   replyState: 'idle' | 'generating' | 'recovering' | 'stopping' | 'finished' | 'cancelled' | 'error';
   ttsState: 'idle' | 'ready' | 'synthesizing' | 'speaking' | 'finished' | 'cancelled' | 'error';
+  speakingMessageId?: string;
   partial: string;
   error: string | null;
   notice: string | null;

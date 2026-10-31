@@ -23,7 +23,8 @@ struct NativeVoiceAudioEvent: Encodable {
 
 struct NativeVoicePlaybackEvent: Encodable {
     let playbackId: String
-    let kind = "started"
+    let kind: String
+    let messageId: String?
 }
 
 struct NativeVoiceDocumentEvent: Encodable {
@@ -44,7 +45,7 @@ private struct VoiceSegmentArgs: Decodable {
 }
 private struct VoicePlaybackArgs: Decodable { let playbackId: String }
 private struct VoicePlaybackStartArgs: Decodable { let playbackId: String; let startupFrames: Int }
-private struct VoicePlaybackAppendArgs: Decodable { let playbackId: String; let pcmBase64: String }
+private struct VoicePlaybackAppendArgs: Decodable { let playbackId: String; let pcmBase64: String; let messageId: String? }
 
 private final class VoiceWebViewLifetime {
     let onDestroy: () -> Void
@@ -576,7 +577,7 @@ final class NativeVoiceAudio {
             let args = try invoke.parseArgs(VoicePlaybackAppendArgs.self)
             DispatchQueue.main.async { [self] in
                 guard let playback = playback, renderer.engine?.isRunning == true else { invoke.reject("cancelled:voice_playback"); return }
-                playback.append(id: args.playbackId, pcmBase64: args.pcmBase64, invoke: invoke)
+                playback.append(id: args.playbackId, pcmBase64: args.pcmBase64, messageId: args.messageId, invoke: invoke)
             }
         } catch { invoke.reject("invalid_voice_playback_args") }
     }
@@ -634,7 +635,10 @@ final class NativeVoiceAudio {
         let output = NativeVoicePlayback(format: format)
         playback = output
         output.onStarted = { [weak self] id in
-            _ = self?.onPlaybackEvent?(NativeVoicePlaybackEvent(playbackId: id))
+            _ = self?.onPlaybackEvent?(NativeVoicePlaybackEvent(playbackId: id, kind: "started", messageId: nil))
+        }
+        output.onMessage = { [weak self] id, message in
+            _ = self?.onPlaybackEvent?(NativeVoicePlaybackEvent(playbackId: id, kind: "message", messageId: message))
         }
         output.onStatus = { [weak self] id, playing in
             guard let self = self else { return }

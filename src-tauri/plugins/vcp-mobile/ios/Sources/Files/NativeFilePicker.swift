@@ -208,7 +208,8 @@ extension VcpMobilePlugin {
                         let picker = PHPickerViewController(configuration: configuration)
                         picker.delegate = delegate; controller = picker
                     } else {
-                        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)
+                        let types: [UTType] = args.mode == "voiceSample" ? [.mp3, .wav] : [.item]
+                        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
                         picker.allowsMultipleSelection = args.selectionLimit > 1; picker.delegate = delegate; controller = picker
                     }
                     do { try self.presentation.present(controller, for: operation); controller.presentationController?.delegate = delegate }

@@ -21,6 +21,7 @@ internal class VoiceStreamPlayback(
     private val lease: VoiceAudioSession.OutputLease,
     private val executor: Executor,
     private val started: () -> Unit,
+    private val messageChanged: (String?) -> Unit,
     private val playingChanged: (Boolean) -> Unit,
     private val ended: (String?) -> Unit,
 ) {
@@ -44,6 +45,8 @@ internal class VoiceStreamPlayback(
     private val quiesce = AtomicReference<(() -> Unit)?>(null)
     @Volatile private var worker: Thread? = null
     private var reportedStart = false
+    private var renderedMessage: String? = null
+    private var reportedMessage: String? = null
     private val createdAt = SystemClock.elapsedRealtime()
     private val firstPcmAt = AtomicLong(-1)
 
@@ -65,13 +68,13 @@ internal class VoiceStreamPlayback(
         }
     }
 
-    fun append(samples: ShortArray, callback: (String?) -> Unit) {
+    fun append(samples: ShortArray, messageId: String? = null, callback: (String?) -> Unit) {
         val completion = request(callback)
         if (stopped.get() || completed.get()) return
         if (samples.isNotEmpty() && firstPcmAt.compareAndSet(-1, SystemClock.elapsedRealtime())) {
             Log.d("VcpVoiceOutput", "first_pcm id=$id elapsed_ms=${firstPcmAt.get() - createdAt} frames=${samples.size}")
         }
-        queue.append(samples, completion::complete)
+        queue.append(samples, messageId, completion::complete)
     }
 
     fun finish(callback: (String?) -> Unit) {
@@ -165,6 +168,9 @@ internal class VoiceStreamPlayback(
                     var position = 0
                     while (!stopped.get() && position < next.samples.size) {
                         ensureOutput()
+                        if (position == 0 && next.messageId != null) {
+                            sink!!.markMessage(next.messageId, converter?.pendingOutputFrames ?: 0L)
+                        }
                         sink!!.preparePriming(next.samples.size - position)
                         val count = minOf(480, next.samples.size - position)
                         val converted = converter?.process(next.samples, position, count)
@@ -207,6 +213,7 @@ internal class VoiceStreamPlayback(
         routePause.set(true)
         lease.close()
         playingChanged(false)
+        reportMessage(null)
         val reason = terminalError ?: failure.get() ?: "cancelled:voice_playback"
         failure.compareAndSet(null, reason)
         if (drained && !stopped.get()) finishRequest.get()?.complete()
@@ -223,10 +230,16 @@ internal class VoiceStreamPlayback(
         Thread.interrupted()
     }
 
+    private fun reportMessage(message: String?) {
+        if (reportedMessage != message) { reportedMessage = message; messageChanged(message) }
+    }
+
     private inner class Sink(val profile: VoiceOutputProfile) : AutoCloseable {
         private val rate = if (profile.legacySco) 16_000 else 24_000
         private val player: AudioTrack
         private var written = 0L
+        private val messageStarts = ArrayDeque<Pair<Long, String>>()
+        fun markMessage(id: String, pendingFrames: Long) { messageStarts.addLast((written + pendingFrames) to id) }
         private var lastHead = 0L
         private var wraps = 0L
         private var progress = SystemClock.elapsedRealtime()
@@ -345,6 +358,9 @@ internal class VoiceStreamPlayback(
                         Log.d("VcpVoiceOutput", "first_head id=$id elapsed_ms=${SystemClock.elapsedRealtime() - createdAt} frame=$head")
                         this@VoiceStreamPlayback.started()
                     }
+                    while (messageStarts.firstOrNull()?.let { it.first < wraps + head } == true) {
+                        renderedMessage = messageStarts.removeFirst().second
+                    }
                     report(true)
                 }
             }
@@ -378,7 +394,10 @@ internal class VoiceStreamPlayback(
             report(false)
             Log.d("VcpVoiceOutput", "drained id=$id real_frames=$realWritten padding_frames=$padded underruns=${player.underrunCount}")
         }
-        private fun report(value: Boolean) { if (reportedPlaying != value) { reportedPlaying = value; playingChanged(value) } }
+        private fun report(value: Boolean) {
+            if (reportedPlaying != value) { reportedPlaying = value; playingChanged(value) }
+            reportMessage(renderedMessage.takeIf { value })
+        }
         override fun close() { if (track.compareAndSet(player, null)) release(player) }
     }
 

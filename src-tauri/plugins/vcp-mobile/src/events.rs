@@ -36,6 +36,12 @@ pub enum NativeVoicePlaybackEvent {
         #[serde(rename = "playbackId")]
         playback_id: String,
     },
+    Message {
+        #[serde(rename = "playbackId")]
+        playback_id: String,
+        #[serde(rename = "messageId")]
+        message_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

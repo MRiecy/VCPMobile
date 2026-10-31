@@ -326,4 +326,24 @@ describe('chat input expansion', () => {
     expect(textarea.value).toBe(draft);
     expect(modals.modalStackLength()).toBe(0);
   });
+
+  it('keeps plus button visible and provides cancel bar when editingMessage is active', async () => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const history = useChatHistoryStore();
+    history.editingMessage = {
+      key: { conversation: session.currentConversationKey!, messageId: 'msg-1' },
+      initialContent: '原消息文本',
+    };
+    await settle();
+    expect(wrapper.find('[aria-label="添加附件"]').exists()).toBe(true);
+    expect(wrapper.find('.editing-message-bar').exists()).toBe(true);
+
+    // 点击取消重发
+    await wrapper.get('.editing-message-bar button').trigger('click');
+    await settle();
+    expect(history.editingMessage).toBeNull();
+    expect(wrapper.find('.editing-message-bar').exists()).toBe(false);
+    expect(wrapper.find('[aria-label="添加附件"]').exists()).toBe(true);
+  });
 });

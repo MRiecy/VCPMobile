@@ -36,6 +36,8 @@ pub struct VoiceCallSnapshot {
     pub input_state: &'static str,
     pub reply_state: &'static str,
     pub tts_state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaking_message_id: Option<String>,
     pub partial: String,
     pub error: Option<String>,
     pub notice: Option<String>,
@@ -206,6 +208,7 @@ impl CallInner {
         self.snapshot.input_state = "idle";
         self.snapshot.partial.clear();
         self.snapshot.tts_id = Some(reply.tts_id.clone());
+        self.snapshot.speaking_message_id = None;
         self.snapshot.reply_state = "generating";
         true
     }
@@ -297,6 +300,7 @@ fn reserve_conversation<R: Runtime>(
             input_state: "idle",
             reply_state: "idle",
             tts_state: "idle",
+            speaking_message_id: None,
             partial: String::new(),
             error: None,
             notice: None,
@@ -412,6 +416,7 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
         let mut inner = call.inner.lock().map_err(|error| error.to_string())?;
         call.input.cancel.cancel();
         inner.snapshot.active = false;
+        inner.snapshot.speaking_message_id = None;
         inner.snapshot.mic_state = "closed";
         inner.snapshot.input_state = "idle";
         inner.snapshot.partial.clear();
@@ -815,6 +820,7 @@ pub(super) fn tts_status<R: Runtime>(
     id: &str,
     stage: &'static str,
     error: Option<&str>,
+    speaking_message_id: Option<String>,
 ) {
     let Some(state) = app.try_state::<VoiceCallState>() else {
         return;
@@ -828,10 +834,11 @@ pub(super) fn tts_status<R: Runtime>(
         return;
     };
     if let Ok(mut inner) = call.inner.lock() {
-        if inner.snapshot.tts_id.as_deref() != Some(id) {
+        if !inner.snapshot.active || inner.snapshot.tts_id.as_deref() != Some(id) {
             return;
         }
         inner.snapshot.tts_state = if error.is_some() { "error" } else { stage };
+        inner.snapshot.speaking_message_id = speaking_message_id;
         if let Some(error) = error {
             inner.snapshot.error = Some(error.into());
         }
@@ -857,6 +864,7 @@ mod tests {
                 input_state: "idle",
                 reply_state: "idle",
                 tts_state: "idle",
+                speaking_message_id: None,
                 partial: String::new(),
                 error: None,
                 notice: None,

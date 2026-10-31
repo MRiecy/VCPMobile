@@ -506,7 +506,7 @@ pub async fn pick_file<R: Runtime>(
         let mode = mode.unwrap_or_else(|| "file".into());
         if !matches!(
             mode.as_str(),
-            "file" | "camera" | "gallery" | "avatar" | "config"
+            "file" | "camera" | "gallery" | "avatar" | "config" | "voiceSample"
         ) {
             return Err("invalid_picker_mode".into());
         }

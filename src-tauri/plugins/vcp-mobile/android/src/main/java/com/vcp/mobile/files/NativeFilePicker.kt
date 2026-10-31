@@ -159,9 +159,14 @@ internal class NativeFilePicker(
                 }
                 else -> {
                     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                        type = "*/*"
+                        type = if (args.mode == "voiceSample") "audio/*" else "*/*"
                         addCategory(Intent.CATEGORY_OPENABLE)
                         putExtra(Intent.EXTRA_ALLOW_MULTIPLE, args.selectionLimit > 1)
+                        if (args.mode == "voiceSample") {
+                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                                "audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"
+                            ))
+                        }
                         if (args.mode == "config") {
                             // Providers may classify the legacy .vcpcfg extension as binary.
                             // Both backup generations use this picker and the same content validator.

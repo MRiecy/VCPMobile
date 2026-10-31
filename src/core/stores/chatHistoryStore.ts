@@ -759,6 +759,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         const targetMsg = {
           ...currentChatHistory.value[targetIndex],
           content,
+          attachments: currentStaged.length > 0 ? currentStaged : currentChatHistory.value[targetIndex].attachments,
           blocks: [{ type: "markdown" as const, content }],
         };
         const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
@@ -791,7 +792,17 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             }
           }
           if (editingMessage.value === intent) editingMessage.value = null;
-          await triggerGeneration(targetMsg, key, undefined, { persisted, onCommitted: committed });
+          await triggerGeneration(targetMsg, key, undefined, {
+            persisted,
+            onCommitted: () => {
+              if (currentStaged.length > 0) {
+                attachmentStore.stagedAttachments = attachmentStore.stagedAttachments.filter(item =>
+                  !stagedAtSend.some(sent => sent.id ? sent.id === item.id : sent === item),
+                );
+              }
+              committed();
+            },
+          });
         } catch (e) {
           notificationStore.addNotification({
             type: "error",
@@ -1149,6 +1160,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     };
   };
 
+  const cancelEditResend = () => {
+    editingMessage.value = null;
+  };
+
   const reRenderMessage = async (messageKey: MessageActionKey) => {
     const key = messageKey.conversation;
     const messageId = messageKey.messageId;
@@ -1213,6 +1228,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     isMessageActionCurrent,
     updateMessageContent,
     beginEditResend,
+    cancelEditResend,
     regenerateResponse,
     fetchRawContent,
     reRenderMessage,

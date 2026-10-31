@@ -1,7 +1,7 @@
 //! The registry publishes an audio asset only after its complete file is durable.
 //! Unknown files are never promoted or deleted merely because they are unselected.
 
-use super::{bounded_read, sample_path, VoiceCloneModelDto, MAX_SAMPLE_BYTES};
+use super::{bounded_read, sample_path, VoiceCloneModelDto, MAX_STORED_SAMPLE_BYTES};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, future::Future, io::ErrorKind, path::{Path, PathBuf}, time::{Duration, SystemTime}};
 use tokio::io::AsyncWriteExt;
@@ -38,7 +38,7 @@ pub(super) async fn load(root: &Path) -> Result<Registry, String> {
     let mut ids = HashSet::new();
     for sample in registry.samples.iter().chain(&registry.pending_deletions) {
         sample_path(root, &sample.id)?;
-        if !ids.insert(&sample.id) || sample.file_bytes == 0 || sample.file_bytes > MAX_SAMPLE_BYTES
+        if !ids.insert(&sample.id) || sample.file_bytes == 0 || sample.file_bytes > MAX_STORED_SAMPLE_BYTES
             || sample.duration_ms == 0 || sample.name.trim().is_empty() || sample.name.chars().count() > 80
             || sample.file_hash.len() != 64 || !sample.file_hash.bytes().all(|b| b.is_ascii_hexdigit())
         { return Err("声音库索引包含无效记录，已保留原文件。".into()); }
