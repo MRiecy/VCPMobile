@@ -3,7 +3,7 @@
 > 启动日期：2026-10-08。输入基线：`4c6e25bba72a9883f4c5270c1daf2493850bd04e` 加本轮开始时未提交工作树。
 > 阶段状态和实际检查结果以 [05-验收记录与Magi交接.md](./05-验收记录与Magi交接.md) 为准；本阶段不代表 iOS 已能构建或运行。
 
-2026-10-09 校准：本目录保存上述基线的历史输入、源码盘点和执行证据，scripts/evidence 未刷新。Phase 1 已完成原契约施工，Phase 2 已接 Swift/Channel 并改用 `plugin-os` 同步平台身份；旧能力表与已被覆盖的延期决定不再是施工要求。用户现已明确最低 iOS/iPadOS 26.0，本文目录的 15.0 为历史输入，现行裁决见 [D4](../09-Magi综合裁决与待决策清单.md)。当前范围见 [最新功能审批](../phase-2/09-功能权限与提示审议表.md)，P3 实施见 [阶段三](../phase-3/README.md)。
+2026-10-09 校准：本目录保存上述基线的历史输入和源码盘点。Phase 1 已完成原契约施工，Phase 2 已接 Swift/Channel 并改用 `plugin-os` 同步平台身份；旧能力表与已被覆盖的延期决定不再是施工要求。用户现已明确最低 iOS/iPadOS 26.0，本文目录的 15.0 为历史输入，现行裁决见 [D4](../09-Magi综合裁决与待决策清单.md)。当前范围见 [最新功能审批](../phase-2/09-功能权限与提示审议表.md)，P3 实施见 [阶段三](../phase-3/README.md)。
 
 ## 工作入口
 
@@ -11,11 +11,9 @@
 |---|---|
 | [00-阶段子规划.md](./00-阶段子规划.md) | Phase 0 任务、边界、依赖与完成条件 |
 | [01-输入基线与产品边界.md](./01-输入基线与产品边界.md) | 用户决定、当前源码、版本、工作树与维护输入 |
-| [02-命令权限与消费者审计.md](./02-命令权限与消费者审计.md) | 可重复抽取、命令/ACL/native selectors 与真实消费者 |
+| [02-命令权限与消费者审计.md](./02-命令权限与消费者审计.md) | 命令/ACL/native selectors 与真实消费者 |
 | [03-依赖目标与Apple工程输入审计.md](./03-依赖目标与Apple工程输入审计.md) | cfg/features/build/FFI/Swift/模板/minimum 与具体问题 |
 | [04-核心路径与阶段交接清单.md](./04-核心路径与阶段交接清单.md) | 启动、交互、附件、生命周期、后台的 owner 与后续任务 |
 | [05-验收记录与Magi交接.md](./05-验收记录与Magi交接.md) | 执行结果、三方意见、剩余问题与 Phase 1 入口 |
-| [evidence/input-baseline.json](./evidence/input-baseline.json) | 开始时已修改路径及原始字节 SHA-256；不是本轮完成快照 |
-| [scripts/audit-command-surface.mjs](./scripts/audit-command-surface.mjs) | 从当前生产源抽取命令面；用法与限制见 02 |
 
 主线 00–09 按最新审批维护，历史输入保留在各阶段记录。当前源码和修正进度见 [Phase 2](../phase-2/README.md)，获批待接入任务见 [Phase 3](../phase-3/README.md) 至 [Phase 6](../phase-6/README.md)；不再重复启动 Phase 1 的能力表任务。

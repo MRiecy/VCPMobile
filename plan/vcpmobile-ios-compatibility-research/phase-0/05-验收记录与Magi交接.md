@@ -17,7 +17,7 @@
 | Node/pnpm/Rust/Cargo/Tauri CLI 版本 | 通过，见 01 | 本地输入可定位 |
 | 6 条 Apple target `cargo tree --locked --offline` | 均退出 0，完整命令见 03 | 目标依赖解析与 feature 图，不是编译/链接 |
 | `pnpm check` | 退出 0；vue-tsc 与 host cargo check 通过 | 当前工作树 TypeScript/Rust host 静态基线；不是 Apple 编译 |
-| `node --check …/audit-command-surface.mjs` 与脚本 `--check` | 均退出 0；42 plugin / 176 app / 59 Kotlin，九组集合差为 0 | 脚本语法及来源快照一致；可达性边界见 02 |
+| 命令注册与调用面盘点 | 42 个插件命令、176 个应用命令、59 个 Kotlin 命令，九组集合差为 0 | 记录当时的源码盘点结果，审计范围见 02 |
 | Markdown 链接与围栏检查 | 45 份文档、145 个相对链接目标均存在，围栏闭合 | 使用现有 marked 解析，排除 inline code 示例；不包含远端链接可用性 |
 | 旧规范引用搜索 | 只剩两处更名记录及两处明确历史行号引用；现行链接无旧路径 | 导航迁移完成，历史证据未伪造新行号 |
 | ignore 正反样本 | 15 项通过：8 项生成物/签名样本忽略、7 项维护输入可追踪 | 无实际凭据读取/写入；配置、Swift、plist、隐私与 resolution 源未被误忽略 |
