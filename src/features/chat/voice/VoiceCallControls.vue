@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { Mic, MicOff, PhoneOff } from '@lucide/vue';
 import type { VoiceServiceView } from './voiceConversation';
+import VoiceInputPicker from './VoiceInputPicker.vue';
 
 const props = defineProps<{
   microphoneState: 'off' | 'requesting' | 'on' | 'error';
@@ -81,7 +82,7 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
           <Mic v-if="microphoneOn || requestingMicrophone" :size="24" :stroke-width="1.8" aria-hidden="true" />
           <MicOff v-else :size="24" :stroke-width="1.8" aria-hidden="true" />
         </button>
-        <span class="voice-control-label">麦克风</span>
+        <VoiceInputPicker />
       </div>
 
       <div class="voice-control-action">
@@ -211,6 +212,9 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
 }
 
 .voice-control-label {
+  display: grid;
+  min-height: 44px;
+  place-items: center;
   font-size: 12px;
   line-height: 18px;
   opacity: 0.8;

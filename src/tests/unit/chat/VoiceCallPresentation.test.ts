@@ -17,7 +17,7 @@ import { useTopicStore } from '@/core/stores/topicListManager';
 import { useOverlayStore } from '@/core/stores/overlay';
 import { useModalHistory } from '@/core/composables/useModalHistory';
 import { mountWithPinia } from '@/tests/utils/mount';
-import { emitTauriEvent, mockInvoke } from '@/tests/mocks/tauri';
+import { emitTauriEvent, invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 const audio = vi.hoisted(() => ({
   startCapture: vi.fn(), stopCapture: vi.fn(),
@@ -265,6 +265,94 @@ describe('voice entry from the existing composer', () => {
 });
 
 describe('chat scene voice transitions', () => {
+  const restoreInputPicker = async (microphone: Partial<VoiceCallSnapshot>) => {
+    const snapshot: VoiceCallSnapshot = {
+      callId: 'input-test-call', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
+      revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
+      replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
+      inputSessionId: null, lastPersistedMessageId: null, ...microphone,
+    };
+    mockInvoke('get_voice_conversation_snapshot', () => snapshot);
+    const view = mountComposer(ChatView);
+    mountEditorOverlay();
+    await useVoiceCallStore().recover();
+    await flushPromises();
+    await view.get('[aria-label="选择麦克风"]').trigger('click');
+    await flushPromises();
+    return new DOMWrapper(document.querySelector<HTMLElement>('[role="menu"][aria-label="选择麦克风"]')!);
+  };
+
+  it('shows the actual input separately from automatic selection and refreshes unplugged devices only while open', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const phone = { id: 'phone', label: '手机麦克风', kind: 'builtin' };
+    const headset = { id: 'bt', label: '蓝牙耳机', kind: 'bluetooth' };
+    const devices = [phone, headset];
+    const list = vi.fn(() => ({ devices: [...devices], activeId: 'phone' }));
+    mockInvoke('voice_call_list_inputs', list);
+    const selection = deferred<void>();
+    mockInvoke('voice_call_select_input', () => selection.promise);
+    const dialog = await restoreInputPicker({ micState: 'listening', inputSessionId: 'open-mic' });
+    expect(list).toHaveBeenCalledExactlyOnceWith({ callId: 'input-test-call', documentId: 'document-1' });
+    expect(dialog.get('[aria-checked="true"]').text()).toBe('自动选择');
+    expect(dialog.get('[aria-description="当前输入"]').text()).toBe(phone.label);
+    expect(dialog.findAll('[role="menuitemradio"]').map(row => row.text())).toEqual(['自动选择', phone.label, headset.label]);
+    devices.pop();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(dialog.text()).not.toContain('蓝牙耳机');
+    const button = dialog.findAll('[role="menuitemradio"]').find(row => row.text() === phone.label)!;
+    await button.trigger('click');
+    await button.trigger('click');
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'voice_call_select_input')).toEqual([
+      ['voice_call_select_input', { callId: 'input-test-call', documentId: 'document-1', inputDeviceId: 'phone',
+        expectedSessionId: 'open-mic', expectedLifecycleEpoch: null }],
+    ]);
+    selection.resolve();
+    await flushPromises();
+    expect(document.querySelector('[role="menu"][aria-label="选择麦克风"]')).toBeNull();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a muted call closed and its previous selection intact when the device switch fails', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const list = vi.fn().mockRejectedValueOnce(new Error('unavailable'))
+      .mockResolvedValue({ devices: [{ id: 'phone', label: '手机麦克风', kind: 'builtin' }], activeId: null });
+    mockInvoke('voice_call_list_inputs', list);
+    const select = vi.fn().mockRejectedValueOnce(new Error('audio_route_unavailable')).mockResolvedValue(undefined);
+    mockInvoke('voice_call_select_input', select);
+    const dialog = await restoreInputPicker({ inputDeviceId: 'phone' });
+    expect(dialog.get('[role="alert"]').text()).toBe('设备列表加载失败');
+    await dialog.findAll('button').find(row => row.text() === '重试')!.trigger('click');
+    await flushPromises();
+    const automatic = dialog.findAll('[role="menuitemradio"]').find(row => row.text() === '自动选择')!;
+    await automatic.trigger('click');
+    await flushPromises();
+    expect(dialog.get('[role="alert"]').text()).toContain('切换失败');
+    expect(dialog.get('[aria-checked="true"]').text()).toBe('手机麦克风');
+    await automatic.trigger('click');
+    await flushPromises();
+    expect(select).toHaveBeenLastCalledWith({ callId: 'input-test-call', documentId: 'document-1', inputDeviceId: null,
+      expectedSessionId: null, expectedLifecycleEpoch: null });
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(useVoiceCallStore().microphoneState).toBe('off');
+    expect(document.querySelector('[role="menu"][aria-label="选择麦克风"]')).toBeNull();
+  });
+
+  it('presents the iOS Bluetooth probe as a preference while naming the actual hardware input separately', async () => {
+    const probe = { id: 'native-route-option', label: '蓝牙免提输入', kind: 'bluetooth' };
+    mockInvoke('voice_call_list_inputs', () => ({
+      routeOptions: [probe], devices: [{ id: 'hardware-uid', label: 'iPhone 麦克风', kind: 'builtin' }], activeId: 'hardware-uid',
+    }));
+    const dialog = await restoreInputPicker({ micState: 'listening', inputDeviceId: probe.id, inputSessionId: 'ios-mic' });
+    const selection = dialog.get('[aria-checked="true"]');
+    expect(selection.text()).toBe(probe.label);
+    const actualInput = dialog.get('[aria-description="当前输入"]');
+    expect(actualInput.text()).toBe('iPhone 麦克风');
+    expect(actualInput.attributes('aria-checked')).toBe('false');
+    await dialog.trigger('keydown', { key: 'Escape' });
+    expect(document.querySelector('[role="menu"][aria-label="选择麦克风"]')).toBeNull();
+  });
+
   it('keeps the native interruption visible through closed snapshots and clears it when the mic restarts', async () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const snapshot: VoiceCallSnapshot = {
