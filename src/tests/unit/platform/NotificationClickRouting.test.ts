@@ -176,6 +176,35 @@ describe('root voice call navigation', () => {
 });
 
 describe('root notification navigation', () => {
+  it.each(['android', 'ios'])('keeps the active call when a %s notification targets another topic', async platform => {
+    native.ios = platform === 'ios';
+    context.lifecycle.state = 'READY';
+    session().setConversation({ type: 'agent', id: 'calling-agent' }, 'call-topic', {
+      documentId: 1, focusRevision: 1, windowRevision: 1, anchorId: 'reading',
+    });
+    const admission = deferred<void>();
+    mockInvoke('request_chat_navigation', async () => {
+      await admission.promise;
+      return { status: 'call_in_progress' };
+    });
+    mountApp();
+    await flushPromises();
+    if (native.ios) iosClick(replyClick('other-reply'));
+    else androidClick('other-topic');
+    await flushPromises();
+    expect(navigationCalls()).toHaveLength(1);
+    // Rust reserves the call while the notification destination is being validated.
+    context.voice.active = true;
+    admission.resolve();
+    await flushPromises();
+    expect(session().currentTopicId).toBe('call-topic');
+    expect(session().acceptedWindow?.anchorId).toBe('reading');
+    expect(wrapper!.find('.vcp-workspace-row').classes()).toContain('is-voice-call');
+    expect(context.notice).toHaveBeenCalledOnce();
+    expect(context.notice).toHaveBeenCalledWith(expect.objectContaining({ title: '通话中无法切换会话' }));
+    expect(invokeMock.mock.calls.some(([name]) => name === 'end_voice_conversation')).toBe(false);
+  });
+
   it('opens a cold iOS notification at its committed message rather than the newest group reply', async () => {
     pendingIOSClick = replyClick('db-reply-a');
     session().setConversation({ id: 'other', type: 'agent' }, 'old');
