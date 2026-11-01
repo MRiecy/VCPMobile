@@ -9,7 +9,7 @@ import {
 } from "../../../features/settings/useConfigBackup";
 import { useThemeStore } from "../../../core/stores/theme";
 import { useChatPreferencesStore } from "../../../features/chat/preferences/store";
-import { useTopicStore } from "../../../core/stores/topicListManager";
+import { useTopicStore, type Topic } from "../../../core/stores/topicListManager";
 import { useDiaryStore } from "../../../features/diary/diaryStore";
 import type { GroupLocalSettings } from "../../../core/types/assistant";
 
@@ -145,6 +145,27 @@ describe("Backup payload and application contracts", () => {
   });
 
   describe("Partial backup application", () => {
+    it("reorders already loaded topics when restoring the sort preference", async () => {
+      const store = useTopicStore();
+      const older: Topic = {
+        id: "older", name: "Older", ownerId: "agent-alpha", ownerType: "agent",
+        createdAt: 1, updatedAt: 3, locked: false, unread: false, unreadCount: 0, msgCount: 0,
+      };
+      const newer: Topic = { ...older, id: "newer", name: "Newer", createdAt: 2, updatedAt: 2 };
+      store.topics = [newer, older];
+
+      const result = await applyConfigBackup({
+        domains: {}, exportedAt: "", preferences: { topic: { sortMode: "updated" } },
+      }, vi.fn());
+
+      expect(result.failed).toEqual([]);
+      expect(store.topicSections.regular.map(topic => topic.id)).toEqual(["older", "newer"]);
+      await applyConfigBackup({
+        domains: {}, exportedAt: "", preferences: { topic: { sortMode: "created" } },
+      }, vi.fn());
+      expect(store.topicSections.regular.map(topic => topic.id)).toEqual(["newer", "older"]);
+    });
+
     it("passes only provided voice fields to the settings owner", async () => {
       const applySettings = vi.fn(async () => false);
       const backup = {

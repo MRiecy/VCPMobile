@@ -11,6 +11,7 @@ import { useTopicStore } from "../../core/stores/topicListManager";
 import { useDiaryStore } from "../diary/diaryStore";
 import { useUpdateStore } from "../../core/stores/update";
 import { useAssistantStore } from "../../core/stores/assistant";
+import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
 import { normalizeThemePreferencePatch, useThemeStore } from "../../core/stores/theme";
 import { useChatPreferencesStore } from "../chat/preferences/store";
@@ -233,7 +234,7 @@ export async function restoreBackupPreferences(
   if (topic && hasFields(topic)) {
     const topicStore = useTopicStore();
     if (topic.sortMode) {
-      topicStore.sortMode = topic.sortMode;
+      topicStore.setSortMode(topic.sortMode);
     }
     if (Array.isArray(topic.pinnedTopicKeys)) {
       topicStore.pinnedTopicKeys = topic.pinnedTopicKeys.filter(k => typeof k === 'string');
@@ -578,6 +579,7 @@ export async function applyImport(
     if (Object.keys(groupPreferences).length || (agentPreferences && Object.keys(agentPreferences).length)) {
       try {
         await useAssistantStore().fetchAgentsAndGroups();
+        useChatSessionStore().reconcileCurrentConversation();
       } catch {
         // ignore
       }

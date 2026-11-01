@@ -6,7 +6,13 @@ import { useDataReload } from "../composables/useDataReload";
 import { useNotificationStore } from "./notification";
 import { useOverlayStore } from "./overlay";
 import { useAssistantStore } from "./assistant";
+import { useChatSessionStore } from "./chatSessionStore";
 import { useSettingsStore } from "./settings";
+import {
+  clearStagedEntityBackup,
+  readStagedEntityBackup,
+  writeStagedEntityBackup,
+} from "../../features/settings/useConfigBackup";
 import { buildSettingsUpdate } from "../config/fields";
 import { isAndroid, isIOS } from "../utils/platform";
 import type { BatteryStatusDto } from "../types/native";
@@ -363,36 +369,8 @@ const emptySummary = (): SyncSummary => ({
 });
 
 export async function checkAndPromptPendingConfigRestore(): Promise<boolean> {
-  const raw = localStorage.getItem('vcp_staged_entity_backup');
-  if (!raw) return false;
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    localStorage.removeItem('vcp_staged_entity_backup');
-    return false;
-  }
-
-  if (!parsed || typeof parsed !== 'object') {
-    localStorage.removeItem('vcp_staged_entity_backup');
-    return false;
-  }
-
-  const now = Date.now();
-  if (
-    typeof parsed.timestamp !== 'number' ||
-    !Number.isFinite(parsed.timestamp) ||
-    now - parsed.timestamp > 7 * 24 * 60 * 60 * 1000 ||
-    now - parsed.timestamp < 0
-  ) {
-    localStorage.removeItem('vcp_staged_entity_backup');
-    return false;
-  }
-
-  if (parsed.version !== 2) {
-    return false;
-  }
+  const staged = readStagedEntityBackup();
+  if (!staged) return false;
 
   const assistantStore = useAssistantStore();
   const totalEntities = assistantStore.agents.length + assistantStore.groups.length;
@@ -418,21 +396,39 @@ export async function checkAndPromptPendingConfigRestore(): Promise<boolean> {
       ? buildSettingsUpdate(settingsStore.snapshot, {})
       : { patches: [] };
 
-    await settingsStore.importBackup(
+    const { result, missingGroups, missingAgents } = await settingsStore.importBackup(
       request,
-      parsed.groupPreferences ?? {},
-      parsed.agentPreferences ?? {},
+      staged.groupPreferences ?? {},
+      staged.agentPreferences ?? {},
     );
-    localStorage.removeItem('vcp_staged_entity_backup');
+    if (result.status !== 'saved') {
+      const issues = result.status === 'rejected' ? result.issues : result.conflicts;
+      throw new Error(issues.map(issue => `${issue.domain}.${issue.field}: ${issue.message}`).join('\n'));
+    }
+
+    const hasMissing = missingGroups || missingAgents;
+    if (hasMissing) {
+      // Rust reports missing entities per category, not per ID. Keep those
+      // categories pending without extending the original backup's TTL.
+      writeStagedEntityBackup({
+        groupPreferences: missingGroups ? staged.groupPreferences : undefined,
+        agentPreferences: missingAgents ? staged.agentPreferences : undefined,
+      }, staged.timestamp);
+    } else {
+      clearStagedEntityBackup();
+    }
     try {
       await assistantStore.fetchAgentsAndGroups();
+      useChatSessionStore().reconcileCurrentConversation();
     } catch {
       // ignore
     }
     useNotificationStore().addNotification({
-      type: 'success',
-      title: '配置已恢复',
-      message: '已成功应用智能体与群组的本地偏好',
+      type: hasMissing ? 'info' : 'success',
+      title: hasMissing ? '仍有配置待恢复' : '配置已恢复',
+      message: hasMissing
+        ? '已应用本机现有实体的偏好；仍有智能体或群聊尚未同步，相关配置已保留，待后续同步后继续恢复'
+        : '已成功应用智能体与群组的本地偏好',
       toastOnly: true,
     });
     return true;

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createPinia, setActivePinia } from "pinia";
+import { createPinia, disposePinia, getActivePinia, setActivePinia } from "pinia";
 import {
   STAGED_BACKUP_STORAGE_KEY,
   STAGED_BACKUP_TTL_MS,
@@ -14,6 +14,8 @@ import { useOverlayStore } from "../../../core/stores/overlay";
 import { useAssistantStore } from "../../../core/stores/assistant";
 import { useSettingsStore } from "../../../core/stores/settings";
 import { useNotificationStore } from "../../../core/stores/notification";
+import { makeConfigSnapshot } from "../../helpers/config";
+import { mockInvoke } from "../../mocks/tauri";
 
 beforeEach(() => {
   const storage = window.localStorage;
@@ -28,6 +30,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  const pinia = getActivePinia();
+  if (pinia) disposePinia(pinia);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -108,6 +112,7 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
 
       const result = await checkAndPromptPendingConfigRestore();
       expect(result).toBe(false);
+      expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).toBeNull();
     });
 
     it("returns false without prompt when assistant store has 0 agents and 0 groups", async () => {
@@ -199,6 +204,68 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
       expect(await checkAndPromptPendingConfigRestore()).toBe(false);
       expect(overlayStore.showConfirm).toHaveBeenCalledTimes(1);
       expect(importSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { missingGroups: true, missingAgents: false },
+      { missingGroups: false, missingAgents: true },
+      { missingGroups: true, missingAgents: true },
+    ])("keeps pending categories with the original TTL after partial restore: %o", async missing => {
+      const timestamp = Date.now() - 60_000;
+      const agentPreferences = { "agent-missing": { mobileSystemPrompt: "pending" } };
+      const groupPreferences = { "group-missing": { contextMessageWindowSize: 60 } };
+      writeStagedEntityBackup({ agentPreferences, groupPreferences }, timestamp);
+      const assistants = useAssistantStore();
+      assistants.agents = [{ id: "agent-present", name: "Present", model: "fixture", avatarCalculatedColor: null }];
+      const settings = useSettingsStore();
+      settings.snapshot = makeConfigSnapshot();
+      vi.spyOn(useOverlayStore(), "showConfirm").mockResolvedValue(true);
+      mockInvoke("get_assistants_snapshot", () => ({ agents: assistants.agents, groups: [], unreadCounts: {} }));
+      mockInvoke("import_settings_backup", () => ({
+        result: { status: "saved", snapshot: settings.snapshot }, ...missing,
+      }));
+      const notifySpy = vi.spyOn(useNotificationStore(), "addNotification");
+
+      expect(await checkAndPromptPendingConfigRestore()).toBe(true);
+      const remaining = {
+        ...(missing.missingAgents ? { agentPreferences } : {}),
+        ...(missing.missingGroups ? { groupPreferences } : {}),
+      };
+      expect(readStagedEntityBackup()).toEqual({ version: 2, timestamp, ...remaining });
+      expect(notifySpy).toHaveBeenCalledWith(expect.objectContaining({ type: "info", title: "仍有配置待恢复" }));
+
+      mockInvoke("import_settings_backup", args => {
+        expect(args?.agentPreferences).toEqual(remaining.agentPreferences ?? {});
+        expect(args?.groupPreferences).toEqual(remaining.groupPreferences ?? {});
+        return { result: { status: "saved", snapshot: settings.snapshot }, missingGroups: false, missingAgents: false };
+      });
+      expect(await checkAndPromptPendingConfigRestore()).toBe(true);
+      expect(readStagedEntityBackup()).toBeNull();
+    });
+
+    it.each(["rejected", "conflict", "error"] as const)("retains staged data without reporting success when import returns %s", async status => {
+      writeStagedEntityBackup({ agentPreferences: { "agent-1": { mobileSystemPrompt: "pending" } } });
+      const original = localStorage.getItem(STAGED_BACKUP_STORAGE_KEY);
+      const assistants = useAssistantStore();
+      assistants.agents = [{ id: "agent-1", name: "One", model: "fixture", avatarCalculatedColor: null }];
+      const settings = useSettingsStore();
+      settings.snapshot = makeConfigSnapshot();
+      vi.spyOn(useOverlayStore(), "showConfirm").mockResolvedValue(true);
+      mockInvoke("import_settings_backup", () => {
+        if (status === "error") throw new Error("storage unavailable");
+        const issues = [{ domain: "voice", field: "tts.voice", code: status, message: "not saved" }];
+        return {
+          result: status === "rejected" ? { status, issues } : { status, conflicts: issues, snapshot: settings.snapshot },
+          missingGroups: false, missingAgents: false,
+        };
+      });
+      const fetchSpy = vi.spyOn(assistants, "fetchAgentsAndGroups");
+      const notifySpy = vi.spyOn(useNotificationStore(), "addNotification");
+
+      await expect(checkAndPromptPendingConfigRestore()).rejects.toThrow();
+      expect(localStorage.getItem(STAGED_BACKUP_STORAGE_KEY)).toBe(original);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(notifySpy).not.toHaveBeenCalled();
     });
 
     it("retains staged key in localStorage when user cancels prompt", async () => {

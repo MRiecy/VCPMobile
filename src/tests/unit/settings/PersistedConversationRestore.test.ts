@@ -5,10 +5,14 @@ import piniaPluginPersistedstate from 'pinia-plugin-persistedstate';
 import { useAssistantStore } from '@/core/stores/assistant';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useTopicStore, type Topic } from '@/core/stores/topicListManager';
+import { useOverlayStore } from '@/core/stores/overlay';
+import { checkAndPromptPendingConfigRestore } from '@/core/stores/syncSession';
+import { applyImport, writeStagedEntityBackup } from '@/features/settings/useConfigBackup';
 import { useGuideStore } from '@/features/guide/stores/guideStore';
 import { useDiaryStore } from '@/features/diary/diaryStore';
 import type { AssistantsSnapshotDto, TopicDto } from '@/core/types/assistant';
 import { invokeMock, mockInvoke, type MockChannel } from '@/tests/mocks/tauri';
+import { makeConfigSnapshot } from '@/tests/helpers/config';
 
 const activePiniaInstances = new Set<Pinia>();
 const ownerId = 'shared-owner-id';
@@ -78,6 +82,47 @@ afterEach(() => {
 });
 
 describe('real Pinia persisted-state conversation restoration', () => {
+  it.each([
+    { entry: 'import', ownerType: 'agent' },
+    { entry: 'import', ownerType: 'group' },
+    { entry: 'staged', ownerType: 'agent' },
+    { entry: 'staged', ownerType: 'group' },
+  ] as const)('refreshes the current $ownerType after $entry without changing the accepted conversation', async ({ entry, ownerType }) => {
+    const { pinia, assistants, session } = startFrontend();
+    await assistants.fetchAgentsAndGroups();
+    await session.selectTopicById(ownerId, ownerType, 'active-topic', undefined, 'kept-anchor');
+    const conversation = session.currentConversationKey;
+    const window = session.acceptedWindow;
+    const epoch = session.sessionEpoch;
+    const snapshot = makeConfigSnapshot();
+    mockInvoke('read_settings', () => snapshot);
+    mockInvoke('import_settings_backup', () => ({
+      result: { status: 'saved', snapshot }, missingGroups: false, missingAgents: false,
+    }));
+    const refreshed = ownerSnapshot('Refreshed group');
+    refreshed.agents[0].name = 'Refreshed agent';
+    mockInvoke('get_assistants_snapshot', () => refreshed);
+    const preferences = ownerType === 'agent'
+      ? { agentPreferences: { [ownerId]: { mobileSystemPrompt: 'restored' } } }
+      : { groupPreferences: { [ownerId]: { contextMessageWindowSize: 60 } } };
+
+    if (entry === 'import') {
+      const result = await applyImport({ domains: {}, exportedAt: '', ...preferences });
+      expect(result.failed).toEqual([]);
+    } else {
+      writeStagedEntityBackup(preferences);
+      vi.spyOn(useOverlayStore(pinia), 'showConfirm').mockResolvedValue(true);
+      expect(await checkAndPromptPendingConfigRestore()).toBe(true);
+    }
+
+    expect(session.currentSelectedItem?.name).toBe(`Refreshed ${ownerType}`);
+    expect(session.headerTitle).toBe(`Refreshed ${ownerType}`);
+    expect(session.currentConversationKey).toBe(conversation);
+    expect(session.acceptedWindow).toBe(window);
+    expect(session.sessionEpoch).toBe(epoch);
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'request_chat_navigation')).toHaveLength(1);
+  });
+
   it('restores the admitted call topic and anchor ahead of a stale local preference', async () => {
     localStorage.setItem('chatSession', JSON.stringify({
       currentSelectedItem: { id: ownerId, type: 'group' }, currentTopicId: 'stale', lastActiveTopicMap: {},
