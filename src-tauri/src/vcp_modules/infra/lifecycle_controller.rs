@@ -1,5 +1,7 @@
 use crate::vcp_modules::infra::lifecycle_state::{LifecycleSnapshot, LifecycleState};
-use crate::vcp_modules::settings_manager::{read_config, SettingsState};
+#[cfg(not(target_os = "ios"))]
+use crate::vcp_modules::settings_manager::read_config;
+use crate::vcp_modules::settings_manager::SettingsState;
 #[cfg(any(not(target_os = "ios"), test))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,7 +44,7 @@ fn consume_reconnect_intent(flag: &AtomicBool, was_disconnected: bool) {
 
 pub fn is_app_in_foreground<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     if let Some(state) = app.try_state::<LifecycleState>() {
-        state.is_foreground.load(Ordering::SeqCst)
+        state.ws_activity.is_foreground()
     } else {
         !cfg!(target_os = "ios")
     }
@@ -106,28 +108,31 @@ async fn apply_lifecycle_transition(app: AppHandle, snapshot: LifecycleSnapshot)
     };
 
     *state.lifecycle_snapshot.write().await = Some(snapshot);
-    // Emit even a same-phase first snapshot: Vue may have loaded after the transition.
-    let _ = app.emit("vcp-lifecycle-changed", snapshot);
+    // Publish visibility before telling Vue to fetch its foreground snapshots.
+    // Inactive changes rendering only and preserves the last networking phase.
     let is_foreground = match snapshot.phase {
         LifecyclePhase::Active => true,
         LifecyclePhase::Background => false,
-        // Inactive is an interaction/rendering state, not a background lease request.
-        LifecyclePhase::Inactive => return,
+        LifecyclePhase::Inactive => {
+            let _ = app.emit("vcp-lifecycle-changed", snapshot);
+            return;
+        }
     };
-
-    // Epoch 只淘汰尚未执行的过期请求；已开始的 transition 在此锁内完整完成。
-    // 若写入状态后再因新 epoch 中断，最新同状态请求会被去重，留下未完成的租约/计时器。
-    let was_foreground = state.is_foreground.swap(is_foreground, Ordering::SeqCst);
-    if was_foreground == is_foreground {
+    let changed = state.ws_activity.set_foreground(is_foreground);
+    // The first same-phase snapshot is still needed by a newly attached WebView.
+    let _ = app.emit("vcp-lifecycle-changed", snapshot);
+    if !changed {
         return;
     }
     log::info!(
         "[Lifecycle] App foreground state transitioned: {} -> {}",
-        was_foreground,
+        !is_foreground,
         is_foreground
     );
 
-    // iOS uses the same transition owner without importing Android leases/linger.
+    if is_foreground {
+        super::vcp_log_service::flush_background_logs(&app);
+    }
     #[cfg(target_os = "ios")]
     reconcile_ios_foreground_services(&app, is_foreground).await;
     #[cfg(not(target_os = "ios"))]
@@ -136,26 +141,14 @@ async fn apply_lifecycle_transition(app: AppHandle, snapshot: LifecycleSnapshot)
 
 #[cfg(target_os = "ios")]
 async fn reconcile_ios_foreground_services(app: &AppHandle, is_foreground: bool) {
-    crate::vcp_modules::vcp_log_service::handle_foreground_state_change(app, is_foreground).await;
     if !is_foreground {
-        // Persistent connection tasks become idle; their socket operations have
-        // deadlines. This does not cancel a Chat SSE attempt or choose a Phase 5 lease.
-        let stop_log_connections = async {
-            // Serialize with a settings update which may have observed the old
-            // foreground value before this transition. Its URL intent must not
-            // overwrite the subsequent background stop intent.
-            let settings = app.state::<SettingsState>();
-            let _runtime_guard = settings.lock_runtime_reconcile().await;
-            crate::vcp_modules::vcp_log_service::disconnect_log_connections(app).await;
-        };
         let stop_distributed = async {
             if let Some(distributed) = app.try_state::<crate::distributed::DistributedState>() {
                 let _reconciliation = distributed.reconciliation.lock().await;
                 distributed.client.read().await.stop(app).await;
             }
         };
-        let (_, _, sync_result) = tokio::join!(
-            stop_log_connections,
+        let (_, sync_result) = tokio::join!(
             stop_distributed,
             crate::vcp_modules::sync_service::suspend_sync_for_background(app),
         );
@@ -165,27 +158,9 @@ async fn reconcile_ios_foreground_services(app: &AppHandle, is_foreground: bool)
         return;
     }
 
-    crate::vcp_modules::vcp_log_service::flush_background_logs(app);
-    let settings_state = app.state::<SettingsState>();
-    let _runtime_guard = settings_state.lock_runtime_reconcile().await;
-    match read_config(app.clone(), app.state()).await {
-        Ok(settings) => {
-            if let Err(error) = crate::vcp_modules::vcp_log_service::reconnect_log_connections(
-                app,
-                settings.log.url.clone(),
-                settings.log.key.clone(),
-            )
-            .await
-            {
-                log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
-            }
-            crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node(app, false)
-                .await;
-        }
-        Err(error) => {
-            log::warn!("[Lifecycle] Cannot restore configured foreground connections: {error}")
-        }
-    }
+    let settings = app.state::<SettingsState>();
+    let _runtime_guard = settings.lock_runtime_reconcile().await;
+    super::lifecycle_reconciler::reconcile_distributed_node(app, false).await;
     // Manual Sync is never restarted by foreground restoration. Chat reattaches
     // through its existing output owner; it is not reissued from lifecycle.
 }
@@ -196,18 +171,7 @@ async fn reconcile_foreground_services(
     state: &LifecycleState,
     is_foreground: bool,
 ) {
-    crate::vcp_modules::infra::vcp_log_service::handle_foreground_state_change(app, is_foreground)
-        .await;
-
     if !is_foreground {
-        // --- 进入后台 ---
-        // 1.1 取消旧倒计时任务
-        {
-            let mut cancel_lock = state.linger.log_cancel.lock().await;
-            if let Some(token) = cancel_lock.take() {
-                token.cancel();
-            }
-        }
         {
             let mut cancel_lock = state.linger.dist_cancel.lock().await;
             if let Some(token) = cancel_lock.take() {
@@ -216,61 +180,9 @@ async fn reconcile_foreground_services(
         }
         state
             .linger
-            .is_log_disconnected
-            .store(false, Ordering::SeqCst);
-        state
-            .linger
             .is_dist_disconnected
             .store(false, Ordering::SeqCst);
 
-        // 1.1b 申请持有 vcp_log 对应的原生进程级前台锁，以保证 10 分钟内后台存活
-        if let Err(error) = tauri_plugin_vcp_mobile::stream::acquire_foreground_inner(
-            app,
-            "vcp_log",
-            10,
-            "VCP Log Linger",
-            false,
-        ) {
-            log::warn!("[Lifecycle] Failed to acquire VCP Log background lease: {error}");
-        }
-
-        // 1.2 开启 VCPLog/Info (10分钟延迟断连任务)
-        let log_token = tokio_util::sync::CancellationToken::new();
-        {
-            let mut cancel_lock = state.linger.log_cancel.lock().await;
-            *cancel_lock = Some(log_token.clone());
-        }
-        let app_clone = app.clone();
-        let log_action_token = log_token.clone();
-        crate::vcp_modules::infra::utils::spawn_linger_task(
-            Duration::from_secs(600),
-            log_token,
-            move || async move {
-                // 等待 transition 锁期间可能已回到前台。后台区间由 token 标识；
-                // 同状态重复事件产生的新 epoch 不得废掉仍有效的计时器。
-                let Some(_transition_guard) = lock_linger_interval(&log_action_token).await else {
-                    return;
-                };
-                log::info!(
-                    "[Lifecycle] Background linger expired (10m). Disconnecting VCPLog/Info."
-                );
-                let _ = crate::vcp_modules::infra::vcp_log_service::disconnect_log_connections(
-                    &app_clone,
-                )
-                .await;
-                if let Some(s) = app_clone.try_state::<LifecycleState>() {
-                    s.linger.is_log_disconnected.store(true, Ordering::SeqCst);
-                    // 10 分钟到期，释放 vcp_log 的前台锁
-                    if let Err(error) = tauri_plugin_vcp_mobile::stream::release_foreground_inner(
-                        &app_clone, "vcp_log",
-                    ) {
-                        log::warn!("[Lifecycle] Failed to release expired VCP Log lease: {error}");
-                    }
-                }
-            },
-        );
-
-        // 1.3 开启 Distributed (5分钟保活冷却任务)
         let settings_state = app.state::<SettingsState>();
         if let Ok(settings) = read_config(app.clone(), settings_state).await {
             if settings.distributed.enabled {
@@ -336,56 +248,22 @@ async fn reconcile_foreground_services(
             }
         }
     } else {
-        // --- 返回前台 ---
-        // 2.1 立即取消所有倒计时并释放 vcp_log 锁
-        {
-            let mut cancel_lock = state.linger.log_cancel.lock().await;
-            if let Some(token) = cancel_lock.take() {
-                token.cancel();
-            }
-        }
         {
             let mut cancel_lock = state.linger.dist_cancel.lock().await;
             if let Some(token) = cancel_lock.take() {
                 token.cancel();
             }
         }
-        if let Err(error) =
-            tauri_plugin_vcp_mobile::stream::release_foreground_inner(app, "vcp_log")
-        {
-            log::warn!("[Lifecycle] Failed to release VCP Log lease on resume: {error}");
-        }
-
-        // 2.2 lifecycle 是 distributed Guardian tag 的唯一 owner；回前台无条件收回后台租约。
+        // The distributed Guardian remains owned by its background interval.
         if let Err(error) = tauri_plugin_vcp_mobile::stream::set_keepalive_mode_inner(app, false) {
             log::warn!("[Lifecycle] Failed to release distributed lease on resume: {error}");
         }
 
-        // 2.3 若此前已冷断开，一键拉起恢复
-        // 先观察恢复依据，完成恢复后在 transition 锁内消费；下一轮事件随后调和。
-        let was_log_disconnected = state.linger.is_log_disconnected.load(Ordering::SeqCst);
         let was_dist_disconnected = state.linger.is_dist_disconnected.load(Ordering::SeqCst);
 
         let settings_state = app.state::<SettingsState>();
         let _runtime_guard = settings_state.lock_runtime_reconcile().await;
         if let Ok(settings) = read_config(app.clone(), app.state()).await {
-            if was_log_disconnected {
-                log::info!("[Lifecycle] App returned to foreground. Reconciling VCPLog/Info.");
-                if let Err(error) =
-                    crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(
-                        app,
-                        settings.log.url.clone(),
-                        settings.log.key.clone(),
-                    )
-                    .await
-                {
-                    log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
-                }
-            } else {
-                // 如果连接没有断开，则冲刷后台缓存的日志消息到前端 WebView
-                crate::vcp_modules::infra::vcp_log_service::flush_background_logs(app);
-            }
-
             if was_dist_disconnected && settings.distributed.enabled {
                 log::info!(
                     "[Lifecycle] App returned to foreground. Reconnecting distributed client."
@@ -396,7 +274,6 @@ async fn reconcile_foreground_services(
                 .await;
             }
 
-            consume_reconnect_intent(&state.linger.is_log_disconnected, was_log_disconnected);
             consume_reconnect_intent(&state.linger.is_dist_disconnected, was_dist_disconnected);
         }
     }

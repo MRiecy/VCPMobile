@@ -20,4 +20,5 @@ pub mod vcp_client;
 pub mod vcp_http_endpoint;
 pub mod vcp_info_service;
 pub mod vcp_log_service;
+pub(crate) mod vcp_ws_activity;
 pub(crate) mod vcp_ws_endpoint;

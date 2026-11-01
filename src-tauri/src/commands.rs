@@ -143,9 +143,7 @@ macro_rules! app_command_handler {
             clear_vcp_info, get_vcp_info_connection_status, get_vcp_info_metadata_list,
             get_vcp_info_payload, init_vcp_info_connection,
         };
-        use crate::vcp_modules::vcp_log_service::{
-            init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
-        };
+        use crate::vcp_modules::vcp_log_service::{init_vcp_log_connection, send_vcp_log_message};
 
         // ──────────────────────────────────────────────────────────────
         // IPC 防爆栈总闸（治理 1.1.4 Release「输入附件必闪退」的同类隐患）
@@ -384,7 +382,6 @@ macro_rules! app_command_handler {
                 init_vcp_info_connection,
                 init_vcp_log_connection,
                 send_vcp_log_message,
-                set_vcp_log_heartbeat,
                 // ── 生命周期与系统状态（lifecycle_manager / boot_trace）──
                 get_boot_trace,
                 get_core_status,

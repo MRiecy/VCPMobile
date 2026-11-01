@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
-import { flushPromises } from '@vue/test-utils';
+import { flushPromises, shallowMount } from '@vue/test-utils';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useNotificationProcessor } from '../../../core/composables/useNotificationProcessor';
-import { invokeMock, mockInvoke } from '../../mocks/tauri';
+import { useRagObserverStore } from '../../../core/stores/ragObserver';
+import RagObserver from '../../../features/rag/RagObserver.vue';
+import { emitTauriEvent, invokeMock, mockInvoke } from '../../mocks/tauri';
 
 const testPlatform = vi.hoisted(() => ({ value: null as 'android' | 'ios' | null }));
 vi.mock('../../../core/utils/platform', () => ({
@@ -120,6 +122,49 @@ describe('platform-aware bootstrap', () => {
     await lifecycle.bootstrap(true);
     expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_voice_document')).toHaveLength(1);
     expect(invokeMock.mock.calls.some(([command]) => command === 'connect_tts_document')).toBe(false);
+  });
+
+  it('keeps a live VCPLog status delivered while a foreground snapshot was in flight', async () => {
+    let finish!: () => void;
+    mockInvoke('get_system_snapshot', () => new Promise(resolve => {
+      finish = () => resolve({
+        core: 'ready', log: 'closed', lifecycle: null, backgroundServiceFailures: [],
+      });
+    }));
+    const read = useAppLifecycleStore().hydrateSystemStatus();
+    useNotificationProcessor().processPayload({ type: 'vcp-log-status', status: 'connected', source: 'VCPLog' });
+    finish();
+    await read;
+    expect(useNotificationStore().vcpStatus.status).toBe('connected');
+  });
+
+  it('restores background recall records in an open observer alongside live foreground events', async () => {
+    const metadata = (id: string) => ({
+      id, type: 'RAG_RETRIEVAL_DETAILS', title: id, subtitle: null, summary: '', timestamp: '', hasDetails: true,
+    });
+    mockInvoke('get_vcp_info_metadata_list', () => []);
+    mockInvoke('get_vcp_info_connection_status', () => 'closed');
+    const page = shallowMount(RagObserver, { props: { isOpen: true } });
+    try {
+      await flushPromises();
+      const lifecycle = useAppLifecycleStore();
+      lifecycle.applyLifecycleSnapshot({ phase: 'background', transitionEpoch: 1, nativeSequence: 1, snapshot: false });
+      await flushPromises();
+      let finish!: () => void;
+      mockInvoke('get_vcp_info_metadata_list', () => new Promise(resolve => {
+        finish = () => resolve([metadata('overlap'), metadata('background')]);
+      }));
+      lifecycle.applyLifecycleSnapshot({ phase: 'active', transitionEpoch: 2, nativeSequence: 2, snapshot: false });
+      await flushPromises();
+      for (const id of ['overlap', 'live']) {
+        emitTauriEvent('vcp-info-event', { type: 'vcp-info-message', data: metadata(id) });
+      }
+      finish();
+      await flushPromises();
+      expect(useRagObserverStore().metadataList.map(item => item.id)).toEqual(['live', 'overlap', 'background']);
+    } finally {
+      page.unmount();
+    }
   });
 
   it('keeps the UI available after a native release failure and retries with the same document', async () => {

@@ -584,7 +584,7 @@ notificationStore.executeAction(notificationId, action, reason?)
 | `send_vcp_log_message` | `notificationStore.executeAction()` | `{ payload: JSON }` | 向前端 VCPLog WebSocket 通道回传审批响应 |
 | `plugin:vcp-mobile\|check_all_permissions` | `appLifecycleStore.bootstrap()` | 无 | 检查通知/存储/电池权限 |
 
-> **v1.1.3 已移除**：前端不再调用 `init_vcp_log_connection` / `set_vcp_log_heartbeat`。VCPLog 连接的初始化与心跳管理已下沉到 Rust 核心层，由 `vcp_log_service` 在启动时自动完成。
+> Rust 在启动与配置变更时设置 VCPLog 连接，按前后台状态与活跃聊天维护心跳。
 
 ### 10.2 事件监听表
 

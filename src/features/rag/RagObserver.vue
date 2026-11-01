@@ -6,6 +6,7 @@ import {
   Share2, MessageSquare, History, Search, Bookmark
 } from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
+import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
 import { useRagObserverStore } from '../../core/stores/ragObserver';
 import { useThemeStore } from '../../core/stores/theme';
 import RagPayloadDetail from './RagPayloadDetail.vue';
@@ -21,6 +22,7 @@ const props = defineProps<Props>();
 const emit = defineEmits(['close']);
 
 const store = useRagObserverStore();
+const lifecycle = useAppLifecycleStore();
 
 // Array shapes emitted by the RAG and meta-thinking VCPInfo broadcasts.
 interface RecallResult {
@@ -196,6 +198,10 @@ watch(() => props.isOpen, async (isOpen) => {
       animationFrameId = null;
     }
   }
+});
+
+watch(() => lifecycle.lifecycleSnapshot?.phase, (phase) => {
+  if (phase === 'active' && props.isOpen) void store.refresh();
 });
 
 watch(() => store.triggerSpectrumAnimation, (isAnimating) => {

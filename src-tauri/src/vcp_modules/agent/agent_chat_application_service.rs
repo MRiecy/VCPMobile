@@ -3,6 +3,7 @@ use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
+use crate::vcp_modules::infra::vcp_ws_activity::ChatActivityGuard;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
@@ -239,6 +240,9 @@ pub(crate) async fn process_prepared_agent_chat_message(
 
     // A separate lease per operation also releases on cancellation of this future.
     // Acquisition reports native failure through the shared notification channel.
+    let _chat_activity = agent_config
+        .stream_output
+        .then(|| ChatActivityGuard::acquire(&app_handle));
     let _foreground_lease =
         ForegroundLease::acquire(&app_handle, ForegroundTask::Stream, &agent_config.name).ok();
 

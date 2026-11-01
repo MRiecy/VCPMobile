@@ -302,7 +302,10 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     });
   };
 
+  let logStatusRead = 0;
   const hydrateSystemStatus = async () => {
+    const read = ++logStatusRead;
+    const previousLogStatus = notificationStore.vcpStatus;
     try {
       console.log('[Lifecycle] Fetching system status snapshot...');
       const snapshot = await invoke<SystemSnapshotDto>('get_system_snapshot');
@@ -346,13 +349,15 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         }));
       }
 
-      notificationStore.updateStatus({
-        status: snapshot.log,
-        message: snapshot.log === 'closed' && snapshot.logConfigurationError
-          ? `连接已停止：${snapshot.logConfigurationError}`
-          : LOG_STATUS_MESSAGES[snapshot.log],
-        source: 'VCPLog'
-      });
+      if (read === logStatusRead && notificationStore.vcpStatus === previousLogStatus) {
+        notificationStore.updateStatus({
+          status: snapshot.log,
+          message: snapshot.log === 'closed' && snapshot.logConfigurationError
+            ? `连接已停止：${snapshot.logConfigurationError}`
+            : LOG_STATUS_MESSAGES[snapshot.log],
+          source: 'VCPLog'
+        });
+      }
 
       console.log('[Lifecycle] Snapshot hydrated:', JSON.stringify(snapshot));
     } catch (e) {

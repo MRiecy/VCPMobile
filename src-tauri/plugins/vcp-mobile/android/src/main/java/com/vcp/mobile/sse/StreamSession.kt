@@ -19,6 +19,9 @@ internal class StreamSession(
     val contextJson: JSONObject? = null,
     var requestBody: RequestBodyFile? = null,
 ) {
+    // A detached Rust consumer can observe this generation's lifetime without
+    // taking its response socket. Closing this socket releases that observer.
+    var activityObserver: ClientConnection? = null
     @Volatile var handoffWakeDeadlineMs: Long = 0
     var handoffJob: Job? = null
     // Automatic publication retries belong to this generation. Replacing
@@ -30,7 +33,14 @@ internal class StreamSession(
         lastFinishReason = reason
         terminalError = error
         isCompleted = true
+        closeActivityObserver()
         return true
+    }
+
+    @Synchronized
+    fun closeActivityObserver() {
+        activityObserver?.close()
+        activityObserver = null
     }
 
     @Synchronized

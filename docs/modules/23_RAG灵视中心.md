@@ -49,7 +49,7 @@ related: [RagObserver.vue, ragObserver.ts, lifecycle_manager.rs, settings_manage
 │  │  vcp_info_service.rs (Rust WS 客户端)                     │ │
 │  │  - 连接管理 + 自动重连（指数退避 1s→60s）                  │ │
 │  │  - zstd 压缩缓存（500条 FIFO）                             │ │
-│  │  - Ping 心跳（15s 间隔）                                   │ │
+│  │  - 前台或聊天中每 15 秒发送 Ping                           │ │
 │  │  - 5 个 Tauri Command 供前端调用                           │ │
 │  └──────────────────────┬───────────────────────────────────┘ │
 │                         │ Tauri Events (vcp-info-event)       │
@@ -160,20 +160,20 @@ lazy_static! {
 ```
 loop {
     │
-    ├── 从 url_rx 读取当前 URL（无则等待 changed）
+    ├── 等待已配置 URL 且应用在前台或有活跃聊天
     │
     ├── 构建请求：添加 Host/Origin/User-Agent 头
     │
-    ├── tokio::time::timeout(10s, connect_async(request))
+    ├── tokio::time::timeout(5s, connect_async(request))
     │   ├── 成功 → 进入消息循环
     │   └── 失败/超时 → 指数退避重试
     │
     ├── 消息循环（tokio::select!）:
     │   ├── url_rx.changed() → URL 变更，断开重连
-    │   ├── heartbeat_timer (15s) → 发送 Ping 帧
+    │   ├── activity_rx / heartbeat → 更新维护状态、发送 Ping 或处理探活超时
     │   └── ws_read.next() → 处理文本消息
     │
-    └── 断开后：指数退避 (1s → 2s → 4s → ... → 60s 上限)
+    └── 断开后，维护期间按指数退避重连（1s 至 60s），后台空闲则等待
 }
 ```
 
@@ -233,26 +233,11 @@ match msg_type {
 
 ### 3.6 Ping 心跳
 
-连接建立后每 15 秒发送一次 WebSocket Ping 帧：
-```rust
-heartbeat_timer.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(15));
-```
-Ping 失败时退出消息循环，进入重连流程。这确保了长时间空闲连接不会被中间代理关闭。
+VCPInfo 在前台或后台有活跃聊天时每 15 秒发送 Ping。后台空闲时继续接收已有连接上的召回信息，暂停主动 Ping 和重拨。回前台立即探测已有连接，探活超时则重连。
 
-### 3.7 前台感知事件丢弃（v1.1.2 新增）
+### 3.7 后台接收与前台刷新
 
-v1.1.2 引入前台感知的事件发射控制——`vcp_info_service` 引用 `vcp_log_service::APP_IN_FOREGROUND` 全局原子变量。当应用处于后台时，所有 `emit_info_event()` 调用静默丢弃 payload，防止 `evaluateJavascript` 注入在 WebView 中堆积。
-
-```rust
-fn emit_info_event(app_handle: &AppHandle, payload: Value) {
-    if !vcp_log_service::APP_IN_FOREGROUND.load(Ordering::SeqCst) {
-        return; // 后台静默丢弃
-    }
-    let _ = app_handle.emit("vcp-info-event", payload);
-}
-```
-
-连接超时从 10s 降至 5s（与 vcp_log_service 统一）。详见 [21_基础设施杂项](21_基础设施杂项.md) §3.7。
+后台收到的召回信息同样由 Rust 提取、压缩并写入内存缓存。`emit_info_event` 查询生命周期状态，只在前台通知 WebView。灵视中心已打开时，回前台重新读取召回列表与连接状态。详见 [21_基础设施杂项](21_基础设施杂项.md) §3.7。
 
 ---
 
@@ -382,7 +367,7 @@ VCP Info 连接与 VCP Log 连接在同一代码块中顺序初始化，共享�
 | **元数据/载荷分离** | 懒加载 | 列表页仅传输轻量 metadata（~200 bytes/条），详情页按需调用 `get_vcp_info_payload` |
 | **前端渲染** | `content-visibility: auto` | CSS 属性让屏幕外的卡片跳过渲染，减少首屏布局开销 |
 | **连接开销** | 单 WebSocket 连接 | 全局共享一条 WS 连接，不随卡片数量增长 |
-| **心跳间隔** | 15 秒 Ping | 平衡保活效果与流量开销 |
+| **心跳间隔** | 维护期间 15 秒，后台空闲停发 | 限制空闲时的网络唤醒 |
 | **重连退避** | 1s → 60s 指数上限 | 避免对 VCP 服务器造成连接风暴 |
 | **前端列表上限** | 500 条（前端再截断） | `metadataList.value.length > 500` 时 `pop()` |
 

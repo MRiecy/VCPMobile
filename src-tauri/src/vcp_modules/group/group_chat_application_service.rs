@@ -17,6 +17,7 @@ use crate::vcp_modules::group_speaking_policy::{
 };
 use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
+use crate::vcp_modules::infra::vcp_ws_activity::ChatActivityGuard;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
@@ -239,6 +240,9 @@ async fn run_group_speaker_turn<R: Runtime>(
     )
     .await?;
 
+    let _chat_activity = speaker
+        .stream_output
+        .then(|| ChatActivityGuard::acquire(app_handle));
     let _foreground_lease =
         ForegroundLease::acquire(app_handle, ForegroundTask::Stream, &agent_name).ok();
 
@@ -1430,6 +1434,7 @@ mod group_turn_tests {
         app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
+        app.manage(crate::vcp_modules::infra::lifecycle_state::LifecycleState::new());
         let turns = app.state::<ActiveGroupTurns>();
         let group_turn = turns
             .try_acquire(TopicKey::new("group", "group", "topic"))

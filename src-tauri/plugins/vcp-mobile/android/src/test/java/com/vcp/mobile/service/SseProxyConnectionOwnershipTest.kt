@@ -814,6 +814,46 @@ class SseProxyProtocolTest {
     }
 
     @Test
+    fun activityObserverFollowsOnlyTheLiveGenerationAndDoesNotOwnItsReply() {
+        val port = startListener()
+        val session = session()
+        val (consumer, output) = connection()
+        session.replaceConnection(consumer)
+
+        fun observe(generation: String): Socket = Socket("127.0.0.1", port).apply {
+            soTimeout = 2_000
+            val command = JSONObject().put("action", "observe_activity")
+                .put("requestId", session.requestId).put("generation", generation)
+                .toString().toByteArray(Charsets.UTF_8)
+            DataOutputStream(getOutputStream()).run {
+                writeInt(command.size)
+                write(command)
+                flush()
+            }
+        }
+
+        observe(UUID.randomUUID().toString()).use(::assertSocketDisconnected)
+        observe(session.generation).use { observer ->
+            val reader = DataInputStream(observer.getInputStream())
+            val bytes = ByteArray(reader.readInt())
+            reader.readFully(bytes)
+            val confirmed = JSONObject(String(bytes, Charsets.UTF_8))
+            assertEquals("observing", confirmed.getString("eventType"))
+            assertEquals(session.generation, confirmed.getString("generation"))
+            assertSame(consumer, session.activeConnection)
+            coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"content":"still streaming"}}]}""")
+            coordinator.completeSession(session, "completed")
+            assertSocketDisconnected(observer)
+            assertEquals(listOf("data", "terminal"), frames(consumer, output).map { it.getString("eventType") })
+        }
+        observe(session.generation).use(::assertSocketDisconnected)
+        coordinator.onTaskRemoved()
+        val (control, _) = connection()
+        coordinator.handleControl("ack_committed", session.requestId, session.generation, control)
+        awaitCondition(2_000) { !coordinator.isRunning }
+    }
+
+    @Test
     fun queryKeepsTaskRemovedButResumeResetsIt() {
         val session = session()
         coordinator.onTaskRemoved()

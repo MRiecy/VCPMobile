@@ -234,6 +234,25 @@ internal class SseSessionCoordinator(
                     "query" -> {
                         handleQueryStream(requestId, connection)
                     }
+                    "observe_activity" -> {
+                        val session = findSession(requestId) ?: return@launch
+                        val generation = request.optString("generation").takeIf { it.isNotEmpty() }
+                        synchronized(session) {
+                            if (!isRunning || !isCurrentSession(session) || session.isCompleted ||
+                                (generation != null && generation != session.generation)) return@launch
+                            if (!connection.enqueue(sessionEvent(session, "observing").toString())) return@launch
+                            session.closeActivityObserver()
+                            session.activityObserver = connection
+                        }
+                        try {
+                            socket.soTimeout = 0
+                            readSocketUntilClose(inputStream)
+                        } finally {
+                            synchronized(session) {
+                                if (session.activityObserver === connection) session.activityObserver = null
+                            }
+                        }
+                    }
                     "cancel", "ack_committed", "discard" -> {
                         handleControl(action, requestId, request.optString("generation"), connection)
                     }
@@ -694,6 +713,7 @@ internal class SseSessionCoordinator(
     private fun removeSession(session: StreamSession): Boolean {
         val removed = activeSessions.remove(session.requestId, session)
         if (removed) {
+            session.closeActivityObserver()
             session.handoffJob?.cancel()
             session.handoffJob = null
             session.handoffWakeDeadlineMs = 0

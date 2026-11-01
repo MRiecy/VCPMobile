@@ -2069,6 +2069,50 @@ async fn send_command_to_stream(
 }
 
 #[cfg(target_os = "android")]
+async fn observe_detached_helper<R: Runtime>(
+    app: &AppHandle<R>,
+    request_id: &str,
+    generation: Option<&str>,
+) {
+    // Only an already-running helper can own a detached upstream. A pending
+    // database row, a completed mailbox file or an empty port creates no lease.
+    let observation = async {
+        let stream = connect_helper_port(get_helper_port(app).await?).await?;
+        let stream = send_command_to_stream(
+            stream,
+            "observe_activity",
+            request_id,
+            generation.map(|id| json!({ "generation": id })),
+        )
+        .await?;
+        let mut reader = FramedRead::new(stream, helper_frame_codec());
+        let Some(frame) = reader.next().await else {
+            return Ok(None);
+        };
+        let response: Value = serde_json::from_slice(&frame.map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let observed = response["generation"].as_str();
+        if response["requestId"].as_str() != Some(request_id)
+            || response["eventType"].as_str() != Some("observing")
+            || observed.is_none()
+            || (generation.is_some() && generation != observed)
+        {
+            return Err("Invalid helper activity confirmation".to_string());
+        }
+        Ok::<_, String>(Some(reader))
+    };
+    if let Ok(Ok(Some(mut reader))) = tokio::time::timeout(HELPER_IO_TIMEOUT, observation).await {
+        let guard = super::vcp_ws_activity::ChatActivityGuard::acquire(app);
+        tokio::spawn(async move {
+            // Completion, discard, a replacement observer and helper process
+            // death all close the socket. No timer or result ACK is necessary.
+            let _ = reader.next().await;
+            drop(guard);
+        });
+    }
+}
+
+#[cfg(target_os = "android")]
 async fn query_helper_generation<R: Runtime>(
     app: &AppHandle<R>,
     request_id: &str,
@@ -2346,11 +2390,16 @@ async fn handle_streaming_request<R: Runtime>(
         };
         let stream = match connect_to_helper(app, action, &transport_request_id, params).await {
             Ok(stream) => stream,
-            Err(error) if cancellation_token.is_cancelled() => {
-                checkpoint_stop_partial(app, &context, &message_id, None).await?;
-                return Err(VcpRequestFailure::stopping(error, None));
+            Err(error) => {
+                // A failed local write/attach does not prove the helper never
+                // admitted this request. Observe only if it confirms ownership.
+                observe_detached_helper(app, &transport_request_id, None).await;
+                if cancellation_token.is_cancelled() {
+                    checkpoint_stop_partial(app, &context, &message_id, None).await?;
+                    return Err(VcpRequestFailure::stopping(error, None));
+                }
+                return Err(VcpRequestFailure::recoverable_helper(error, None));
             }
-            Err(error) => return Err(VcpRequestFailure::recoverable_helper(error, None)),
         };
         FramedRead::new(stream, helper_frame_codec())
     };
@@ -2362,6 +2411,8 @@ async fn handle_streaming_request<R: Runtime>(
     let mut snapshot_received = false;
     #[cfg(target_os = "android")]
     let mut helper_terminal_received = false;
+    #[cfg(target_os = "android")]
+    let mut _resumed_chat_activity = None;
     #[cfg(target_os = "android")]
     let mut helper_rejected = false;
     #[cfg(target_os = "android")]
@@ -2549,6 +2600,7 @@ async fn handle_streaming_request<R: Runtime>(
                                         }
                                         return Ok(());
                                     }
+                                    _resumed_chat_activity = Some(super::vcp_ws_activity::ChatActivityGuard::acquire(app));
                                 }
                                 "terminal" => {
                                     if snapshot_in_progress || (is_resume && !snapshot_received) {
@@ -2594,28 +2646,14 @@ async fn handle_streaming_request<R: Runtime>(
             };
             // The helper may have published its completed result after the
             // five-second ACK grace. EOF is not a new generation failure.
-            match read_completed_transport(app, &transport_request_id, &output).await {
+            let message = match read_completed_transport(app, &transport_request_id, &output).await {
                 Ok(Some(result)) => return result,
-                Ok(None) => {}
-                Err(error) => {
-                    if cancelled || cancellation_token.is_cancelled() {
-                        checkpoint_stop_partial(
-                            app,
-                            &context,
-                            &message_id,
-                            partial_content.as_deref(),
-                        )
-                        .await?;
-                        return Err(VcpRequestFailure::stopping(
-                            error.to_string(),
-                            partial_content,
-                        ));
-                    }
-                    return Err(VcpRequestFailure::recoverable_helper(
-                        error.to_string(),
-                        partial_content,
-                    ));
-                }
+                Ok(None) => message,
+                Err(error) => error.to_string(),
+            };
+            if message != HELPER_SESSION_NOT_FOUND {
+                observe_detached_helper(app, &transport_request_id, helper_generation.as_deref())
+                    .await;
             }
             if cancelled || cancellation_token.is_cancelled() {
                 checkpoint_stop_partial(app, &context, &message_id, partial_content.as_deref())

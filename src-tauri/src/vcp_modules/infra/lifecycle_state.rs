@@ -1,4 +1,5 @@
 use serde::Serialize;
+#[cfg(not(target_os = "ios"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri_plugin_vcp_mobile::events::LifecyclePhase;
@@ -73,9 +74,7 @@ impl NativeLifecycleOrdering {
 
 #[cfg(not(target_os = "ios"))]
 pub struct LingerController {
-    pub log_cancel: Mutex<Option<CancellationToken>>,
     pub dist_cancel: Mutex<Option<CancellationToken>>,
-    pub is_log_disconnected: AtomicBool,
     pub is_dist_disconnected: AtomicBool,
 }
 
@@ -83,9 +82,7 @@ pub struct LingerController {
 impl LingerController {
     pub fn new() -> Self {
         Self {
-            log_cancel: Mutex::new(None),
             dist_cancel: Mutex::new(None),
-            is_log_disconnected: AtomicBool::new(false),
             is_dist_disconnected: AtomicBool::new(false),
         }
     }
@@ -97,8 +94,7 @@ pub struct LifecycleState {
     pub last_error: Arc<RwLock<Option<String>>>,
     /// 启动早期的数据库恢复结果。保留到前端读取系统快照，避免一次性事件先于监听器发出。
     pub database_recovery: Arc<RwLock<Option<DatabaseRecoveryNotice>>>,
-    /// 应用前台状态，统一替代原裸静态全局变量
-    pub is_foreground: Arc<AtomicBool>,
+    pub(super) ws_activity: super::vcp_ws_activity::WsActivityPolicy,
     /// None until an actual native/host event has reached the authoritative owner.
     pub lifecycle_snapshot: RwLock<Option<LifecycleSnapshot>>,
     /// Native delivery ordering is checked before allocating a Rust transition epoch.
@@ -118,7 +114,7 @@ impl LifecycleState {
             database_recovery: Arc::new(RwLock::new(None)),
             // iOS services wait for an actual active observation. An initial
             // inactive snapshot must not suppress the first active transition.
-            is_foreground: Arc::new(AtomicBool::new(!cfg!(target_os = "ios"))),
+            ws_activity: super::vcp_ws_activity::WsActivityPolicy::new(!cfg!(target_os = "ios")),
             lifecycle_snapshot: RwLock::new(None),
             #[cfg(any(target_os = "android", target_os = "ios"))]
             native_lifecycle_ordering: std::sync::Mutex::new(NativeLifecycleOrdering::default()),

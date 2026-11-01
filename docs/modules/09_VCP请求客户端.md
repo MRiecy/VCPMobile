@@ -621,90 +621,21 @@ reconnect_chat_streams(connectionId, 首次 channel)
 
 ---
 
-## 10. 动态心跳与前后台状态（vcp_log_service）
+## 10. VCPLog 与 VCPInfo 的连接策略
 
-`vcp_log_service.rs` 与 `vcp_client.rs` 同属 `infra/` 领域，负责 WebSocket 日志通道的生命周期管理。v1.1.3 将心跳自适应逻辑从**前端主动调用**迁移到**后端根据生命周期状态自动调整**，减少前后台切换时的竞态窗口。
+两条 WebSocket 共用 Rust 的 `vcp_ws_activity` 状态。生命周期控制器更新前后台状态，流式聊天请求持有 `ChatActivityGuard` 到收尾。两路监听器分别处理网络事件。
 
-### 10.1 运行时心跳配置
+| 状态 | 两条 WS 的行为 |
+|------|---------------|
+| 前台，或后台仍有活跃聊天 | 每 15 秒发送一次 Ping，连接失败按退避策略重试。 |
+| 后台且最后一个聊天已结束 | 保留已连接的 socket，继续接收服务端消息，暂停主动 Ping 和重连。 |
+| 从后台回前台 | 唤醒退避，复用正在进行的握手。已有连接立即发送探活 Ping，5 秒内未收到匹配的 Pong 时重新拨号。 |
 
-保留 Tauri Command 供手动/调试覆盖：
+Android 和 iOS 使用同一连接策略。Android 聊天租约与 SSE helper、iOS 聊天音频租约继续由相应任务管理。日志连接本身不申请原生保活资源。
 
-```rust
-// src-tauri/src/vcp_modules/infra/vcp_log_service.rs:89
-#[tauri::command]
-pub async fn set_vcp_log_heartbeat(interval_ms: u64) -> Result<(), String>
-```
+### 10.1 后台日志缓存
 
-- **默认值**：`HEARTBEAT_INTERVAL_MS = 15000`（AtomicU64，单位毫秒）
-- **动态生效**：调用后立即通过 `HEARTBEAT_RESET_TX` mpsc 通道向 WebSocket 监听循环发送重置信号
-- 监听循环内通过 `tokio::select!` 捕获 `reset_rx.recv()`，读取最新原子值后重新校准 `heartbeat_timer`（`tokio::time::Sleep::reset`），无需断开重连
-
-> **注意**：v1.1.3 前端（`App.vue` / `useAppLifecycle`）不再在生命周期切换时调用此命令。日常运行的心跳调整由 Rust 侧的 `handle_foreground_state_change` 自动完成。
-
-### 10.2 前后台自适应（后端自动）
-
-Rust 生命周期控制器在收到 `set_app_foreground_state` 调用时，会同步调用 `vcp_log_service::handle_foreground_state_change`：
-
-```rust
-// src-tauri/src/vcp_modules/infra/vcp_log_service.rs:27
-pub async fn handle_foreground_state_change(_app: &AppHandle, is_foreground: bool) {
-    let heartbeat_ms = if is_foreground { 15000 } else { 120000 };
-    HEARTBEAT_INTERVAL_MS.store(heartbeat_ms, Ordering::SeqCst);
-    {
-        let tx_lock = HEARTBEAT_RESET_TX.lock().await;
-        if let Some(tx) = tx_lock.as_ref() {
-            let _ = tx.send(()).await;
-        }
-    }
-}
-```
-
-| 生命周期状态 | 心跳间隔 | 设计意图 |
-|-------------|---------|---------|
-| 前台 (`is_foreground = true`) | 15000 ms | 保持连接活性，确保日志与系统通知实时到达 |
-| 后台 (`is_foreground = false`) | 120000 ms | 降低功耗与网络占用，减少 OEM 杀后台概率 |
-
-触发链路：
-
-```
-Kotlin LifecycleBridge / App.vue visibilitychange
-    │
-    ▼
-Rust lifecycle_controller::set_app_foreground_state(is_foreground)
-    │
-    ▼
-vcp_log_service::handle_foreground_state_change(is_foreground)
-    │
-    ▼
-HEARTBEAT_INTERVAL_MS 原子更新 → WebSocket 循环 reset 心跳定时器
-```
-
-### 10.3 后台日志缓存
-
-为避免后台期间 WebView 积压消息，`vcp_log_service.rs` 在 `emit_log_event` 中增加了后台缓存逻辑：
-
-```rust
-// src-tauri/src/vcp_modules/infra/vcp_log_service.rs:59
-fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
-    if !crate::vcp_modules::infra::lifecycle_manager::is_app_in_foreground(app) {
-        if let Ok(mut cache) = BACKGROUND_LOG_CACHE.lock() {
-            cache.push(payload);
-        }
-        return;
-    }
-    let _ = app.emit("vcp-system-event", payload);
-}
-```
-
-- 应用处于后台时，日志消息缓存在 Rust 侧 `BACKGROUND_LOG_CACHE`，不直接推送到 WebView
-- 返回前台后通过 `flush_background_logs` 一次性补发，防止内存泄漏和前端消息积压
-
-### 10.4 性能与稳定性收益
-
-- **后台降频**：120s 心跳使 WebSocket 在后台维持最低限度的 NAT/防火墙保活，避免高频 Ping 唤醒 CPU 与射频模块
-- **快速恢复**：前台切回时 15s 间隔立即恢复，日志通道无需重新握手
-- **状态一致性**：心跳调整与生命周期状态在同一 Rust 调用链中完成，避免前端调用 `set_vcp_log_heartbeat` 与 `vcp-lifecycle-changed` 事件之间的时序窗口
-- **与 StreamKeepaliveService 协同**：主进程前台保活服务维持进程存活，`:helper` 进程 SSE 代理维持流连接，自适应心跳降低网络层消耗
+后台收到的日志和审批进入 Rust 有界缓存，回前台后交给 WebView。连接状态根据当前快照刷新，以免缓存中的旧状态覆盖已恢复的连接。
 
 ---
 
