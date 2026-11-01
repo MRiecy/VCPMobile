@@ -6,13 +6,6 @@ import UIKit
 private struct ChatTaskStart: Decodable {
     let tag: String
     let title: String
-    let speaker: String
-}
-
-private struct ChatTaskUpdate: Decodable {
-    let tag: String
-    let speaker: String
-    let receivedCharacters: Int64
 }
 
 private struct ChatTaskFinish: Decodable {
@@ -30,29 +23,42 @@ private final class NativeChatBackgroundTasks {
     private final class Chat {
         let tag: String
         let identifier: String
-        let title: String
-        var speaker: String
-        var characters: Int64 = 0
-        var hasReceivedText = false
+        let startedAt = ContinuousClock.now
         var task: BGContinuedProcessingTask?
+        private var timer: DispatchSourceTimer?
 
-        init(_ args: ChatTaskStart, identifier: String) {
-            tag = args.tag
-            title = args.title
-            speaker = args.speaker
+        init(tag: String, identifier: String) {
+            self.tag = tag
             self.identifier = identifier
         }
 
-        var subtitle: String {
-            if speaker.isEmpty { return "正在等待发言…" }
-            if characters == 0 { return "正在等待\(speaker)回复…" }
-            return "\(speaker)正在回复 · 已接收 \(characters) 字"
+        private func estimatedUnits() -> Int64 {
+            let seconds = startedAt.duration(to: .now).components.seconds
+            switch seconds {
+            case ..<15:  return seconds * 40 / 15
+            case ..<60:  return 40 + (seconds - 15) * 30 / 45
+            case ..<180: return 70 + (seconds - 60) * 15 / 120
+            case ..<600: return 85 + (seconds - 180) * 14 / 420
+            default:     return 99
+            }
         }
 
-        func showProgress() {
-            guard let task else { return }
-            task.updateTitle(title, subtitle: subtitle)
-            task.progress.completedUnitCount = hasReceivedText ? 2 : 1
+        func startTimer(on queue: DispatchQueue) {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            self.timer = timer
+            timer.setEventHandler { [weak self] in
+                guard let self, self.timer != nil, let progress = self.task?.progress else { return }
+                let units = self.estimatedUnits()
+                if progress.completedUnitCount != units { progress.completedUnitCount = units }
+                if units == 99 { self.stopTimer() }
+            }
+            timer.schedule(deadline: .now(), repeating: .seconds(1), leeway: .milliseconds(100))
+            timer.activate()
+        }
+
+        func stopTimer() {
+            timer?.cancel()
+            timer = nil
         }
     }
 
@@ -91,8 +97,8 @@ private final class NativeChatBackgroundTasks {
         dispatchPrecondition(condition: .onQueue(schedulerQueue))
         guard chats[args.tag] == nil else { return }
         let identifier = try takeIdentifier()
-        let chat = Chat(args, identifier: identifier)
-        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: chat.title, subtitle: chat.subtitle)
+        let chat = Chat(tag: args.tag, identifier: identifier)
+        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: args.title, subtitle: "正在回复…")
         request.strategy = .fail
         do {
             try scheduler.submit(request)
@@ -105,16 +111,19 @@ private final class NativeChatBackgroundTasks {
 
     private func launch(_ rawTask: BGTask) {
         dispatchPrecondition(condition: .onQueue(schedulerQueue))
-        // A fast foreground reply can commit after .fail submission succeeds
-        // but before this accepted task is delivered. Settle that exact job.
-        if let outcome = finishedBeforeLaunch.removeValue(forKey: rawTask.identifier) {
-            rawTask.setTaskCompleted(success: outcome)
-            freeIdentifiers.append(rawTask.identifier)
+        guard let task = rawTask as? BGContinuedProcessingTask else {
+            rawTask.setTaskCompleted(success: false)
             return
         }
-        guard let task = rawTask as? BGContinuedProcessingTask,
-              let chat = chats.values.first(where: { $0.identifier == task.identifier }) else {
-            rawTask.setTaskCompleted(success: false)
+        task.progress.totalUnitCount = 100
+        // A fast foreground reply can commit after .fail submission succeeds
+        // but before this accepted task is delivered. Settle that exact job.
+        if let outcome = finishedBeforeLaunch.removeValue(forKey: task.identifier) {
+            complete(task, success: outcome)
+            return
+        }
+        guard let chat = chats.values.first(where: { $0.identifier == task.identifier }) else {
+            task.setTaskCompleted(success: false)
             return
         }
         chat.task = task
@@ -127,31 +136,22 @@ private final class NativeChatBackgroundTasks {
             if DispatchQueue.getSpecific(key: self.queueIdentity) == true { expire() }
             else { self.schedulerQueue.sync(execute: expire) }
         }
-        // Count milestones (request started, first text received, result
-        // committed); the server doesn't supply the eventual character count.
-        task.progress.totalUnitCount = 3
-        chat.showProgress()
+        chat.startTimer(on: schedulerQueue)
     }
 
-    fileprivate func update(_ args: ChatTaskUpdate) throws {
-        dispatchPrecondition(condition: .onQueue(schedulerQueue))
-        guard let chat = chats[args.tag] else { throw unavailable("chat_background_task_ended") }
-        chat.speaker = args.speaker
-        chat.characters = args.receivedCharacters
-        if args.receivedCharacters > 0 { chat.hasReceivedText = true }
-        chat.showProgress()
+    private func complete(_ task: BGContinuedProcessingTask, success: Bool) {
+        task.expirationHandler = nil
+        if success { task.progress.completedUnitCount = task.progress.totalUnitCount }
+        task.setTaskCompleted(success: success)
+        freeIdentifiers.append(task.identifier)
     }
 
     fileprivate func finish(tag: String, success: Bool) {
         dispatchPrecondition(condition: .onQueue(schedulerQueue))
         guard let chat = chats.removeValue(forKey: tag) else { return }
         if let task = chat.task {
-            task.expirationHandler = nil
-            if success {
-                task.progress.completedUnitCount = 3
-            }
-            task.setTaskCompleted(success: success)
-            freeIdentifiers.append(chat.identifier)
+            chat.stopTimer()
+            complete(task, success: success)
         } else {
             finishedBeforeLaunch[chat.identifier] = success
         }
@@ -181,11 +181,6 @@ extension VcpMobilePlugin {
             }
             chatCommand(invoke, ChatTaskStart.self, on: owner.schedulerQueue, owner.begin)
         }
-    }
-
-    @objc public func updateChatBackgroundTask(_ invoke: Invoke) {
-        let owner = NativeChatBackgroundTasks.shared
-        chatCommand(invoke, ChatTaskUpdate.self, on: owner.schedulerQueue, owner.update)
     }
 
     @objc public func finishChatBackgroundTask(_ invoke: Invoke) {

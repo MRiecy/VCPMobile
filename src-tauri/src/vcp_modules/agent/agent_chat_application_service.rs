@@ -266,20 +266,14 @@ pub(crate) async fn process_prepared_agent_chat_message(
 
     // 8. 发起请求
     #[cfg(target_os = "ios")]
-    let mut ios_reply = agent_config.stream_output.then(|| {
-        crate::vcp_modules::chat::ios_reply_task::ReplyTask::begin(
-            &app_handle,
-            &agent_config.name,
-            &agent_config.name,
-        )
+    let ios_reply = agent_config.stream_output.then(|| {
+        crate::vcp_modules::chat::ios_reply_task::ReplyTask::begin(&app_handle, &agent_config.name)
     });
     let result = perform_vcp_request_registered(
         &app_handle,
         request_payload,
         stream_channel.clone(),
         cancellation_token,
-        #[cfg(target_os = "ios")]
-        ios_reply.as_ref(),
     )
     .await;
 
@@ -302,8 +296,8 @@ pub(crate) async fn process_prepared_agent_chat_message(
                 return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
             }
             #[cfg(target_os = "ios")]
-            if let Some(task) = &mut ios_reply {
-                task.success = committed.is_ok_and(|saved| {
+            if let Some(task) = ios_reply {
+                task.finish(committed.is_ok_and(|saved| {
                     saved.is_some_and(|message| {
                         message.newly_committed
                             && !matches!(
@@ -311,7 +305,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
                                 "error" | "cancelled_by_user"
                             )
                     })
-                });
+                }));
             }
         }
         Err(failure) => {

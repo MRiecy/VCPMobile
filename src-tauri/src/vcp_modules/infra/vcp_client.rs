@@ -24,8 +24,6 @@ use super::vcp_http_endpoint::{
     resolve_chat_endpoint, resolve_model_discovery_endpoint, ChatRequestPurpose,
 };
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
-#[cfg(target_os = "ios")]
-use crate::vcp_modules::chat::ios_reply_task::{ReceivedCharacters, ReplyTask};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{ChatEndpointMode, Settings};
@@ -1524,7 +1522,6 @@ pub(crate) async fn perform_vcp_request_registered<R: Runtime>(
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
     cancellation_token: CancellationToken,
-    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask>,
 ) -> Result<VcpResponse, VcpRequestFailure> {
     log::info!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
@@ -1627,8 +1624,6 @@ pub(crate) async fn perform_vcp_request_registered<R: Runtime>(
             cancellation_token,
             output,
             false,
-            #[cfg(target_os = "ios")]
-            ios_reply,
         )
         .await
     } else {
@@ -2363,7 +2358,6 @@ async fn handle_streaming_request<R: Runtime>(
     cancellation_token: CancellationToken,
     output: Arc<RequestOutput>,
     is_resume: bool,
-    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask>,
 ) -> Result<VcpResponse, VcpRequestFailure> {
     if !is_resume && cancellation_token.is_cancelled() {
         return Ok(VcpResponse::cancelled());
@@ -2374,21 +2368,8 @@ async fn handle_streaming_request<R: Runtime>(
     let mut aurora_buffer = AuroraBuffer::new();
     let mut pending_chunk = String::new();
     let mut last_finish_reason = None;
-    #[cfg(target_os = "ios")]
-    let mut received = ReceivedCharacters::default();
-    #[allow(unused_mut)]
-    let mut send_update = |buffer: &mut AuroraBuffer| {
+    let send_update = |buffer: &mut AuroraBuffer| {
         output.send_aurora(buffer, &message_id, &context, None, false);
-        #[cfg(target_os = "ios")]
-        if let Some(task) = ios_reply.filter(|task| task.is_observing()) {
-            if let Some(count) = received.observe(&buffer.full_text, std::time::Instant::now()) {
-                let speaker = context
-                    .as_ref()
-                    .and_then(|value| value["agentName"].as_str())
-                    .unwrap_or_default();
-                task.update(speaker, count);
-            }
-        }
     };
 
     #[cfg(target_os = "android")]
@@ -5292,8 +5273,6 @@ mod active_request_tests {
             CancellationToken::new(),
             output,
             false,
-            #[cfg(target_os = "ios")]
-            None,
         )
         .await
         .unwrap();
@@ -5343,8 +5322,6 @@ mod active_request_tests {
             CancellationToken::new(),
             Arc::default(),
             false,
-            #[cfg(target_os = "ios")]
-            None,
         )
         .await
         .unwrap();
@@ -5390,8 +5367,6 @@ mod active_request_tests {
             CancellationToken::new(),
             Arc::default(),
             false,
-            #[cfg(target_os = "ios")]
-            None,
         )
         .await
         .unwrap_err();
@@ -5445,8 +5420,6 @@ mod active_request_tests {
                 request_cancel,
                 request_output,
                 false,
-                #[cfg(target_os = "ios")]
-                None,
             )
             .await
         });
@@ -5842,8 +5815,6 @@ mod active_request_tests {
             },
             None,
             token,
-            #[cfg(target_os = "ios")]
-            None,
         )
         .await
         .unwrap();

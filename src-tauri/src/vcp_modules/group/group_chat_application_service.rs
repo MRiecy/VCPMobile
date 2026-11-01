@@ -102,29 +102,19 @@ async fn run_group_speakers<R: Runtime>(
     history: &mut Vec<ChatMessage>,
 ) -> Result<GroupSpeakerOutcome, String> {
     #[cfg(target_os = "ios")]
-    let mut ios_reply = speakers.iter().any(|agent| agent.stream_output).then(|| {
-        ReplyTask::begin(
-            params.app_handle,
-            &params.group_config.name,
-            &speakers[0].name,
-        )
-    });
+    let ios_reply = speakers
+        .iter()
+        .any(|agent| agent.stream_output)
+        .then(|| ReplyTask::begin(params.app_handle, &params.group_config.name));
     for speaker in speakers {
-        let outcome = run_group_speaker_turn(
-            params,
-            speaker,
-            history,
-            #[cfg(target_os = "ios")]
-            ios_reply.as_ref(),
-        )
-        .await?;
+        let outcome = run_group_speaker_turn(params, speaker, history).await?;
         if outcome != GroupSpeakerOutcome::Settled {
             return Ok(outcome);
         }
     }
     #[cfg(target_os = "ios")]
-    if let Some(task) = &mut ios_reply {
-        task.success = true;
+    if let Some(task) = ios_reply {
+        task.finish(true);
     }
     Ok(GroupSpeakerOutcome::Settled)
 }
@@ -139,7 +129,6 @@ async fn run_group_speaker_turn<R: Runtime>(
     params: &GroupSpeakerTurnParams<'_, R>,
     speaker: &crate::vcp_modules::agent_types::AgentConfig,
     full_history_for_context: &mut Vec<ChatMessage>,
-    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask>,
 ) -> Result<GroupSpeakerOutcome, String> {
     if params.group_turn.is_cancelled() {
         return Ok(GroupSpeakerOutcome::Cancelled);
@@ -156,10 +145,6 @@ async fn run_group_speaker_turn<R: Runtime>(
 
     let agent_id = speaker.id.clone();
     let agent_name = speaker.name.clone();
-    #[cfg(target_os = "ios")]
-    if let Some(task) = ios_reply {
-        task.update(&agent_name, 0);
-    }
     let message_id = format!("msg_group_{}", uuid::Uuid::new_v4());
 
     // 组装上下文
@@ -290,8 +275,6 @@ async fn run_group_speaker_turn<R: Runtime>(
             request_payload,
             stream_channel.clone(),
             cancellation_token,
-            #[cfg(target_os = "ios")]
-            ios_reply,
         )
         .await
     };
@@ -882,7 +865,7 @@ async fn run_jev_session(
         }
         #[cfg(target_os = "ios")]
         if ios_reply.is_none() && members.iter().any(|agent| agent.stream_output) {
-            ios_reply = Some(ReplyTask::begin(app, &config.name, ""));
+            ios_reply = Some(ReplyTask::begin(app, &config.name));
         }
         if let Some((id, scope)) = session.next_speaker(input_revision)? {
             app.state::<ActiveGroupTurns>().publish(&key);
@@ -914,14 +897,7 @@ async fn run_jev_session(
                 reply_policy: scope.as_ref().and_then(|scope| scope.policy.as_deref()),
                 reply_scope: scope.as_ref(),
             };
-            let outcome = run_group_speaker_turn(
-                &params,
-                speaker,
-                &mut history,
-                #[cfg(target_os = "ios")]
-                ios_reply.as_ref(),
-            )
-            .await?;
+            let outcome = run_group_speaker_turn(&params, speaker, &mut history).await?;
             session.speaker_finished(
                 outcome == GroupSpeakerOutcome::Settled,
                 Ok(json!({"status":outcome.status()})),
@@ -954,18 +930,14 @@ async fn run_jev_session(
             session.decision_finished();
             if session.close_if_current(runtime.revision, "safety_limit")? {
                 #[cfg(target_os = "ios")]
-                if let Some(task) = ios_reply.as_mut() {
-                    task.success = true;
+                if let Some(task) = ios_reply {
+                    task.finish(true);
                 }
                 return Ok(());
             }
             continue;
         }
         let db = app.state::<DbState>();
-        #[cfg(target_os = "ios")]
-        if let Some(task) = ios_reply.as_ref() {
-            task.update("", 0);
-        }
         let history_stats = load_group_member_history_stats(&db.pool, &key).await?;
         let settings = read_config(app.clone(), app.state::<SettingsState>()).await?;
         let mut request = build_jev_request(&members, &config, &runtime, &history_stats)?;
@@ -1056,8 +1028,8 @@ async fn run_jev_session(
         let stop = reason.is_some();
         if session.accept_decision(runtime.revision, &ids, reason)? && stop {
             #[cfg(target_os = "ios")]
-            if let Some(task) = ios_reply.as_mut() {
-                task.success = true;
+            if let Some(task) = ios_reply {
+                task.finish(true);
             }
             return Ok(());
         }
@@ -1422,15 +1394,9 @@ mod group_turn_tests {
         let mut history = Vec::new();
         let speaker = members.iter().find(|member| member.id == ids[0]).unwrap();
         assert_eq!(
-            run_group_speaker_turn(
-                &params,
-                speaker,
-                &mut history,
-                #[cfg(target_os = "ios")]
-                None,
-            )
-            .await
-            .unwrap(),
+            run_group_speaker_turn(&params, speaker, &mut history)
+                .await
+                .unwrap(),
             GroupSpeakerOutcome::Settled
         );
         let saved: (String, String) =

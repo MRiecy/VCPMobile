@@ -102,30 +102,11 @@ pub mod ios_chat {
             .is_ok()
     }
 
-    pub async fn begin<R: Runtime>(
-        app: &AppHandle<R>,
-        tag: &str,
-        title: &str,
-        speaker: &str,
-    ) -> bool {
+    pub async fn begin<R: Runtime>(app: &AppHandle<R>, tag: &str, title: &str) -> bool {
         call(
             app,
             "beginChatBackgroundTask",
-            json!({ "tag": tag, "title": title, "speaker": speaker }),
-        )
-        .await
-    }
-
-    pub async fn update<R: Runtime>(
-        app: &AppHandle<R>,
-        tag: &str,
-        speaker: &str,
-        received_characters: u64,
-    ) -> bool {
-        call(
-            app,
-            "updateChatBackgroundTask",
-            json!({ "tag": tag, "speaker": speaker, "receivedCharacters": received_characters }),
+            json!({ "tag": tag, "title": title }),
         )
         .await
     }

@@ -75,7 +75,7 @@
 | ID | 既定产品选择 | 当前实施解释 |
 |---|---|---|
 | D1 | Tauri 原生 iPhone/iPad | 同一 Vue/Rust + Swift adapter |
-| D2 | 2026-11-01 用户决定移除聊天静音保活。iOS 26 持续后台任务仅用于尽力展示回复者和进度 | Swift 异步管理展示。Rust 独立读取 SSE 并直接落库，正常 EOF 即完成，读取失败时保存已收到的正文并结束，不增加回复缓存与自动重试。同步和预渲染沿用前台常亮租约 |
+| D2 | 2026-11-01 用户决定移除聊天静音保活。iOS 26 持续后台任务仅用于尽力展示智能体或群组名称及预计进度 | Swift 异步管理展示。Rust 独立读取 SSE 并直接落库，正常 EOF 即完成，读取失败时保存已收到的正文并结束，不增加回复缓存与自动重试。同步和预渲染沿用前台常亮租约 |
 | D3 | 接受按平台语义分类迁移 | 以真实命令及消费者安排实现；02 的迁移分类用于理解接口差异，不定义 UI 可见性或新审批范围 |
 | D4 | 最低 iOS/iPadOS 26.0；高于该版本的新 API 分层 | 2026-10-09 用户明确选定 26.0，替代 Phase 0–2 的 15.0 工程基线；Tauri/Swift 目标同步。系统权限、任务提交与资源激活仍按真实结果处理，Apple 编译证据待 G1 |
 | D5 | iPhone+iPad、单 Scene、当前窗口宽度响应 | 复用组件树，按框架要求接 Scene 生命周期 |
@@ -92,7 +92,7 @@
 | D16 | 采用静态正确性与硬上限，设备性能专项为范围外 | 审查像素、缓冲、副本和并发预算 |
 | D17 | 语音仍未开发，入口保留并说明 | iOS 点击不请求麦克风，可继续文字输入；后续接入再修 MIME/扩展名契约 |
 | D18 | 原生获取/staging/大图，Rust 解析与 CAS，附件 P0 | Files/PHPicker/security scope/ImageIO 与三条导入链 |
-| D19 | 真实 token/字符/字节/chunk/terminal，未知总量表达为未知 | 领域计量与系统 Progress 分层，具体适配问题见 04 |
+| D19 | iOS 聊天的系统进度条按经过时间估算，完成状态由 Rust 提供 | Swift 本地计时，15、60、180、600 秒分别达到 40%、70%、85%、99%，成功收尾时填至 100%。流式期间无需统计字数或跨桥更新 |
 
 相机、PhotoKit 保存、outgoing share、设备/完整网络信息与 Distributed 的原延期已被最新审批覆盖：媒体/分享归 Phase 4，设备工具/Distributed 归 Phase 3。2026-10-17 用户又批准双端音视频附件处理：Android Media3 音频与现有视频抽帧优化、iOS 原生音频转换与视频抽帧，图片保持现状，详见 [实施记录](./phase-5/05-双端音视频附件处理.md)。语音输入和 Android 本地 CLI 的原范围未被改变。关于页集中功能说明 U1 仍是未批准建议，不自动加入产品。
 
@@ -124,7 +124,7 @@ N3/N5/N6 将 D2/D15 改成前台限定和真机研发门禁；N7/N8 改写了 D8
 | 文件媒体与双向分享 | 闭合 picker/相机/相册/导出/预览与分享交接，确定扩展和自签输入 | P4-1–P4-4 |
 | WebKit 缓存 | 明确清理类别和结果，接共享维护页及实际 WebView owner | P4-5 |
 | SSE 后台持续接收 | 核对用户提出的静音音频、continued task 等候选的具体条件；形成选型、实现与未覆盖情况 | P5-1 / P5-2 |
-| 未知总量进度 | 读取 Progress/BGContinuedProcessingTask 声明，完成映射与 system end 分支 | continued-task progress adapter |
+| 未知总量进度 | 按 D19 展示时间估算进度，观察正常结束与系统过期时的收尾 | continued-task progress adapter |
 | 常亮与其他后台任务 | idle timer 持有/释放及 Sync/Log/Distributed/维护的 stop/join/恢复 | P5-4 |
 | 自签 Bundle ID | 主 App/扩展 ID、共享容器、各 target entitlement/profile 与 task identifier 配套改写 | P4-4 输入 / Phase 6 用户产物 |
 
