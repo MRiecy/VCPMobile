@@ -281,6 +281,10 @@ fn restore_welcome(calls: &VoiceCallState, document_id: u64) -> Result<Navigatio
 }
 
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri IPC exposes named arguments"
+)]
 pub async fn request_chat_navigation(
     db: State<'_, DbState>,
     calls: State<'_, VoiceCallState>,

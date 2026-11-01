@@ -520,6 +520,10 @@ async fn window_projection(
 }
 
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri IPC exposes named arguments"
+)]
 pub async fn read_chat_window<R: tauri::Runtime>(
     app: AppHandle<R>,
     document_id: u64,
@@ -557,6 +561,10 @@ pub async fn read_chat_window<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri IPC exposes named arguments"
+)]
 pub async fn reconcile_chat_window<R: tauri::Runtime>(
     app: AppHandle<R>,
     document_id: u64,

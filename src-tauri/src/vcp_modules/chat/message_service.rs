@@ -2540,15 +2540,9 @@ mod stream_lifecycle_tests {
         .await
         .expect("skeleton identity");
 
-        let committed = commit_stream_message(
-            &db_state,
-            &key,
-            "terminal body",
-            2,
-            "completed",
-        )
-        .await
-        .expect("finalize generation");
+        let committed = commit_stream_message(&db_state, &key, "terminal body", 2, "completed")
+            .await
+            .expect("finalize generation");
         let StreamCommit::Committed(
             _,
             terminal_timestamp,
@@ -2587,15 +2581,9 @@ mod stream_lifecycle_tests {
         .await
         .expect("active count");
         assert_eq!(active, 0);
-        let repeated = commit_stream_message(
-            &db_state,
-            &key,
-            "late body",
-            3,
-            "completed",
-        )
-        .await
-        .expect("late finalization is idempotent");
+        let repeated = commit_stream_message(&db_state, &key, "late body", 3, "completed")
+            .await
+            .expect("late finalization is idempotent");
         let StreamCommit::AlreadyFinalized(message) = repeated else {
             panic!("late finalization must return the durable message");
         };
@@ -2678,15 +2666,11 @@ mod stream_lifecycle_tests {
             .await
             .expect("remove cache fixture");
 
-        assert!(commit_stream_message(
-            &db_state,
-            &key,
-            "must roll back",
-            2,
-            "completed",
-        )
-        .await
-        .is_err());
+        assert!(
+            commit_stream_message(&db_state, &key, "must roll back", 2, "completed",)
+                .await
+                .is_err()
+        );
 
         let finish_reason: Option<String> =
             sqlx::query_scalar("SELECT finish_reason FROM messages WHERE msg_id = 'message-2'")
@@ -2808,15 +2792,11 @@ mod stream_lifecycle_tests {
             .execute(&pool)
             .await
             .expect("simulate inconsistent pending state");
-        assert!(commit_stream_message(
-            &db_state,
-            &key,
-            "unowned body",
-            999,
-            "completed",
-        )
-        .await
-        .is_err());
+        assert!(
+            commit_stream_message(&db_state, &key, "unowned body", 999, "completed",)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
