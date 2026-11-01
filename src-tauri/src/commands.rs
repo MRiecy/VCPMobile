@@ -37,7 +37,7 @@ macro_rules! app_command_handler {
             connect_chat_view, register_chat_navigation_intent, request_chat_navigation, restore_chat_view,
         };
         use crate::vcp_modules::chat::chat_window::{
-            read_chat_window, reconcile_chat_window,
+            read_chat_window, reconcile_chat_window, resolve_chat_placeholders,
         };
         use crate::vcp_modules::chat_manager::{
             append_single_message, delete_messages, edit_resend_message, load_chat_history, load_chat_history_around,
@@ -199,6 +199,7 @@ macro_rules! app_command_handler {
                 restore_chat_view,
                 read_chat_window,
                 reconcile_chat_window,
+                resolve_chat_placeholders,
                 load_chat_history,
                 load_chat_history_around,
                 load_chat_history_streamed,

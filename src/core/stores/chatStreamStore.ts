@@ -34,6 +34,9 @@ interface StreamTerminalTombstone {
 }
 
 type TopicIdentity = Pick<ConversationKey, "ownerType" | "ownerId" | "topicId">;
+type PlaceholderKey = TopicIdentity & { messageId: string };
+type PlaceholderResult = PlaceholderKey & { state: "pending" | "unresolved" | "committed" | "missing" };
+
 type TailContentOp = Extract<TailTextOp, { op: "append" | "replace" }>;
 
 function buildTailBlockFromOp(
@@ -1593,6 +1596,25 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     return channel;
   };
 
+  async function resolvePreviousPlaceholders(candidates: Set<string>, eventMessages: Set<string>) {
+    const keys: PlaceholderKey[] = [];
+    for (const messageKey of candidates) {
+      if (!activeStreamKeySet.value.has(messageKey) || eventMessages.has(messageKey)) continue;
+      const [scope, messageId] = JSON.parse(messageKey) as [string, string];
+      const [ownerType, ownerId, topicId] = JSON.parse(scope) as [ConversationOwnerType, string, string];
+      keys.push({ ownerType, ownerId, topicId, messageId });
+    }
+    for (let offset = 0; offset < keys.length; offset += 500) {
+      const rows = await invoke<PlaceholderResult[]>("resolve_chat_placeholders", { keys: keys.slice(offset, offset + 500) });
+      if (disposed) return;
+      for (const { ownerId, ownerType, topicId, messageId, state } of rows) {
+        const messageKey = streamMessageMapKey(ownerId, ownerType, topicId, messageId);
+        if (eventMessages.has(messageKey) || !activeStreamKeySet.value.has(messageKey)) continue;
+        if (state === "committed" || state === "missing") retireStreamProjection(ownerId, ownerType, topicId, messageId);
+      }
+    }
+  }
+
   /**
    * 同一 WebView 只持有一个输出连接。Rust 安排接管；每条生成的结果只从 Channel 归约。
    */
@@ -1673,8 +1695,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (requests.size === 0) activeRequests.delete(key);
         }
 
+        // A whole group turn can start and finish while this consumer is away.
+        // Reconcile the observed window even when no earlier request ID is known.
         try {
-          if (previousActiveKeys.size) await useChatHistoryStore().reconcileWindow();
+          await useChatHistoryStore().reconcileWindow();
+          if (!disposed) await resolvePreviousPlaceholders(previousActiveKeys, eventMessages);
         } catch (error) {
           if (!disposed) useNotificationStore().addNotification({
             id: "chat-window-recovery", type: "error", title: "聊天记录核对失败",

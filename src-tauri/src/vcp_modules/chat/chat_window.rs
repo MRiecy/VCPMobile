@@ -588,6 +588,47 @@ pub async fn reconcile_chat_window<R: tauri::Runtime>(
     .await
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceholderKey {
+    #[serde(flatten)]
+    key: TopicKey,
+    message_id: String,
+}
+
+#[derive(Serialize)]
+pub struct PlaceholderFact {
+    #[serde(flatten)]
+    key: PlaceholderKey,
+    state: String,
+}
+
+#[tauri::command]
+pub async fn resolve_chat_placeholders(
+    db: tauri::State<'_, DbState>,
+    keys: Vec<PlaceholderKey>,
+) -> Result<Vec<PlaceholderFact>, String> {
+    if keys.len() > CAPACITY {
+        return Err("too many chat placeholders".into());
+    }
+    let states: Vec<String> = sqlx::query_scalar(
+        "WITH keys AS (SELECT key AS ordinal,
+          value ->> 'ownerType' AS owner_type, value ->> 'ownerId' AS owner_id,
+          value ->> 'topicId' AS topic_id, value ->> 'messageId' AS msg_id FROM json_each(?))
+         SELECT CASE WHEN m.msg_id IS NULL OR m.deleted_at IS NOT NULL OR t.topic_id IS NULL OR t.deleted_at IS NOT NULL THEN 'missing'
+          WHEN m.finish_reason IS NOT NULL THEN 'committed' WHEN ag.msg_id IS NOT NULL THEN 'pending' ELSE 'unresolved' END
+         FROM keys k LEFT JOIN messages m USING(owner_type,owner_id,topic_id,msg_id)
+         LEFT JOIN topics t USING(owner_type,owner_id,topic_id)
+         LEFT JOIN active_generations ag USING(owner_type,owner_id,topic_id,msg_id) ORDER BY k.ordinal")
+        .bind(serde_json::to_string(&keys).map_err(|e|e.to_string())?)
+        .fetch_all(&db.pool).await.map_err(|e|e.to_string())?;
+    Ok(keys
+        .into_iter()
+        .zip(states)
+        .map(|(key, state)| PlaceholderFact { key, state })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,7 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn released_offline_terminal_is_read_from_the_observed_window() {
+    async fn released_offline_terminal_and_cross_topic_placeholders_are_database_facts() {
         let (db, key) = fixture().await;
         let app = tauri::test::mock_app();
         app.manage(db.clone());
@@ -770,6 +811,23 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get::<String, _>("finish_reason"), "stop");
         drop(conn);
+        let facts = resolve_chat_placeholders(
+            app.state(),
+            vec![
+                PlaceholderKey {
+                    key: key.clone(),
+                    message_id: "reply".into(),
+                },
+                PlaceholderKey {
+                    key: TopicKey::new("group", "a", "t"),
+                    message_id: "reply".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(facts[0].state, "committed");
+        assert_eq!(facts[1].state, "missing");
     }
 
     #[tokio::test]

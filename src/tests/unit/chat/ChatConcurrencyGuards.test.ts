@@ -10,6 +10,7 @@ import { useSettingsStore } from "@/core/stores/settings";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useAttachmentStore } from "@/core/stores/attachmentStore";
 import { useNotificationStore } from "@/core/stores/notification";
+import { useTopicStore } from "@/core/stores/topicListManager";
 import {
   channelInstances,
   invokeMock,
@@ -211,6 +212,229 @@ describe("chat conversation concurrency guards", () => {
     const message = stream.getActiveStreamMessage("group-a", "group", "topic-a", "speaker-message");
     expect(message).toMatchObject({ name: "Speaker A", agentId: "speaker-a", timestamp: 10, isReconnecting: false });
     expect(message?.shell?.displayName).toBe("Speaker A");
+  });
+
+  it("settles a visible placeholder from the current window after its active lease has gone", async () => {
+    const session = useChatSessionStore();
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    mockWindowRead([]);
+    const history = useChatHistoryStore();
+    await history.ensureWindow();
+    const stream = useChatStreamStore();
+    await stream.checkAndRecoverInterruptedStreams();
+    const output = channelInstances[0];
+    const identity = {
+      messageId: "already-saved", consumerRevision: 1,
+      context: { ownerId: "agent-a", ownerType: "agent", topicId: "topic-a" },
+    };
+    output?.emit({ ...identity, type: "thinking" });
+    mockInvoke("reconcile_chat_window", () => windowPage([{
+      id: "already-saved", role: "assistant", content: "persisted result", timestamp: 1,
+      finishReason: "completed", blocks: [],
+    }]));
+    await stream.checkAndRecoverInterruptedStreams();
+    output?.emit({ ...identity, type: "aurora", aurora: {
+      kind: "snapshot", streamId: 1, content: "stale partial", stableBlocks: [],
+    } });
+    expect(history.currentChatHistory[0]).toMatchObject({ content: "persisted result", finishReason: "completed" });
+    expect(stream.isConversationBusy("agent-a", "agent", "topic-a")).toBe(false);
+    expect(stream.getActiveStreamMessage("agent-a", "agent", "topic-a", "already-saved")).toBeUndefined();
+  });
+
+  it.each(["before", "after"])("preserves the notification anchor when a reconnect reads %s it opens", async order => {
+    const session = useChatSessionStore();
+    const stream = useChatStreamStore();
+    const history = useChatHistoryStore();
+    const key = { ownerType: "group" as const, ownerId: "g", topicId: "t" };
+    const tail = { ...message("newest", "t"), timestamp: 200 };
+    const anchor = { ...message("notified", "t"), timestamp: 20 };
+    installWindow(session, { type: "group", id: "g" }, "t");
+    mockWindowRead([tail]);
+    await history.ensureWindow();
+    const inventory = deferred<unknown>();
+    const readStarted = deferred<void>();
+    const oldPage = deferred<ReturnType<typeof windowPage>>();
+    mockInvoke("reconnect_chat_streams", () => inventory.promise);
+    mockInvoke("reconcile_chat_window", args => {
+      readStarted.resolve();
+      return args?.windowRevision === 1 ? oldPage.promise : windowPage([anchor], { hasMoreNewer: true });
+    });
+    const recovery = stream.checkAndRecoverInterruptedStreams();
+    const connected = { generations: [], activeRequests: [], groupTurns: [] };
+    if (order === "before") {
+      inventory.resolve(connected);
+      await readStarted.promise;
+    }
+    const currentFocus = { target: { kind: "topic", ...key }, focusRevision: 1, windowRevision: 1, anchorId: null };
+    mockInvoke("connect_chat_view", () => ({ documentId: 1, focus: currentFocus }));
+    mockInvoke("register_chat_navigation_intent", () => ({ focus: currentFocus }));
+    mockInvoke("request_chat_navigation", args => ({ status: "accepted", focus: {
+      target: args?.target, focusRevision: 1, windowRevision: 2, anchorId: args?.anchorId,
+    } }));
+    expect(await session.selectTopicById("g", "group", "t", undefined, anchor.id)).toBe("accepted");
+    mockWindowRead([anchor], { hasMoreNewer: true });
+    await history.ensureWindow();
+    if (order === "after") inventory.resolve(connected);
+    else oldPage.resolve(windowPage([tail]));
+    await recovery;
+    channelInstances[0]?.emit({ context: { ...key, replayed: true }, type: "end", consumerRevision: 2,
+      messageId: tail.id, timestamp: tail.timestamp, content: "another member", blocks: [], finishReason: "completed" });
+    expect(session.acceptedWindow?.anchorId).toBe(anchor.id);
+    expect(history.currentChatHistory.map(row => row.id)).toEqual([anchor.id]);
+    expect(history.hasEvictedNewer).toBe(true);
+  });
+
+  it("does not replace a live terminal with a stale database placeholder in the same anchored window", async () => {
+    const session = useChatSessionStore();
+    const stream = useChatStreamStore();
+    const history = useChatHistoryStore();
+    const key = { ownerType: "agent" as const, ownerId: "a", topicId: "t" };
+    const partial = { ...message("reply", "t"), role: "assistant", content: "partial" };
+    const committed = { ...partial, content: "durable", finishReason: "stop" };
+    installWindow(session, { type: "agent", id: "a" }, "t", partial.id);
+    mockWindowRead([partial]);
+    await history.ensureWindow();
+    const readStarted = deferred<void>();
+    const slow = deferred<ReturnType<typeof windowPage>>();
+    let reads = 0;
+    mockInvoke("reconcile_chat_window", () => {
+      if (++reads > 1) return windowPage([committed]);
+      readStarted.resolve();
+      return slow.promise;
+    });
+    const recovery = stream.checkAndRecoverInterruptedStreams();
+    await readStarted.promise;
+    const output = channelInstances[0]!;
+    output.emit({ context: key, type: "end", messageId: partial.id, timestamp: 1,
+      consumerRevision: 2, content: committed.content, blocks: [], finishReason: "stop" });
+    expect(history.currentChatHistory[0]?.finishReason).toBe("stop");
+    slow.resolve(windowPage([partial]));
+    await recovery;
+    output.emit({ context: key, type: "thinking", messageId: partial.id, consumerRevision: 2 });
+    expect(history.currentChatHistory).toHaveLength(1);
+    expect(history.currentChatHistory[0]).toMatchObject({ content: "durable", finishReason: "stop" });
+    expect(stream.isMessageActive("a", "agent", "t", partial.id)).toBe(false);
+  });
+
+  it("discovers a reply admitted while the first window read is in flight", async () => {
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const stream = useChatStreamStore();
+    await stream.checkAndRecoverInterruptedStreams();
+    installWindow(session, { type: "agent", id: "a" }, "t");
+    const initial = deferred<ReturnType<typeof windowPage>>();
+    const reply = { ...message("new", "t"), role: "assistant", content: "" };
+    mockInvoke("read_chat_window", () => initial.promise);
+    mockInvoke("reconcile_chat_window", () => windowPage([reply]));
+    const opening = history.ensureWindow();
+    channelInstances[0]!.emit({ type: "thinking", messageId: reply.id, consumerRevision: 1,
+      context: { ownerType: "agent", ownerId: "a", topicId: "t" } });
+    initial.resolve(windowPage([]));
+    await opening;
+    expect(history.currentChatHistory.map(row => row.id)).toEqual([reply.id]);
+    expect(history.currentChatHistory[0]?.isThinking).toBe(true);
+  });
+
+  it("keeps the surviving neighbour when the notification anchor is deleted during reconciliation", async () => {
+    const session = useChatSessionStore();
+    const history = useChatHistoryStore();
+    const stream = useChatStreamStore();
+    const target = message("anchor", "t");
+    const neighbour = message("neighbour", "t");
+    installWindow(session, { type: "agent", id: "a" }, "t", target.id);
+    mockWindowRead([target, neighbour]);
+    await history.ensureWindow();
+    const started = deferred<void>();
+    const stale = deferred<ReturnType<typeof windowPage>>();
+    let reads = 0;
+    mockInvoke("reconcile_chat_window", () => {
+      if (++reads > 1) return windowPage([neighbour], { anchorRemoved: true });
+      started.resolve();
+      return stale.promise;
+    });
+    const recovery = stream.checkAndRecoverInterruptedStreams();
+    await started.promise;
+    mockInvoke("delete_messages", () => ({ updatedAt: 3, msgCount: 1 }));
+    await history.deleteMessage(history.captureMessageActionKey(target.id)!);
+    stale.resolve(windowPage([target, neighbour]));
+    await recovery;
+    expect(history.currentChatHistory.map(row => row.id)).toEqual([neighbour.id]);
+    expect(history.anchorRemoved).toBe(true);
+    expect(history.anchored).toBe(true);
+  });
+
+  it("fences late frames after an external committed deletion", async () => {
+    let output: { emit: (event: unknown) => void } | undefined;
+    const receipt = deferred<any>();
+    mockInvoke("reconnect_chat_streams", args => {
+      output = args?.channel as typeof output;
+      return receipt.promise;
+    });
+    const stream = useChatStreamStore();
+    const connecting = stream.checkAndRecoverInterruptedStreams();
+    const identity = {
+      messageId: "deleted", consumerRevision: 150,
+      context: { ownerId: "agent-a", ownerType: "agent", topicId: "topic-a" },
+    };
+    output?.emit({ ...identity, type: "reconnecting" });
+    stream.retireStreamProjection("agent-a", "agent", "topic-a", "deleted");
+    output?.emit({
+      ...identity, type: "end", content: "late terminal", finishReason: "completed", blocks: [],
+    });
+    receipt.resolve({ generations: [{
+      msgId: "deleted", topicId: "topic-a", ownerId: "agent-a", ownerType: "agent", createdAt: 1,
+    }], activeRequests: [], groupTurns: [] });
+    await connecting;
+    expect(stream.getActiveStreamMessage("agent-a", "agent", "topic-a", "deleted")).toBeUndefined();
+    expect(stream.isMessageActive("agent-a", "agent", "topic-a", "deleted")).toBe(false);
+    expect(useNotificationStore().activeToasts).toEqual([]);
+  });
+
+  it("retains a background placeholder across a failed read and releases it only on a confirmed terminal", async () => {
+    const stream = useChatStreamStore();
+    await stream.checkAndRecoverInterruptedStreams();
+    const context = { ownerId: "agent-a", ownerType: "agent", topicId: "hidden-topic" } as const;
+    const key = { ...context, messageId: "partial" };
+    const output = channelInstances[0]!;
+    output.emit({ context, type: "thinking", messageId: key.messageId, consumerRevision: 1 });
+
+    mockInvoke("resolve_chat_placeholders", () => Promise.reject("sqlite busy"));
+    await stream.checkAndRecoverInterruptedStreams();
+    expect(stream.isMessageActive(context.ownerId, context.ownerType, context.topicId, key.messageId)).toBe(true);
+    mockInvoke("resolve_chat_placeholders", args => {
+      expect(args?.keys).toEqual([key]);
+      return [{ ...key, state: "unresolved" }];
+    });
+    await stream.checkAndRecoverInterruptedStreams();
+    expect(stream.isMessageActive(context.ownerId, context.ownerType, context.topicId, key.messageId)).toBe(true);
+    mockInvoke("resolve_chat_placeholders", () => [{ ...key, state: "committed" }]);
+    await stream.checkAndRecoverInterruptedStreams();
+    output.emit({ context, type: "thinking", messageId: key.messageId, consumerRevision: 1 });
+    expect(stream.isMessageActive(context.ownerId, context.ownerType, context.topicId, key.messageId)).toBe(false);
+  });
+
+  it("projects a replayed terminal once without changing unread or invoking the live completion hook", async () => {
+    const stream = useChatStreamStore();
+    const topics = useTopicStore();
+    const increment = vi.spyOn(topics, "incrementTopicMsgCount");
+    const unread = vi.spyOn(topics, "incrementTopicUnreadCount");
+    const onStreamFinished = vi.fn();
+    const onMessageCreated = vi.fn();
+    const replay = {
+      context: { ownerType: "group", ownerId: "g", topicId: "t", replayed: true } as const,
+      type: "end" as const, messageId: "offline", consumerRevision: 1, finishReason: "error",
+      chunk: null, content: "partial with error", error: null, aurora: null, blocks: [],
+      topicUpdatedAt: 3, timestamp: 2,
+    };
+    await stream.processStreamEvent(replay, { onStreamFinished, onMessageCreated });
+    await stream.processStreamEvent(replay, { onStreamFinished, onMessageCreated });
+    expect(onMessageCreated).toHaveBeenCalledOnce();
+    expect(stream.getActiveStreamMessage("g", "group", "t", "offline")).toMatchObject({
+      content: "partial with error", finishReason: "error",
+    });
+    expect(increment).not.toHaveBeenCalled();
+    expect(unread).not.toHaveBeenCalled();
+    expect(onStreamFinished).not.toHaveBeenCalled();
   });
 
   it("inserts an offline durable end during connection without a second recovery command", async () => {
