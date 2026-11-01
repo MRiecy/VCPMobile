@@ -2,6 +2,9 @@ package com.vcp.mobile.lifecycle
 
 import android.app.Activity
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -9,21 +12,19 @@ import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
-import com.vcp.mobile.device.NetworkStatusManager
 import com.vcp.mobile.runtime.PluginTaskRuntime
 
 /** One native Channel and one default-network observer, serialized with lifecycle snapshots on main. */
 internal class NativeEvents(
     private val activity: Activity,
     private val runtime: PluginTaskRuntime,
-    private val networkStatusManager: NetworkStatusManager,
     private val lifecycleSnapshot: () -> JSObject,
 ) {
     private companion object { const val TAG = "VcpMobilePlugin" }
-    private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
-    private var lastConnected: Boolean? = null
-    private var lastDefaultNetwork: android.net.Network? = null
-    private var isNetworkMonitoringStarted = false
+    private data class NetworkStatus(val network: Network?, val connected: Boolean)
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var defaultNetwork: Network? = null
+    private var networkStatus = NetworkStatus(null, false)
     private var nativeEventChannel: Channel? = null
 
     internal fun isReady(): Boolean = !runtime.isDestroying && nativeEventChannel != null
@@ -74,7 +75,7 @@ internal class NativeEvents(
                     nativeEventChannel = args.channel
                     emitNativeEvent("lifecycle", lifecycleSnapshot())
                     startNetworkMonitoringInternal()
-                    emitNetworkStatus(force = true)
+                    emitNetworkStatus()
                     invoke.resolve()
                 } catch (error: Exception) {
                     Log.e(TAG, "Failed to register native events", error)
@@ -86,36 +87,41 @@ internal class NativeEvents(
         }
     }
 
-    private fun emitNetworkStatus(force: Boolean = false) {
-        if (runtime.isDestroying) return
-        val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val network = cm.activeNetwork
-        val status = networkStatusManager.getNetworkStatus()
-        val connected = status.optBoolean("connected", false)
-        if (force || connected != lastConnected || network != lastDefaultNetwork) {
-            lastConnected = connected
-            lastDefaultNetwork = network
-            emitNativeEvent("network", status)
-        }
+    private fun emitNetworkStatus() {
+        emitNativeEvent("network", JSObject().apply { put("connected", networkStatus.connected) })
+    }
+
+    private fun updateNetworkStatus(network: Network?, connected: Boolean) {
+        val next = NetworkStatus(network, connected)
+        if (next == networkStatus) return
+        networkStatus = next
+        emitNetworkStatus()
     }
 
     private fun startNetworkMonitoringInternal() {
-        if (isNetworkMonitoringStarted) return
-        val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
-        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: android.net.Network) {
-                emitNetworkStatus()
+        if (networkCallback != null) return
+        val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                defaultNetwork = network
+                // On Q+ Android immediately supplies the UID's initial blocked state.
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) updateNetworkStatus(network, true)
             }
-            override fun onLost(network: android.net.Network) {
-                emitNetworkStatus()
+            override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                if (network == defaultNetwork) updateNetworkStatus(network, !blocked)
             }
-            override fun onCapabilitiesChanged(network: android.net.Network, networkCapabilities: android.net.NetworkCapabilities) {
-                emitNetworkStatus()
+            override fun onLost(network: Network) {
+                if (network != defaultNetwork) return
+                defaultNetwork = null
+                updateNetworkStatus(null, false)
             }
         }
         cm.registerDefaultNetworkCallback(callback, Handler(Looper.getMainLooper()))
         networkCallback = callback
-        isNetworkMonitoringStarted = true
+        // Subscribe first. A disconnected device may receive no initial callback;
+        // activeNetwork is also null when the default network is blocked for this UID.
+        defaultNetwork = cm.activeNetwork
+        networkStatus = NetworkStatus(defaultNetwork, defaultNetwork != null)
         Log.i(TAG, "[Network] Native default network monitoring started.")
     }
 
@@ -139,10 +145,9 @@ internal class NativeEvents(
         nativeEventChannel = null
         try {
             networkCallback?.let { callback ->
-                val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
                 cm.unregisterNetworkCallback(callback)
                 networkCallback = null
-                isNetworkMonitoringStarted = false
             }
         } catch (_: Exception) {}
     }

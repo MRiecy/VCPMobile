@@ -20,9 +20,11 @@ use tokio_util::codec::LengthDelimitedCodec;
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 
+use super::lifecycle_state::LifecycleState;
 use super::vcp_http_endpoint::{
     resolve_chat_endpoint, resolve_model_discovery_endpoint, ChatRequestPurpose,
 };
+use super::vcp_ws_activity::{ChatActivityGuard, WsActivityPolicy};
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
@@ -638,9 +640,12 @@ fn request_output<R: Runtime>(
         .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()))
         .unwrap_or_default();
     output.bind_chat_feed(app);
-    let group = app
-        .try_state::<ActiveGroupTurns>()
-        .and_then(|turns| turns.0.get(&key.topic).map(|entry| entry.value().clone()));
+    let group = app.try_state::<ActiveGroupTurns>().and_then(|turns| {
+        turns
+            .active
+            .get(&key.topic)
+            .map(|entry| entry.value().clone())
+    });
     if let Some(group) = group {
         if let Ok(mut current) = group.channel.lock() {
             if current.is_none() {
@@ -975,24 +980,31 @@ struct ActiveGroupTurnEntry {
 type ActiveGroupTurnMap = Arc<DashMap<TopicKey, Arc<ActiveGroupTurnEntry>>>;
 
 /// 每个 Topic 同时只允许一个群组回合，并由同一所有者承载回合取消状态。
-pub struct ActiveGroupTurns(
-    ActiveGroupTurnMap,
-    std::sync::Mutex<std::collections::VecDeque<(TopicKey, std::time::Instant)>>,
-);
+pub struct ActiveGroupTurns {
+    active: ActiveGroupTurnMap,
+    recent_continues: std::sync::Mutex<std::collections::VecDeque<(TopicKey, std::time::Instant)>>,
+    ws_activity: WsActivityPolicy,
+}
 
+#[cfg(test)]
 impl Default for ActiveGroupTurns {
     fn default() -> Self {
-        log::info!("[VCPClient] Initialized ActiveGroupTurns successfully.");
-        Self(
-            Arc::new(DashMap::new()),
-            std::sync::Mutex::new(std::collections::VecDeque::new()),
-        )
+        Self::new(&LifecycleState::new())
     }
 }
 
 impl ActiveGroupTurns {
+    pub(crate) fn new(lifecycle: &LifecycleState) -> Self {
+        log::info!("[VCPClient] Initialized ActiveGroupTurns successfully.");
+        Self {
+            active: Arc::new(DashMap::new()),
+            recent_continues: Default::default(),
+            ws_activity: lifecycle.ws_activity.clone(),
+        }
+    }
+
     pub(crate) fn accept_continue(&self, key: &TopicKey, debounce_ms: u32) -> Result<(), String> {
-        let mut recent = self.1.lock().map_err(|e| e.to_string())?;
+        let mut recent = self.recent_continues.lock().map_err(|e| e.to_string())?;
         recent.retain(|(_, time)| time.elapsed() < Duration::from_secs(10));
         if recent.iter().any(|(topic, time)| {
             topic == key && time.elapsed() < Duration::from_millis(debounce_ms as u64)
@@ -1021,7 +1033,7 @@ impl ActiveGroupTurns {
         &self,
         key: TopicKey,
     ) -> Result<ActiveGroupTurnLease, OwnedNotified> {
-        match self.0.entry(key.clone()) {
+        match self.active.entry(key.clone()) {
             Entry::Vacant(slot) => {
                 let cancellation_token = CancellationToken::new();
                 slot.insert(Arc::new(ActiveGroupTurnEntry {
@@ -1034,9 +1046,10 @@ impl ActiveGroupTurns {
                     session: std::sync::Mutex::new(None),
                 }));
                 Ok(ActiveGroupTurnLease {
-                    turns: self.0.clone(),
+                    turns: self.active.clone(),
                     key,
                     cancellation_token,
+                    _activity: self.ws_activity.acquire_chat(),
                 })
             }
             // Construct the future under the map guard. notify_waiters also
@@ -1046,7 +1059,7 @@ impl ActiveGroupTurns {
     }
 
     pub(crate) fn cancel(&self, key: &TopicKey) -> bool {
-        let Some(entry) = self.0.get(key) else {
+        let Some(entry) = self.active.get(key) else {
             return false;
         };
         entry.cancellation_token.cancel();
@@ -1068,7 +1081,7 @@ impl ActiveGroupTurns {
 
     pub(crate) fn cancel_owner(&self, owner_type: &str, owner_id: &str) {
         let keys = self
-            .0
+            .active
             .iter()
             .filter(|entry| {
                 entry.key().owner_type == owner_type && entry.key().owner_id == owner_id
@@ -1089,7 +1102,7 @@ impl ActiveGroupTurns {
 
     pub(crate) fn notify_group_changed(&self, group_id: &str) {
         let keys = self
-            .0
+            .active
             .iter()
             .filter(|entry| entry.key().owner_type == "group" && entry.key().owner_id == group_id)
             .map(|entry| entry.key().clone())
@@ -1101,7 +1114,7 @@ impl ActiveGroupTurns {
 
     pub(crate) fn notify_all_groups_changed(&self) {
         let keys = self
-            .0
+            .active
             .iter()
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
@@ -1114,7 +1127,7 @@ impl ActiveGroupTurns {
         &self,
         session: &Arc<crate::vcp_modules::group::group_session::GroupSession>,
     ) -> Option<TopicKey> {
-        self.0.iter().find_map(|entry| {
+        self.active.iter().find_map(|entry| {
             entry
                 .session
                 .lock()
@@ -1129,13 +1142,13 @@ impl ActiveGroupTurns {
         &self,
         key: &TopicKey,
     ) -> Option<Arc<crate::vcp_modules::group::group_session::GroupSession>> {
-        self.0
+        self.active
             .get(key)
             .and_then(|entry| entry.session.lock().ok()?.clone())
     }
 
     pub(crate) fn publish(&self, key: &TopicKey) {
-        if let Some(entry) = self.0.get(key) {
+        if let Some(entry) = self.active.get(key) {
             let event = group_turn_event(key, &entry, true);
             if let Ok(channel) = entry.channel.lock() {
                 if let Some(channel) = channel.as_ref() {
@@ -1151,7 +1164,7 @@ impl ActiveGroupTurns {
         key: &TopicKey,
         channel: Channel<StreamEvent>,
     ) -> Result<Option<Value>, String> {
-        let Some(turn) = self.0.get(key) else {
+        let Some(turn) = self.active.get(key) else {
             return Ok(None);
         };
         let mut current = turn.channel.lock().map_err(|error| error.to_string())?;
@@ -1194,6 +1207,8 @@ pub(crate) struct ActiveGroupTurnLease {
     turns: ActiveGroupTurnMap,
     key: TopicKey,
     cancellation_token: CancellationToken,
+    // The same owner moves into the JEV worker and outlives individual speaker requests.
+    _activity: ChatActivityGuard,
 }
 
 impl ActiveGroupTurnLease {
@@ -1353,7 +1368,7 @@ pub async fn interruptGroupTurn(
     );
     let key = TopicKey::new(owner_type, owner_id, topic_id);
     let origin = state
-        .0
+        .active
         .get(&key)
         .and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone());
     if let Some(origin) = origin {
@@ -3071,7 +3086,7 @@ async fn reconnect_chat_output_for_webview<R: Runtime>(
             keys.insert(request.key().clone());
         }
         let active_turns = turns
-            .0
+            .active
             .iter()
             .map(|turn| turn.key().clone())
             .collect::<Vec<_>>();
@@ -5862,7 +5877,7 @@ mod active_request_tests {
         turn.bind_optional_output(app.handle(), None).unwrap();
         let events = Arc::new(std::sync::Mutex::new(Vec::<StreamEvent>::new()));
         {
-            let entry = turns.0.get(&topic).unwrap();
+            let entry = turns.active.get(&topic).unwrap();
             assert!(entry.channel.lock().unwrap().is_none());
             assert!(entry.chat_feed.lock().unwrap().is_some());
             let captured = events.clone();

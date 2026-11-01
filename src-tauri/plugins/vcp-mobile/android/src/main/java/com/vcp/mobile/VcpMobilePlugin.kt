@@ -131,7 +131,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val cpuStatusManager = CpuStatusManager(activity)
     private val gpuStatusManager = GpuStatusManager(activity)
     private val sensorStatusManager = SensorStatusManager(activity)
-    private val nativeEvents = NativeEvents(activity, runtime, networkStatusManager, lifecycleBridge::snapshot)
+    private val nativeEvents = NativeEvents(activity, runtime, lifecycleBridge::snapshot)
     private val voiceAudioSession = VoiceAudioSession(activity)
     private val voiceOutput = NativeVoiceOutput(voiceAudioSession, playbackStarted = { id ->
         nativeEvents.tryEmitVoicePlayback(JSObject().apply { put("playbackId", id); put("kind", "started") })

@@ -19,7 +19,6 @@ use crate::vcp_modules::group_speaking_policy::{
 };
 use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
-use crate::vcp_modules::infra::vcp_ws_activity::ChatActivityGuard;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
@@ -247,10 +246,6 @@ async fn run_group_speaker_turn<R: Runtime>(
         Some(&agent_name),
     )
     .await?;
-
-    let _chat_activity = speaker
-        .stream_output
-        .then(|| ChatActivityGuard::acquire(app_handle));
 
     // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
     crate::vcp_modules::vcp_client::deliver_request_event(
@@ -1412,8 +1407,9 @@ mod group_turn_tests {
         let app = tauri::test::mock_builder().build(context).unwrap();
         app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
         app.manage(ActiveRequests::default());
-        app.manage(ActiveGroupTurns::default());
-        app.manage(crate::vcp_modules::infra::lifecycle_state::LifecycleState::new());
+        let lifecycle = crate::vcp_modules::infra::lifecycle_state::LifecycleState::new();
+        app.manage(ActiveGroupTurns::new(&lifecycle));
+        app.manage(lifecycle);
         (app, pool)
     }
 

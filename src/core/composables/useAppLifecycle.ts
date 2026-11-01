@@ -2,6 +2,7 @@ import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAppLifecycleStore } from '../stores/appLifecycle';
 import { useChatStreamStore } from '../stores/chatStreamStore';
+import { useRagObserverStore } from '../stores/ragObserver';
 import { isIOS } from '../utils/platform';
 import type { LifecycleSnapshotDto } from '../types/lifecycle';
 import { createVoiceHistorySync } from '../../features/chat/voice/voiceHistorySync';
@@ -9,12 +10,15 @@ import { createVoiceHistorySync } from '../../features/chat/voice/voiceHistorySy
 export function useAppLifecycle() {
   const lifecycleStore = useAppLifecycleStore();
   const streamStore = useChatStreamStore();
+  const infoStore = useRagObserverStore();
   const voiceHistory = createVoiceHistorySync();
   let unlisten: UnlistenFn | null = null;
   let unlistenNetwork: UnlistenFn | null = null;
   let recoveryPromise: Promise<void> | null = null;
   let disposed = false;
   const documentHidden = ref(typeof document !== 'undefined' && document.hidden);
+  const activeEpoch = ref<number | null>(null);
+  const visibleEpoch = ref(0);
 
   const reconcileInterruptedStreams = (source: string) => {
     if (disposed || lifecycleStore.state !== 'READY' || documentHidden.value) return;
@@ -59,19 +63,25 @@ export function useAppLifecycle() {
     document.documentElement.classList.toggle('vcp-paused-animations', paused);
   }, { immediate: true });
 
-  watch(() => lifecycleStore.lifecycleSnapshot?.phase, (phase, previous) => {
-    if (phase === 'active' && previous !== 'active') {
-      lifecycleStore.hydrateSystemStatus().catch((err) => {
-        console.error("[useAppLifecycle] Failed to hydrate system status:", err);
-      });
-      void reconcileInterruptedStreams('App foreground');
-    }
-  });
+  // Native transitions and visibility can arrive together after JS thaws.
+  // Only delivered wake signals start a read; applying its snapshot cannot start another.
+  watch([() => lifecycleStore.lifecycleSnapshot?.phase, activeEpoch, visibleEpoch],
+    ([phase, epoch, visible], [previousPhase, previousEpoch, previousVisible]) => {
+      if (disposed || documentHidden.value) return;
+      const woke = visible !== previousVisible || (phase === 'active' && epoch !== previousEpoch
+        && lifecycleStore.lifecycleSnapshot?.transitionEpoch === epoch);
+      if (woke) {
+        void lifecycleStore.hydrateSystemStatus();
+        void infoStore.refresh();
+      }
+      // A snapshot read on visibility may be the first authoritative active phase.
+      if (woke || (phase === 'active' && phase !== previousPhase)) void reconcileInterruptedStreams('App foreground');
+    });
 
   const handleVisibilityChange = () => {
     if (typeof document !== 'undefined') {
       documentHidden.value = document.hidden;
-      if (!documentHidden.value) void reconcileInterruptedStreams('Document visible');
+      if (!documentHidden.value) visibleEpoch.value++;
     }
   };
 
@@ -100,7 +110,13 @@ export function useAppLifecycle() {
 
     try {
       const stopListening = await listen<LifecycleSnapshotDto>('vcp-lifecycle-changed', (event) => {
-        if (!disposed) lifecycleStore.applyLifecycleSnapshot(event.payload);
+        if (disposed) return;
+        lifecycleStore.applyLifecycleSnapshot(event.payload);
+        const current = lifecycleStore.lifecycleSnapshot;
+        if (current?.phase === 'active' && current.transitionEpoch === event.payload.transitionEpoch
+          && event.payload.phase === 'active') {
+          activeEpoch.value = current.transitionEpoch;
+        }
       });
       if (disposed) {
         stopListening();

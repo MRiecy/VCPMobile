@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
 import { flushPromises, shallowMount } from '@vue/test-utils';
+import { defineComponent, h } from 'vue';
+import { useAppLifecycle } from '../../../core/composables/useAppLifecycle';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useNotificationProcessor } from '../../../core/composables/useNotificationProcessor';
@@ -140,31 +142,44 @@ describe('platform-aware bootstrap', () => {
   });
 
   it('restores background recall records in an open observer alongside live foreground events', async () => {
+    logStatus = 'closed';
     const metadata = (id: string) => ({
       id, type: 'RAG_RETRIEVAL_DETAILS', title: id, subtitle: null, summary: '', timestamp: '', hasDetails: true,
     });
     mockInvoke('get_vcp_info_metadata_list', () => []);
     mockInvoke('get_vcp_info_connection_status', () => 'closed');
+    const root = shallowMount(defineComponent({ setup() {
+      useAppLifecycle();
+      return () => h('div');
+    } }));
     const page = shallowMount(RagObserver, { props: { isOpen: true } });
     try {
       await flushPromises();
-      const lifecycle = useAppLifecycleStore();
-      lifecycle.applyLifecycleSnapshot({ phase: 'background', transitionEpoch: 1, nativeSequence: 1, snapshot: false });
+      emitTauriEvent('vcp-lifecycle-changed', { phase: 'background', transitionEpoch: 1, nativeSequence: 1, snapshot: false });
+      expect(useNotificationStore().vcpStatus.status).toBe('closed');
       await flushPromises();
       let finish!: () => void;
       mockInvoke('get_vcp_info_metadata_list', () => new Promise(resolve => {
         finish = () => resolve([metadata('overlap'), metadata('background')]);
       }));
-      lifecycle.applyLifecycleSnapshot({ phase: 'active', transitionEpoch: 2, nativeSequence: 2, snapshot: false });
+      let finishStatus!: (status: string) => void;
+      mockInvoke('get_vcp_info_connection_status', () => new Promise(resolve => { finishStatus = resolve; }));
+      logStatus = 'connected';
+      emitTauriEvent('vcp-lifecycle-changed', { phase: 'active', transitionEpoch: 2, nativeSequence: 2, snapshot: false });
       await flushPromises();
+      emitTauriEvent('vcp-info-event', { type: 'vcp-info-status', source: 'VCPInfo', status: 'connected' });
       for (const id of ['overlap', 'live']) {
         emitTauriEvent('vcp-info-event', { type: 'vcp-info-message', data: metadata(id) });
       }
       finish();
+      finishStatus('closed');
       await flushPromises();
+      expect(useRagObserverStore().connectionStatus).toBe('connected');
+      expect(useNotificationStore().vcpStatus.status).toBe('connected');
       expect(useRagObserverStore().metadataList.map(item => item.id)).toEqual(['live', 'overlap', 'background']);
     } finally {
       page.unmount();
+      root.unmount();
     }
   });
 

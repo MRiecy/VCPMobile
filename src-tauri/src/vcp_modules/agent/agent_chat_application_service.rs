@@ -30,7 +30,8 @@ pub struct AgentChatPayload {
 /// pending database message until configuration and context are ready.
 pub(crate) struct PreparedAgentRequest {
     key: MessageKey,
-    lease: ActiveRequestLease,
+    _lease: ActiveRequestLease,
+    _activity: ChatActivityGuard,
     cancellation_token: CancellationToken,
 }
 
@@ -53,11 +54,13 @@ impl PreparedAgentRequest {
             key.clone(),
             cancellation_token,
         )?;
+        let activity = ChatActivityGuard::acquire(app);
         lease.set_origin_user_message(origin_user_message_id)?;
         lease.bind_output(app, channel)?;
         Ok(Self {
             key,
-            lease,
+            _lease: lease,
+            _activity: activity,
             cancellation_token,
         })
     }
@@ -149,11 +152,8 @@ pub(crate) async fn process_prepared_agent_chat_message(
     let topic_key = TopicKey::new("agent", &agent_id, &topic_id);
     let user_message = payload.user_message;
 
-    let PreparedAgentRequest {
-        key: request_key,
-        lease: _request_lease,
-        cancellation_token,
-    } = request;
+    let request_key = request.key;
+    let cancellation_token = request.cancellation_token;
     let thinking_id = request_key.msg_id.clone();
 
     if cancellation_token.is_cancelled() {
@@ -240,9 +240,6 @@ pub(crate) async fn process_prepared_agent_chat_message(
 
     // A separate lease per operation also releases on cancellation of this future.
     // Acquisition reports native failure through the shared notification channel.
-    let _chat_activity = agent_config
-        .stream_output
-        .then(|| ChatActivityGuard::acquire(&app_handle));
     let _foreground_lease =
         ForegroundLease::acquire(&app_handle, ForegroundTask::Stream, &agent_config.name).ok();
 

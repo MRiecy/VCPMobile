@@ -311,6 +311,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                             );
                         }
                         NativeEvent::Network { connected } => {
+                            if connected {
+                                // The socket owners decide whether to resume a parked retry
+                                // or probe an existing connection after a path change.
+                                event_handle.state::<LifecycleState>().ws_activity.network_available();
+                            }
                             #[cfg(target_os = "ios")]
                             {
                                 // Vue reuses its existing READY/active/in-flight recovery gate.

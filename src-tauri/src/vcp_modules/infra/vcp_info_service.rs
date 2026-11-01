@@ -1,4 +1,4 @@
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
-use super::vcp_ws_activity::{self, wait_retry, Heartbeat, HeartbeatAction};
+use super::vcp_ws_activity::{self, Heartbeat, HeartbeatAction, Retry, SocketEvent};
 use super::vcp_ws_endpoint::{compile_log_connection, endpoint_log_label};
 
 type ConnectionIntent = (u64, Option<Url>);
@@ -147,7 +147,7 @@ pub(super) fn apply_info_endpoint<R: tauri::Runtime>(app: &AppHandle<R>, endpoin
 async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
     let mut url_rx = WS_INFO_URL_CHANNEL.0.subscribe();
     let mut activity_rx = vcp_ws_activity::subscribe(&app_handle);
-    let mut retry_delay = Duration::from_millis(1000);
+    let mut retry = Retry::default();
 
     loop {
         let activity = *activity_rx.borrow_and_update();
@@ -173,7 +173,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             }),
                         );
                     }
-                    retry_delay = Duration::from_secs(1);
+                    retry = Retry::default();
                     let wake = tokio::select! {
                         changed = url_rx.changed() => changed,
                         changed = activity_rx.changed() => changed,
@@ -222,7 +222,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     }),
                 );
 
-                wait_retry(&mut url_rx, &mut activity_rx, &mut retry_delay).await;
+                retry.wait(&mut url_rx, &mut activity_rx).await;
                 continue;
             }
         };
@@ -264,7 +264,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             biased;
             _ = url_rx.changed() => {
                 log::info!("[VCPInfo] URL changed during connection attempt, aborting.");
-                retry_delay = Duration::from_secs(1);
+                retry = Retry::default();
                 continue;
             }
             // Only idle parks an unfinished dial. A foreground event reuses it.
@@ -309,15 +309,15 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }
         }
 
-        if !connection_succeeded && activity_rx.borrow().resume_epoch != activity.resume_epoch {
-            retry_delay = Duration::from_secs(1);
+        if !connection_succeeded && activity_rx.borrow().probe_epoch != activity.probe_epoch {
+            retry = Retry::default();
+            continue;
         }
         if connection_succeeded {
             if let Some(ws_stream) = ws_stream_opt {
                 if url_rx.borrow().0 != connection_revision {
                     continue;
                 }
-                retry_delay = Duration::from_millis(1000);
                 {
                     *CURRENT_INFO_STATUS.write().await = "connected".to_string();
                 }
@@ -340,42 +340,40 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 
                 // A completed handshake already confirms the current socket, even
                 // when the app resumed while the handshake was in flight.
-                let mut heartbeat = Heartbeat::new(*activity_rx.borrow_and_update());
+                let current = *activity_rx.borrow_and_update();
+                if current.probe_epoch != activity.probe_epoch {
+                    retry = Retry::default();
+                }
+                let mut heartbeat = Heartbeat::new(current);
 
-                let mut retry_immediately = false;
+                let mut intent_changed = false;
                 loop {
                     tokio::select! {
                         biased;
                         changed = url_rx.changed() => {
                             if changed.is_err() || url_rx.borrow().0 != connection_revision {
                                 log::info!("[VCPInfo] Connection intent changed, closing socket.");
-                                retry_immediately = true;
+                                intent_changed = true;
                                 break;
                             }
                         }
                         _ = activity_rx.changed() => {
-                            heartbeat.update(*activity_rx.borrow_and_update());
+                            if heartbeat.update(*activity_rx.borrow_and_update()) {
+                                retry = Retry::default();
+                            }
                         }
-                        action = heartbeat.tick() => {
-                            match action {
-                                HeartbeatAction::Ping(payload) => {
-                                    if let Err(e) = tokio::time::timeout(Duration::from_secs(5), ws_write.send(Message::Ping(payload.into())))
-                                        .await.map_err(|_| "WebSocket ping timed out".to_string())
-                                        .and_then(|result| result.map_err(|error| error.to_string())) {
-                                        log::error!("[VCPInfo] Failed to send Ping: {}", e);
-                                        break;
-                                    }
-                                }
-                                HeartbeatAction::ProbeExpired => {
-                                    log::warn!("[VCPInfo] Resume probe timed out.");
-                                    retry_immediately = true;
+                        event = heartbeat.next(&mut ws_read) => match event {
+                            SocketEvent::Timer(HeartbeatAction::Ping(payload)) => {
+                                if let Err(e) = heartbeat.send_ping(&mut ws_write, payload).await {
+                                    log::error!("[VCPInfo] Failed to send Ping: {}", e);
                                     break;
                                 }
                             }
-                        }
-                        // 处理接收到的消息
-                        msg_result = ws_read.next() => {
-                            match msg_result {
+                            SocketEvent::Timer(HeartbeatAction::ProbeExpired) => {
+                                log::warn!("[VCPInfo] No matching Pong before deadline.");
+                                break;
+                            }
+                            SocketEvent::Message(msg_result) => match msg_result {
                                 Some(Ok(Message::Pong(payload))) => heartbeat.pong(&payload),
                                 Some(Ok(msg)) => {
                                     if msg.is_text() {
@@ -395,7 +393,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                                     break;
                                 }
                             }
-                        }
+                        },
                     }
                 }
 
@@ -415,13 +413,17 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                         "source": "VCPInfo"
                     }),
                 );
-                if retry_immediately || heartbeat.is_probing() {
+                if intent_changed {
+                    retry = Retry::default();
+                    continue;
+                }
+                if retry.disconnected(heartbeat.confirmed()) {
                     continue;
                 }
             }
         }
 
-        wait_retry(&mut url_rx, &mut activity_rx, &mut retry_delay).await;
+        retry.wait(&mut url_rx, &mut activity_rx).await;
     }
 }
 
