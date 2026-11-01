@@ -163,10 +163,23 @@ pub(crate) async fn process_prepared_agent_chat_message(
     // 1. 读取 Agent 配置
     let agent_config =
         read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
+    #[cfg(target_os = "ios")]
+    let mut ios_reply = agent_config.stream_output.then(|| {
+        crate::vcp_modules::chat::ios_reply_task::ReplyTask::begin(
+            &app_handle,
+            &agent_config.name,
+            &agent_config.name,
+            cancellation_token.clone(),
+        )
+    });
 
     // 2. 只有在需要时才将用户消息追加到数据库 (重新生成时设为 false)
     if append_user_msg {
         if cancellation_token.is_cancelled() {
+            #[cfg(target_os = "ios")]
+            if let Some(task) = ios_reply.as_ref() {
+                task.check_expiration()?;
+            }
             return Ok(json!({ "status": "cancelled", "messageId": thinking_id }));
         }
         message_service::append_single_message(
@@ -228,6 +241,10 @@ pub(crate) async fn process_prepared_agent_chat_message(
     }));
 
     if cancellation_token.is_cancelled() {
+        #[cfg(target_os = "ios")]
+        if let Some(task) = ios_reply.as_ref() {
+            task.check_expiration()?;
+        }
         return Ok(json!({ "status": "cancelled", "messageId": thinking_id }));
     }
     message_service::begin_stream_message(
@@ -270,14 +287,21 @@ pub(crate) async fn process_prepared_agent_chat_message(
         request_payload,
         stream_channel.clone(),
         cancellation_token,
+        #[cfg(target_os = "ios")]
+        ios_reply.as_ref(),
     )
     .await;
+    #[cfg(target_os = "ios")]
+    let result = match ios_reply.as_ref() {
+        Some(task) => task.transport_result(result),
+        None => result,
+    };
 
     // Keep the native lease through the durable finalizer (including errors).
     // 8. 流式结束后（含中断），将最终内容委派统一的 Finalizer 进行存盘与事件分发
     match result {
         Ok(response) => {
-            if message_service::finalize_stream_message(
+            let committed = message_service::finalize_stream_message(
                 app_handle.clone(),
                 &db_state.pool,
                 &request_key,
@@ -287,10 +311,21 @@ pub(crate) async fn process_prepared_agent_chat_message(
                 stream_channel,
                 Some(agent_id.clone()),
             )
-            .await
-            .is_err()
-            {
+            .await;
+            if committed.is_err() {
                 return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
+            }
+            #[cfg(target_os = "ios")]
+            if let Some(task) = &mut ios_reply {
+                task.success = committed.is_ok_and(|saved| {
+                    saved.is_some_and(|message| {
+                        message.newly_committed
+                            && !matches!(
+                                message.finish_reason.as_str(),
+                                "error" | "cancelled_by_user"
+                            )
+                    })
+                });
             }
         }
         Err(failure) => {

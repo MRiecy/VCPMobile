@@ -24,6 +24,8 @@ use super::vcp_http_endpoint::{
     resolve_chat_endpoint, resolve_model_discovery_endpoint, ChatRequestPurpose,
 };
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
+#[cfg(target_os = "ios")]
+use crate::vcp_modules::chat::ios_reply_task::{ReceivedCharacters, ReplyTask};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{ChatEndpointMode, Settings};
@@ -255,7 +257,7 @@ pub struct VcpRequestFailure {
 }
 
 impl VcpRequestFailure {
-    fn streaming(message: impl Into<String>, partial_content: String) -> Self {
+    pub(crate) fn streaming(message: impl Into<String>, partial_content: String) -> Self {
         Self {
             message: message.into(),
             partial_content: Some(partial_content),
@@ -1209,6 +1211,11 @@ pub(crate) struct ActiveGroupTurnLease {
 }
 
 impl ActiveGroupTurnLease {
+    #[cfg(target_os = "ios")]
+    pub(crate) fn ios_task_cancellation(&self) -> CancellationToken {
+        self.cancellation_token.clone()
+    }
+
     pub(crate) fn start_session(
         &self,
         trigger: &'static str,
@@ -1517,11 +1524,12 @@ fn get_or_calculate_message_hash(content: &Value) -> String {
 }
 
 /// 执行一个已经注册的请求。调用方持有 lease，决定请求在 finalizer 提交后才退出 live 状态。
-pub async fn perform_vcp_request_registered<R: Runtime>(
+pub(crate) async fn perform_vcp_request_registered<R: Runtime>(
     app: &AppHandle<R>,
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
     cancellation_token: CancellationToken,
+    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask<R>>,
 ) -> Result<VcpResponse, VcpRequestFailure> {
     log::info!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
@@ -1624,6 +1632,8 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
             cancellation_token,
             output,
             false,
+            #[cfg(target_os = "ios")]
+            ios_reply,
         )
         .await
     } else {
@@ -2310,6 +2320,14 @@ fn absorb_sse_data(
             .filter(|reason| !reason.is_empty())
         {
             *last_finish_reason = Some(reason.to_string());
+        } else if choice
+            .get("delta")
+            .and_then(Value::as_object)
+            .is_some_and(|delta| !delta.is_empty())
+        {
+            // VCP can start another model round on the same HTTP response.
+            // A previous round's finish reason cannot complete the new round.
+            *last_finish_reason = None;
         }
         if let Some(content) = choice
             .get("delta")
@@ -2350,6 +2368,7 @@ async fn handle_streaming_request<R: Runtime>(
     cancellation_token: CancellationToken,
     output: Arc<RequestOutput>,
     is_resume: bool,
+    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask<R>>,
 ) -> Result<VcpResponse, VcpRequestFailure> {
     if !is_resume && cancellation_token.is_cancelled() {
         return Ok(VcpResponse::cancelled());
@@ -2360,8 +2379,21 @@ async fn handle_streaming_request<R: Runtime>(
     let mut aurora_buffer = AuroraBuffer::new();
     let mut pending_chunk = String::new();
     let mut last_finish_reason = None;
-    let send_update = |buffer: &mut AuroraBuffer| {
+    #[cfg(target_os = "ios")]
+    let mut received = ReceivedCharacters::default();
+    #[allow(unused_mut)]
+    let mut send_update = |buffer: &mut AuroraBuffer| {
         output.send_aurora(buffer, &message_id, &context, None, false);
+        #[cfg(target_os = "ios")]
+        if let Some(task) = ios_reply.filter(|task| task.is_running()) {
+            if let Some(count) = received.observe(&buffer.full_text, std::time::Instant::now()) {
+                let speaker = context
+                    .as_ref()
+                    .and_then(|value| value["agentName"].as_str())
+                    .unwrap_or_default();
+                task.update(speaker, count);
+            }
+        }
     };
 
     #[cfg(target_os = "android")]
@@ -2521,7 +2553,12 @@ async fn handle_streaming_request<R: Runtime>(
                             }
                         }
                         Some(Err(error)) => return Err(format!("SSE stream read failed: {error}")),
-                        None => return Ok(()),
+                        None => return match last_finish_reason.as_deref() {
+                            None | Some("tool_calls" | "function_call") => {
+                                Err("SSE stream ended before the reply was complete".into())
+                            }
+                            Some(_) => Ok(()),
+                        },
                     }
                     #[cfg(target_os = "android")]
                     match next {
@@ -5271,6 +5308,8 @@ mod active_request_tests {
             CancellationToken::new(),
             output,
             false,
+            #[cfg(target_os = "ios")]
+            None,
         )
         .await
         .unwrap();
@@ -5285,6 +5324,49 @@ mod active_request_tests {
             }
         }
         assert_eq!(delivered, "firsttail");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "android"))]
+    async fn sse_eof_during_a_new_round_is_not_a_completed_reply() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"unfinished\"}}]}\n\n",
+            );
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len(),
+            ).as_bytes()).await.unwrap();
+        });
+        let app = tauri::test::mock_app();
+        let failure = handle_streaming_request(
+            app.handle(),
+            Client::new(),
+            &endpoint,
+            "",
+            empty_request_body().await,
+            "message".into(),
+            "transport".into(),
+            None,
+            CancellationToken::new(),
+            Arc::default(),
+            false,
+            #[cfg(target_os = "ios")]
+            None,
+        )
+        .await
+        .unwrap_err();
+        let (error, partial) = failure.into_parts();
+        assert_eq!(error, "SSE stream ended before the reply was complete");
+        assert_eq!(partial.as_deref(), Some("unfinished"));
         server.await.unwrap();
     }
 
@@ -5324,6 +5406,8 @@ mod active_request_tests {
             CancellationToken::new(),
             Arc::default(),
             false,
+            #[cfg(target_os = "ios")]
+            None,
         )
         .await
         .unwrap_err();
@@ -5377,6 +5461,8 @@ mod active_request_tests {
                 request_cancel,
                 request_output,
                 false,
+                #[cfg(target_os = "ios")]
+                None,
             )
             .await
         });
@@ -5772,6 +5858,8 @@ mod active_request_tests {
             },
             None,
             token,
+            #[cfg(target_os = "ios")]
+            None,
         )
         .await
         .unwrap();

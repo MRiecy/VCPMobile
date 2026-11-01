@@ -27,8 +27,8 @@ private struct NetworkPayload: Encodable {
     let connected: Bool
 }
 
-private struct BackgroundExecutionFailurePayload: Encodable {
-    let reason: String
+private struct ChatBackgroundTaskExpired: Encodable {
+    let tag: String
 }
 
 private struct NativeEvent<Payload: Encodable>: Encodable {
@@ -94,10 +94,17 @@ final class NativeEventSubscription {
         dispatchPrecondition(condition: .onQueue(.main))
         invalidateSubscription()
         channel = newChannel
-        // Native resources outlive a WebView. Replay an undelivered failure via
-        // this same process Channel instead of registering another event bridge.
-        NativeBackgroundExecution.shared.setFailureHandler { [weak self] reason in
-            self?.sendBackgroundExecutionFailure(reason) ?? false
+        // Expiration runs on the task owner's queue. Capture this subscription's
+        // immutable Channel so the synchronous cancellation doesn't wait for UIKit.
+        NativeChatBackgroundTasks.shared.setExpirationHandler { tag in
+            do {
+                try newChannel.send(NativeEvent(
+                    event: "chatBackgroundTaskExpired",
+                    payload: ChatBackgroundTaskExpired(tag: tag)
+                ))
+            } catch {
+                NSLog("[VcpMobilePlugin] Chat task expiration delivery failed: %@", error.localizedDescription)
+            }
         }
         let subscriptionGeneration = generation
         installLifecycleObservers(generation: subscriptionGeneration)
@@ -250,20 +257,6 @@ final class NativeEventSubscription {
         NSLog("[VcpMobilePlugin] Native event source failed: %@", error.localizedDescription)
     }
 
-    private func sendBackgroundExecutionFailure(_ reason: String) -> Bool {
-        guard let channel = channel else { return false }
-        do {
-            try channel.send(NativeEvent(
-                event: "backgroundExecutionFailure",
-                payload: BackgroundExecutionFailurePayload(reason: reason)
-            ))
-            return true
-        } catch {
-            NSLog("[VcpMobilePlugin] Background execution failure delivery failed: %@", error.localizedDescription)
-            return false
-        }
-    }
-
     func sendNotificationClick(_ click: NativeNotificationClick) {
         do {
             try channel?.send(NativeEvent(event: "notificationClick", payload: click))
@@ -316,6 +309,7 @@ final class NativeEventSubscription {
 
     private func invalidateSubscription() {
         dispatchPrecondition(condition: .onQueue(.main))
+        NativeChatBackgroundTasks.shared.setExpirationHandler(nil)
         generation = UUID()
         for token in observers {
             NotificationCenter.default.removeObserver(token)

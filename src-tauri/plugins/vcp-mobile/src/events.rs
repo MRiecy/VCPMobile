@@ -12,9 +12,9 @@ pub enum NativeEvent {
     Network { connected: bool },
     #[serde(rename = "notificationClick")]
     NotificationClick(NativeNotificationClick),
-    /// A native resource failure does not finish or restart a Chat request.
-    #[serde(rename = "backgroundExecutionFailure")]
-    BackgroundExecutionFailure { reason: String },
+    #[cfg(target_os = "ios")]
+    #[serde(rename = "chatBackgroundTaskExpired")]
+    ChatBackgroundTaskExpired { tag: String },
     #[serde(rename = "voiceAudio")]
     VoiceAudio(crate::voice::NativeVoiceAudioEvent),
     #[serde(rename = "voiceDocument")]
@@ -49,13 +49,24 @@ pub enum NativeVoicePlaybackEvent {
 pub struct NativeNotificationClick {
     pub click_id: String,
     pub sequence: u64,
-    pub kind: NotificationClickKind,
+    #[serde(flatten)]
+    pub target: NotificationClickTarget,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NotificationClickKind {
+#[serde(
+    tag = "kind",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
+pub enum NotificationClickTarget {
     App,
+    Chat {
+        owner_type: String,
+        owner_id: String,
+        topic_id: String,
+        message_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -162,6 +173,25 @@ pub fn collect_service_failure_notices<R: Runtime>(app: &AppHandle<R>) -> Vec<Se
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_event_preserves_the_committed_message_target() {
+        let target = serde_json::json!({
+            "clickId": "first", "sequence": 1, "kind": "chat", "ownerType": "group",
+            "ownerId": "g", "topicId": "t", "messageId": "persisted-assistant-message"
+        });
+        let NativeEvent::NotificationClick(click) = serde_json::from_value(serde_json::json!({
+            "event": "notificationClick", "payload": target,
+        }))
+        .unwrap() else {
+            panic!("unexpected event");
+        };
+        assert_eq!(serde_json::to_value(click).unwrap(), target);
+
+        let generic = serde_json::json!({"clickId": "second", "sequence": 2, "kind": "app"});
+        let click: NativeNotificationClick = serde_json::from_value(generic.clone()).unwrap();
+        assert_eq!(serde_json::to_value(click).unwrap(), generic);
+    }
 
     #[test]
     fn native_document_loss_is_delivered_without_an_audio_session() {

@@ -1840,6 +1840,34 @@ pub fn send_notification_native<R: Runtime>(
     Ok(())
 }
 
+/// Called by the successful chat commit owner. UIKit decides whether this app
+/// is in the background before scheduling the local notification.
+#[cfg(target_os = "ios")]
+pub async fn notify_committed_reply<R: Runtime>(
+    app: &AppHandle<R>,
+    owner_type: &str,
+    owner_id: &str,
+    topic_id: &str,
+    message_id: &str,
+    speaker_name: &str,
+) -> Result<(), String> {
+    crate::ios::run_async(
+        app.clone(),
+        "sendLocalNotification",
+        serde_json::json!({
+            "title": format!("{speaker_name} 已回复"),
+            "body": "点击查看这条回复。",
+            "reply": {
+                "ownerType": owner_type,
+                "ownerId": owner_id,
+                "topicId": topic_id,
+                "messageId": message_id,
+            },
+        }),
+    )
+    .await
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LaunchRootManagerResult {

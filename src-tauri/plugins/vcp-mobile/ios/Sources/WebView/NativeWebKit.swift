@@ -67,11 +67,6 @@ final class NativeWebKit {
     private var keyboardScreenFrame: CGRect?
     private var invalidationQueued = false
 
-    var microphoneCaptureState: WKMediaCaptureState {
-        dispatchPrecondition(condition: .onQueue(.main))
-        return webView?.microphoneCaptureState ?? .none
-    }
-
     func attach(_ webView: WKWebView) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard self.webView !== webView else { return }
@@ -79,9 +74,6 @@ final class NativeWebKit {
         Self.nextGeneration += 1
         generation = Self.nextGeneration
         self.webView = webView
-        // The background owner borrows this owner weakly; replacement follows
-        // the existing weak WebView and destruction leaves no capture snapshot.
-        NativeBackgroundExecution.shared.attachWebKit(self)
         resume.attach(webView)
         let currentGeneration = generation
         // Wry owns the view's frame. viewport-fit=cover and no automatic UIKit

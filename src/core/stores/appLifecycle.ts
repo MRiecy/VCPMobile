@@ -10,7 +10,7 @@ import { useChatHistoryStore } from './chatHistoryStore';
 import { useTopicStore } from './topicListManager';
 import { useAvatarStore } from './avatar';
 import { isAndroid, isIOS } from '../utils/platform';
-import { readNotificationPermission } from '../../features/notification/nativeNotifications';
+import { isNotificationAuthorized, readNotificationPermission } from '../../features/notification/nativeNotifications';
 import { selectLatestLifecycleSnapshot, type LifecycleSnapshotDto } from '../types/lifecycle';
 import { hasMissingStartupPermission, type PermissionStatusDto } from '../types/native';
 import { bootMark, reportBootTrace, trackBootStage } from '../utils/bootTrace';
@@ -50,7 +50,6 @@ const LOG_STATUS_MESSAGES: Record<SystemSnapshotDto['log'], string> = {
 
 
 const CONNECT_TIMEOUT_MS = 15000;
-const NOTIFICATION_INTRO_KEY = 'vcp_ios_notification_intro_v1';
 
 export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const state = ref<AppState>('BOOTING');
@@ -77,16 +76,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   let bootstrapPromise: Promise<void> | null = null;
   let coreReadyUnlisten: (() => void) | null = null;
   let connectTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  let optionalNotificationIntroDismissed = false;
-
-  const hasSeenNotificationIntroduction = () => {
-    if (optionalNotificationIntroDismissed) return true;
-    try {
-      return localStorage.getItem(NOTIFICATION_INTRO_KEY) === 'seen';
-    } catch {
-      return false;
-    }
-  };
 
   const statusText = computed(() => {
     switch (state.value) {
@@ -387,8 +376,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
           console.warn('[Lifecycle] Voice document connection failed:', error);
         });
 
-        // Android keeps its existing required keepalive setup. iOS notification
-        // authorization is optional and is requested only by the user's action.
         if (isAndroid) {
           try {
             const pStatus = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
@@ -415,18 +402,18 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
           }
         }
 
-        if (isIOS && !hasSeenNotificationIntroduction()) {
+        if (isIOS) {
+          let notificationsAllowed = false;
           try {
-            const permission = await readNotificationPermission();
-            if (permission.authorization === 'notDetermined') {
-              setState('PERMISSIONS', '介绍可选的系统通知');
-              bootstrapPromise = null;
-              isBootstrapping.value = false;
-              return;
-            }
+            notificationsAllowed = isNotificationAuthorized(await readNotificationPermission());
           } catch (cause) {
-            // An optional permission query must not prevent entering the app.
-            console.warn('[Lifecycle] Optional notification permission unavailable:', cause);
+            console.warn('[Lifecycle] Could not verify notification permission:', cause);
+          }
+          if (!notificationsAllowed) {
+            setState('PERMISSIONS', '需要开启通知才能进入应用');
+            bootstrapPromise = null;
+            isBootstrapping.value = false;
+            return;
           }
         }
 
@@ -455,19 +442,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     return bootstrapPromise;
   };
 
-  const continueFromPermissionGuide = () => {
-    if (isIOS) {
-      optionalNotificationIntroDismissed = true;
-      try {
-        // This records only that the explanation was seen, never OS authorization.
-        localStorage.setItem(NOTIFICATION_INTRO_KEY, 'seen');
-      } catch (cause) {
-        console.warn('[Lifecycle] Could not remember notification introduction:', cause);
-      }
-    }
-    return bootstrap(true);
-  };
-
   return {
     state,
     errorMsg,
@@ -481,7 +455,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     applyLifecycleSnapshot,
     coreStatus: computed(() => notificationStore.vcpCoreStatus),
     bootstrap,
-    continueFromPermissionGuide,
+    continueFromPermissionGuide: () => bootstrap(true),
     hydrateSystemStatus
   };
 });

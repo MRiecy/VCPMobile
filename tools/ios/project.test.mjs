@@ -10,6 +10,17 @@ const tauri = fileURLToPath(new URL('../../src-tauri/', import.meta.url));
 const apple = join(tauri, 'gen/apple');
 const extension = join(apple, 'VCPShare');
 
+async function readPlist(path, window) {
+  const xml = new window.DOMParser().parseFromString(await readFile(path, 'utf8'), 'application/xml');
+  assert.equal(xml.documentElement.localName, 'plist');
+  return function value(key) {
+    const entry = [...xml.documentElement.firstElementChild.children].find(item =>
+      item.localName === 'key' && item.textContent === key);
+    assert(entry, `${path}: ${key}`);
+    return entry.nextElementSibling;
+  };
+}
+
 test('every iPhone, iPad and marketing icon slot references a PNG of the declared pixel size', async () => {
   const icons = join(apple, 'Assets.xcassets/AppIcon.appiconset');
   const { images } = JSON.parse(await readFile(join(icons, 'Contents.json'), 'utf8'));
@@ -31,23 +42,35 @@ test('every iPhone, iPad and marketing icon slot references a PNG of the declare
 test('the app and the extension open the group granted by their shared entitlement', async () => {
   const window = new Window();
   try {
-    const parser = new window.DOMParser();
-    async function plistValue(path, key) {
-      const xml = parser.parseFromString(await readFile(path, 'utf8'), 'application/xml');
-      assert.equal(xml.documentElement.localName, 'plist');
-      const entry = [...xml.documentElement.firstElementChild.children].find(item =>
-        item.localName === 'key' && item.textContent === key);
-      assert(entry, `${path}: ${key}`);
-      return entry.nextElementSibling;
-    }
-    const group = await plistValue(join(tauri, 'Info.ios.plist'), 'VCPShareAppGroup');
-    const shareGroup = await plistValue(join(extension, 'Info.plist'), 'VCPShareAppGroup');
-    const granted = await plistValue(join(extension, 'AppGroups.entitlements'), 'com.apple.security.application-groups');
+    const appInfo = await readPlist(join(tauri, 'Info.ios.plist'), window);
+    const shareInfo = await readPlist(join(extension, 'Info.plist'), window);
+    const entitlements = await readPlist(join(extension, 'AppGroups.entitlements'), window);
+    const group = appInfo('VCPShareAppGroup');
+    const shareGroup = shareInfo('VCPShareAppGroup');
+    const granted = entitlements('com.apple.security.application-groups');
     assert.equal(group.localName, 'string');
     assert.equal(shareGroup.localName, 'string');
     assert.equal(shareGroup.textContent, group.textContent);
     assert.equal(granted.localName, 'array');
     assert.deepEqual([...granted.children].map(value => value.textContent), [group.textContent]);
+  } finally {
+    await window.happyDOM.close();
+  }
+});
+
+test('chat background processing is configured for the main app bundle identifier', async () => {
+  const window = new Window();
+  try {
+    const appInfo = await readPlist(join(tauri, 'Info.ios.plist'), window);
+    const values = key => {
+      const array = appInfo(key);
+      assert.equal(array.localName, 'array', key);
+      return [...array.children].map(value => value.textContent);
+    };
+    assert(values('UIBackgroundModes').includes('processing'));
+    assert(values('BGTaskSchedulerPermittedIdentifiers').includes('$(PRODUCT_BUNDLE_IDENTIFIER).chat.*'));
+    const config = JSON.parse(await readFile(join(tauri, 'tauri.ios.conf.json'), 'utf8'));
+    assert(config.bundle.iOS.frameworks.includes('BackgroundTasks'));
   } finally {
     await window.happyDOM.close();
   }

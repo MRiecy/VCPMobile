@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { reactive } from 'vue';
+import { createPinia, disposePinia } from 'pinia';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import App from '../../../App.vue';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
+import * as messageScroll from '../../../core/utils/scrollToMessage';
+import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
 
 vi.mock('/vcpmobile.svg', () => ({ default: '/vcpmobile.svg' }));
 const context = vi.hoisted(() => ({
   lifecycle: {} as { state: string; lifecycleSnapshot: { phase: string } | null; bootstrap: () => Promise<void> },
-  selectTopic: vi.fn(async () => {}),
+  conversation: null as { ownerId: string; ownerType: string; topicId: string; epoch: number } | null,
+  selectTopic: vi.fn(async (_ownerId: string, _ownerType: string, _topicId: string) => {}),
   notice: vi.fn(),
   voice: {} as { active: boolean },
   selectedItem: null as { id: string } | null,
@@ -36,6 +40,8 @@ vi.mock('../../../core/stores/overlay', () => ({ useOverlayStore: () => ({}) }))
 vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: context.notice }) }));
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => ({
   get currentSelectedItem() { return context.selectedItem; },
+  get currentConversationKey() { return context.conversation; },
+  get sessionEpoch() { return context.conversation?.epoch ?? 0; },
   selectTopicById: context.selectTopic,
   clearConversation: context.clearConversation,
 }) }));
@@ -57,10 +63,14 @@ const chatClick = (topicId: string) => ({
   kind: 'chat', ownerId: 'agent', ownerType: 'agent', topicId,
 });
 const appClick = (sequence: number) => ({ clickId: `click-${sequence}`, sequence, kind: 'app' });
+const replyClick = (sequence: number, messageId: string) => ({
+  ...appClick(sequence), kind: 'chat', ownerType: 'group', ownerId: 'group', topicId: 'topic', messageId,
+});
 const androidClick = (topicId: string) => window.dispatchEvent(new CustomEvent('vcp-notification-click', { detail: chatClick(topicId) }));
 let wrapper: VueWrapper | undefined;
+let pinia: ReturnType<typeof createPinia>;
 const mountApp = () => {
-  wrapper = mount(App, { global: { stubs: {
+  wrapper = mount(App, { global: { plugins: [pinia], stubs: {
     PermissionGate: true, BootScreen: true, AgentSidebar: true, RightSidebar: true,
     GlobalOverlayManager: true, FeatureOverlays: true, GuideOverlay: true,
     UpdatePrompt: true, ShareAgentSelector: true, RouterView: true,
@@ -68,9 +78,13 @@ const mountApp = () => {
 };
 
 beforeEach(() => {
+  pinia = createPinia();
   native.ios = true;
   context.lifecycle = reactive({ state: 'BOOTING', lifecycleSnapshot: null, bootstrap: vi.fn(async () => {}) });
-  context.selectTopic.mockClear();
+  context.conversation = null;
+  context.selectTopic.mockReset().mockImplementation(async (ownerId, ownerType, topicId) => {
+    context.conversation = { ownerId, ownerType, topicId, epoch: (context.conversation?.epoch ?? 0) + 1 };
+  });
   context.notice.mockClear();
   context.voice = reactive({ active: false });
   context.selectedItem = null;
@@ -84,6 +98,8 @@ beforeEach(() => {
 afterEach(() => {
   wrapper?.unmount();
   wrapper = undefined;
+  disposePinia(pinia);
+  vi.restoreAllMocks();
 });
 
 describe('root share recovery', () => {
@@ -149,6 +165,72 @@ describe('root voice call navigation', () => {
 });
 
 describe('root notification navigation', () => {
+  it('opens a cold iOS notification at its committed message rather than the newest group reply', async () => {
+    const clicked = replyClick(1, 'db-reply-a');
+    context.conversation = { ownerType: 'agent', ownerId: 'other', topicId: 'other', epoch: 1 };
+    mockInvoke('plugin:vcp-mobile|get_pending_notification', () => clicked);
+    mockInvoke('load_chat_history_around', () => [
+      { id: 'db-reply-a', timestamp: 1 }, { id: 'db-reply-b', timestamp: 2 },
+    ]);
+    const scroll = vi.spyOn(messageScroll, 'scrollToMessageById').mockReturnValue(true);
+    mountApp();
+    await flushPromises();
+    expect(scroll).not.toHaveBeenCalled();
+    context.lifecycle.state = 'READY';
+    await flushPromises();
+    emitTauriEvent('vcp-notification-click', clicked);
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith('load_chat_history_around', expect.objectContaining({
+      ownerId: 'group', ownerType: 'group', topicId: 'topic', anchorMsgId: 'db-reply-a',
+    }));
+    expect(context.selectTopic).toHaveBeenCalledExactlyOnceWith('group', 'group', 'topic');
+    expect(useChatHistoryStore(pinia).currentChatHistory.map(message => message.id)).toEqual(['db-reply-a', 'db-reply-b']);
+    expect(scroll).toHaveBeenCalledExactlyOnceWith('db-reply-a', { behavior: 'instant' });
+  });
+
+  it('keeps the current screen when a newer iOS app-only click supersedes a pending message read', async () => {
+    const pending = deferred<{ id: string }[]>();
+    mockInvoke('load_chat_history_around', () => pending.promise);
+    mountApp();
+    context.lifecycle.state = 'READY';
+    await flushPromises();
+    emitTauriEvent('vcp-notification-click', replyClick(1, 'old'));
+    await flushPromises();
+    emitTauriEvent('vcp-notification-click', appClick(2));
+    pending.resolve([{ id: 'old' }]);
+    await flushPromises();
+    expect(context.selectTopic).not.toHaveBeenCalled();
+    expect(context.notice).not.toHaveBeenCalled();
+  });
+
+  it('anchors only the newer iOS reply when message reads finish out of order', async () => {
+    const oldRead = deferred<{ id: string }[]>();
+    mockInvoke('load_chat_history_around', args => args?.anchorMsgId === 'old' ? oldRead.promise : [{ id: 'new' }]);
+    const scroll = vi.spyOn(messageScroll, 'scrollToMessageById').mockReturnValue(true);
+    context.lifecycle.state = 'READY';
+    mountApp();
+    await flushPromises();
+    emitTauriEvent('vcp-notification-click', { ...replyClick(1, 'old'), topicId: 'older-topic' });
+    await flushPromises();
+    emitTauriEvent('vcp-notification-click', replyClick(2, 'new'));
+    await flushPromises();
+    oldRead.resolve([{ id: 'old' }]);
+    await flushPromises();
+    expect(context.selectTopic).toHaveBeenCalledExactlyOnceWith('group', 'group', 'topic');
+    expect(scroll).toHaveBeenCalledExactlyOnceWith('new', { behavior: 'instant' });
+  });
+
+  it('reports a deleted iOS message without switching the current conversation', async () => {
+    mockInvoke('load_chat_history_around', () => []);
+    context.lifecycle.state = 'READY';
+    mountApp();
+    await flushPromises();
+    emitTauriEvent('vcp-notification-click', replyClick(1, 'deleted'));
+    await flushPromises();
+    expect(context.selectTopic).not.toHaveBeenCalled();
+    expect(context.notice).toHaveBeenCalledWith(expect.objectContaining({ title: '通知已过期' }));
+  });
+
   it('keeps the existing Android latest-click intent while waiting for READY', async () => {
     native.ios = false;
     mountApp();

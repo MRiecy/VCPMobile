@@ -19,6 +19,9 @@ vi.mock('../../../core/stores/appLifecycle', () => ({
 
 describe('shared permission guide', () => {
   let wrapper: VueWrapper | undefined;
+  const currentButtons = () => wrapper!.findAll('button').filter(button => !button.element.closest('[inert]'));
+  const settingButtons = () => currentButtons().filter(button => /^去(授权|设置)$/.test(button.text()));
+  const next = () => currentButtons().find(button => button.text() === '下一步' && !button.element.disabled);
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -37,17 +40,28 @@ describe('shared permission guide', () => {
 
   it('opens each Android setting but keeps denied permissions blocking when the user returns without changes', async () => {
     native.android = true;
+    let basicGranted = false;
     mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({
-      notification: false, battery: false, backgroundAllowed: false, notificationListener: false,
+      notification: basicGranted, battery: false, backgroundAllowed: basicGranted, notificationListener: false,
     }));
     mockInvoke('plugin:vcp-mobile|request_power_management_permission', () => true);
     mockInvoke('plugin:vcp-mobile|get_free_disk_space', () => ({ freeGb: 2, totalGb: 64 }));
     wrapper = mount(PermissionGate);
     await flushPromises();
 
-    const requests = wrapper.findAll('button').filter(button => /^去(授权|设置)$/.test(button.text()));
-    expect(requests).toHaveLength(4);
-    for (const button of requests) {
+    expect(settingButtons()).toHaveLength(2);
+    for (const button of settingButtons()) {
+      await button.trigger('click');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flushPromises();
+    }
+    expect(next()).toBeUndefined();
+    basicGranted = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+    await next()!.trigger('click');
+    expect(settingButtons()).toHaveLength(2);
+    for (const button of settingButtons()) {
       await button.trigger('click');
       document.dispatchEvent(new Event('visibilitychange'));
       await flushPromises();
@@ -57,8 +71,8 @@ describe('shared permission guide', () => {
     expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_power_management_permission');
     expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_notification_listener_permission');
     expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
-    expect(wrapper.findAll('button').filter(button => /^去(授权|设置)$/.test(button.text()))).toHaveLength(4);
-    expect(wrapper.findAll('button').some(button => button.text() === '下一步' && !button.element.disabled)).toBe(false);
+    expect(settingButtons()).toHaveLength(2);
+    expect(next()).toBeUndefined();
     expect(bootstrap).not.toHaveBeenCalled();
   });
 
@@ -73,11 +87,10 @@ describe('shared permission guide', () => {
     mockInvoke('plugin:vcp-mobile|get_free_disk_space', () => ({ freeGb, totalGb: 64 }));
     wrapper = mount(PermissionGate);
     await flushPromises();
-    const requestButtons = () => wrapper!.findAll('button').filter(button => /^去(授权|设置)$/.test(button.text()));
-    const next = () => wrapper!.findAll('button').find(button => button.text() === '下一步' && !button.element.disabled);
-    expect(requestButtons()).toHaveLength(1);
-    expect(wrapper.text()).not.toContain('电池优化豁免');
-    await requestButtons()[0].trigger('click');
+    expect(wrapper.text()).not.toContain('忽略电池优化');
+    await next()!.trigger('click');
+    expect(settingButtons()).toHaveLength(1);
+    await settingButtons()[0].trigger('click');
     expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_notification_listener_permission');
     expect(next()).toBeUndefined();
 
@@ -85,12 +98,12 @@ describe('shared permission guide', () => {
     document.dispatchEvent(new Event('visibilitychange'));
     await flushPromises();
     await next()!.trigger('click');
-    expect(wrapper.findAll('button').some(button => button.text().includes('存储空间不足') && button.element.disabled)).toBe(true);
+    expect(currentButtons().some(button => button.text().includes('存储空间不足') && button.element.disabled)).toBe(true);
 
     notificationListener = false;
     window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: snapshot() }));
     await flushPromises();
-    expect(requestButtons()).toHaveLength(1);
+    expect(settingButtons()).toHaveLength(1);
     expect(next()).toBeUndefined();
     notificationListener = true;
     freeGb = 12;
@@ -125,7 +138,7 @@ describe('shared permission guide', () => {
     expect(continueFromPermissionGuide).toHaveBeenCalledOnce();
   });
 
-  it('offers one optional iOS notification item, reports refusal and still lets the user continue', async () => {
+  it('requires iOS notifications, reports refusal and only offers continuation after authorization', async () => {
     native.ios = true;
     mockInvoke('plugin:vcp-mobile|get_notification_permission', () => ({ authorization: 'notDetermined' }));
     mockInvoke('plugin:vcp-mobile|request_notification_permission', () => ({ authorization: 'denied' }));
@@ -138,7 +151,12 @@ describe('shared permission guide', () => {
     await flushPromises();
     expect(wrapper.text()).toContain('系统通知已关闭');
     expect(wrapper.findAll('button').some(button => button.text() === '系统设置')).toBe(true);
-    await wrapper.findAll('button').find(button => button.text().includes('继续进入应用'))!.trigger('click');
+    expect(currentButtons().some(button => button.text().includes('继续进入应用'))).toBe(false);
+    expect(continueFromPermissionGuide).not.toHaveBeenCalled();
+    mockInvoke('plugin:vcp-mobile|get_notification_permission', () => ({ authorization: 'authorized' }));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+    await currentButtons().find(button => button.text() === '继续进入应用')!.trigger('click');
     expect(continueFromPermissionGuide).toHaveBeenCalledOnce();
     expect(invokeMock.mock.calls.some(([command]) => command.includes('android_permission') || command.includes('disk_space'))).toBe(false);
   });

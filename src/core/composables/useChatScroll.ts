@@ -1,4 +1,5 @@
 import { ref, watch, nextTick, type Ref, type ComputedRef } from "vue";
+import { MESSAGE_ANCHOR_EVENT } from "../utils/scrollToMessage";
 
 interface UseChatScrollOptions {
   /** 消息列表容器的 ref */
@@ -433,6 +434,14 @@ export function useChatScroll(options: UseChatScrollOptions) {
     showScrollToBottom.value = true;
   };
 
+  // Explicit message navigation takes ownership of the viewport, even on
+  // first paint or while an older top-pagination request is settling.
+  const onMessageAnchor = () => {
+    reset();
+    isInitialRendering.value = false;
+    scrollScene.value = "free";
+  };
+
   const onTouchStart = (e: TouchEvent) => {
     isUserDetaching = false;
     if (e.touches.length > 0) {
@@ -497,6 +506,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
   // --- 监听 messageListRef 变化，自动设置/清理事件与 Observer ---
   const stopWatchListRef = watch(messageListRef, (el, oldEl) => {
     if (oldEl) {
+      oldEl.removeEventListener(MESSAGE_ANCHOR_EVENT, onMessageAnchor);
       oldEl.removeEventListener("scroll", onScroll);
       oldEl.removeEventListener("touchstart", onTouchStart);
       oldEl.removeEventListener("touchmove", onTouchMove);
@@ -506,6 +516,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     }
     if (el) {
       startContentObserver();
+      el.addEventListener(MESSAGE_ANCHOR_EVENT, onMessageAnchor);
       el.addEventListener("scroll", onScroll, { passive: true });
       el.addEventListener("touchstart", onTouchStart, { passive: true });
       el.addEventListener("touchmove", onTouchMove, { passive: true });
@@ -601,6 +612,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     }
     if (messageListRef.value) {
       const list = messageListRef.value;
+      list.removeEventListener(MESSAGE_ANCHOR_EVENT, onMessageAnchor);
       list.removeEventListener("scroll", onScroll);
       list.removeEventListener("touchstart", onTouchStart);
       list.removeEventListener("touchmove", onTouchMove);

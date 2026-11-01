@@ -197,7 +197,6 @@ final class NativeMedia {
         owned.append(output)
 
         // File processing neither plays/records audio nor changes AVAudioSession.
-        // SSE's NativeBackgroundExecution remains the sole audio-session owner.
         let input = try AVAudioFile(forReading: source, commonFormat: .pcmFormatFloat32, interleaved: false)
         defer { input.close() }
         let writer = try AVAudioFile(forWriting: output, settings: [

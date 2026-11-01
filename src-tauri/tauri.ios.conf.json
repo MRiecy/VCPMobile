@@ -5,7 +5,7 @@
       "template": "src-tauri/gen/apple/project.yml.hbs",
       "minimumSystemVersion": "26.0",
       "frameworks": [
-        "Network", "UserNotifications", "CoreMotion", "CoreLocation",
+        "Network", "UserNotifications", "BackgroundTasks", "CoreMotion", "CoreLocation",
         "PhotosUI", "Photos", "ImageIO", "CoreGraphics", "AVFoundation",
         "QuickLook", "UniformTypeIdentifiers", "CryptoKit"
       ]

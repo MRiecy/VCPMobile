@@ -335,10 +335,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                         NativeEvent::NotificationClick(payload) => {
                             let _ = event_handle.emit("vcp-notification-click", payload);
                         }
-                        NativeEvent::BackgroundExecutionFailure { reason } => {
-                            tauri_plugin_vcp_mobile::events::report_service_failure(
-                                &event_handle, "guardian", &reason,
-                            );
+                        #[cfg(target_os = "ios")]
+                        NativeEvent::ChatBackgroundTaskExpired { tag } => {
+                            crate::vcp_modules::chat::ios_reply_task::expire(&tag);
                         }
                         NativeEvent::VoiceAudio(event) => {
                             if let Some(event) = tauri_plugin_vcp_mobile::voice::handle_native_event(&event_handle, event) {

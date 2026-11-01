@@ -16,6 +16,8 @@ import { useNotificationProcessor } from "./core/composables/useNotificationProc
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore, type ConversationKey } from "./core/stores/chatSessionStore";
+import { useChatHistoryStore } from "./core/stores/chatHistoryStore";
+import { scrollToMessageById } from "./core/utils/scrollToMessage";
 import { useVoiceCallStore } from "./features/chat/voice/voiceCallStore";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
 import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
@@ -102,7 +104,7 @@ type NotificationClickTarget =
       ownerId: string;
       ownerType: "agent" | "group";
       topicId: string;
-      requestId: string;
+      messageId?: string;
     };
 
 const parseNotificationClickTarget = (value: unknown): NotificationClickTarget | null => {
@@ -137,7 +139,8 @@ const parseNotificationClickTarget = (value: unknown): NotificationClickTarget |
     source.ownerId.length === 0 ||
     (source.ownerType !== "agent" && source.ownerType !== "group") ||
     typeof source.topicId !== "string" ||
-    source.topicId.length === 0
+    source.topicId.length === 0 ||
+    (isIOS && (source.kind !== "chat" || typeof source.messageId !== "string" || !source.messageId))
   ) {
     return null;
   }
@@ -146,7 +149,7 @@ const parseNotificationClickTarget = (value: unknown): NotificationClickTarget |
     ownerId: source.ownerId,
     ownerType: source.ownerType,
     topicId: source.topicId,
-    requestId: typeof source.requestId === "string" ? source.requestId : "",
+    messageId: typeof source.messageId === "string" ? source.messageId : undefined,
   };
 };
 
@@ -284,6 +287,27 @@ const processNotificationClick = async (
 
   // 聊天通知先只读验证目标；过期通知不得关闭当前界面或清空当前 Topic。
   try {
+    if (detail.messageId) {
+      await router.isReady();
+      await nextTick();
+      if (!isCurrentNotificationNavigation(generation)) return;
+      const result = await useChatHistoryStore().loadHistoryAround(
+        detail.ownerId, detail.ownerType, detail.topicId, detail.messageId,
+        { beforeNavigate: () => isCurrentNotificationNavigation(generation) && closeNavigationSurfaces() },
+      );
+      await nextTick();
+      if (!isCurrentNotificationNavigation(generation) || result === "aborted") return;
+      if (result === "missing") {
+        notificationStore.addNotification({
+          type: "warning", title: "通知已过期", message: "目标消息已不存在。", toastOnly: true,
+        });
+        return;
+      }
+      const current = sessionStore.currentConversationKey;
+      if (current?.ownerId !== detail.ownerId || current.ownerType !== detail.ownerType || current.topicId !== detail.topicId) return;
+      if (!scrollToMessageById(detail.messageId, { behavior: "instant" })) throw new Error("未能显示这条回复。");
+      return;
+    }
     const topics = await invoke<TopicDto[]>("get_topics", {
       ownerId: detail.ownerId,
       ownerType: detail.ownerType,

@@ -6,6 +6,8 @@ pub mod context_assembler;
 pub mod context_injection;
 pub mod context_sanitizer;
 pub mod emoticon_manager;
+#[cfg(any(target_os = "ios", test))]
+pub(crate) mod ios_reply_task;
 pub mod message_service;
 pub mod pre_renderer;
 pub mod stream_block_parser;

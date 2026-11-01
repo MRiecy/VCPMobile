@@ -2,6 +2,8 @@
 // 职责: 1. 读取配置 2. 保存消息 3. 决策发言者 4. 组装上下文 5. 执行 AI 调用 6. 发射事件
 
 use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigState};
+#[cfg(target_os = "ios")]
+use crate::vcp_modules::chat::ios_reply_task::ReplyTask;
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
@@ -98,12 +100,25 @@ async fn run_group_speakers<R: Runtime>(
     params: &GroupSpeakerTurnParams<'_, R>,
     speakers: &[crate::vcp_modules::agent_types::AgentConfig],
     history: &mut Vec<ChatMessage>,
+    #[cfg(target_os = "ios")] mut ios_reply: Option<ReplyTask<R>>,
 ) -> Result<GroupSpeakerOutcome, String> {
     for speaker in speakers {
-        let outcome = run_group_speaker_turn(params, speaker, history).await?;
+        let outcome = run_group_speaker_turn(
+            params,
+            speaker,
+            history,
+            #[cfg(target_os = "ios")]
+            &mut ios_reply,
+        )
+        .await?;
         if outcome != GroupSpeakerOutcome::Settled {
             return Ok(outcome);
         }
+    }
+    #[cfg(target_os = "ios")]
+    if let Some(task) = &mut ios_reply {
+        task.check_expiration()?;
+        task.success = true;
     }
     Ok(GroupSpeakerOutcome::Settled)
 }
@@ -118,7 +133,12 @@ async fn run_group_speaker_turn<R: Runtime>(
     params: &GroupSpeakerTurnParams<'_, R>,
     speaker: &crate::vcp_modules::agent_types::AgentConfig,
     full_history_for_context: &mut Vec<ChatMessage>,
+    #[cfg(target_os = "ios")] ios_reply: &mut Option<ReplyTask<R>>,
 ) -> Result<GroupSpeakerOutcome, String> {
+    #[cfg(target_os = "ios")]
+    if let Some(task) = ios_reply.as_ref() {
+        task.check_expiration()?;
+    }
     if params.group_turn.is_cancelled() {
         return Ok(GroupSpeakerOutcome::Cancelled);
     }
@@ -134,6 +154,10 @@ async fn run_group_speaker_turn<R: Runtime>(
 
     let agent_id = speaker.id.clone();
     let agent_name = speaker.name.clone();
+    #[cfg(target_os = "ios")]
+    if let Some(task) = ios_reply.as_ref() {
+        task.update(&agent_name, 0);
+    }
     let message_id = format!("msg_group_{}", uuid::Uuid::new_v4());
 
     // 组装上下文
@@ -264,8 +288,15 @@ async fn run_group_speaker_turn<R: Runtime>(
             request_payload,
             stream_channel.clone(),
             cancellation_token,
+            #[cfg(target_os = "ios")]
+            ios_reply.as_ref(),
         )
         .await
+    };
+    #[cfg(target_os = "ios")]
+    let res_result = match ios_reply.as_ref() {
+        Some(task) => task.transport_result(res_result),
+        None => res_result,
     };
 
     match res_result {
@@ -324,6 +355,9 @@ async fn run_group_speaker_turn<R: Runtime>(
             let recovery_pending = failure.is_recovery_pending();
             let preparation_failure = failure.is_preparation_failure();
             let (error, partial_content) = failure.into_parts();
+            #[cfg(target_os = "ios")]
+            let stream_failure =
+                (speaker.stream_output && !preparation_failure).then(|| error.clone());
             if stop_pending {
                 // A separately stopped speaker may still own an unconfirmed helper
                 // request. Do not start another speaker until that request settles.
@@ -364,6 +398,11 @@ async fn run_group_speaker_turn<R: Runtime>(
                 Some(agent_id.clone()),
             )
             .await;
+            #[cfg(target_os = "ios")]
+            if let (Ok(Some(_)), Some(reason)) = (&finalized, stream_failure) {
+                // Once this SSE failed, the group must not start another speaker.
+                return Err(reason);
+            }
             Ok(match finalized {
                 Ok(Some(_)) if preparation_failure => GroupSpeakerOutcome::PreparationFailed,
                 Ok(Some(_)) => GroupSpeakerOutcome::Settled,
@@ -469,9 +508,27 @@ pub(crate) async fn process_prepared_group_chat_message(
         }
     }
 
+    #[cfg(target_os = "ios")]
+    let jev_task = (group_config.effective_mode() == GroupChatMode::Jev
+        && active_member_configs
+            .iter()
+            .any(|agent| agent.stream_output))
+    .then(|| {
+        ReplyTask::begin(
+            &app_handle,
+            &group_config.name,
+            "",
+            group_turn.ios_task_cancellation(),
+        )
+    });
+
     // 3. 异步追加用户消息 (重新生成时设为 false)
     if append_user_msg {
         if group_turn.is_cancelled() {
+            #[cfg(target_os = "ios")]
+            if let Some(task) = jev_task.as_ref() {
+                task.check_expiration()?;
+            }
             return Ok(json!({ "status": "cancelled" }));
         }
         message_service::append_single_message(
@@ -486,6 +543,10 @@ pub(crate) async fn process_prepared_group_chat_message(
     }
 
     if group_turn.is_cancelled() {
+        #[cfg(target_os = "ios")]
+        if let Some(task) = jev_task.as_ref() {
+            task.check_expiration()?;
+        }
         return Ok(json!({ "status": "cancelled" }));
     }
 
@@ -509,6 +570,8 @@ pub(crate) async fn process_prepared_group_chat_message(
                 group_id,
                 topic_id,
                 connection,
+                #[cfg(target_os = "ios")]
+                jev_task,
             );
             if reply_policy.is_some() {
                 return scope.wait().await;
@@ -547,6 +610,16 @@ pub(crate) async fn process_prepared_group_chat_message(
         }));
     }
 
+    #[cfg(target_os = "ios")]
+    let ios_reply = speakers.iter().any(|agent| agent.stream_output).then(|| {
+        ReplyTask::begin(
+            &app_handle,
+            &group_config.name,
+            &speakers[0].name,
+            group_turn.ios_task_cancellation(),
+        )
+    });
+
     // 提前加载轻量级全量纯文本和附件历史记录作为接力上下文的基础 (从底层隔离 UI 渲染反序列化和 Shell 计算)
     let mut full_history_for_context = message_service::load_chat_text_history_for_context(
         &app_handle,
@@ -581,8 +654,14 @@ pub(crate) async fn process_prepared_group_chat_message(
         reply_policy: reply_policy.as_deref(),
         reply_scope: static_scope.as_ref(),
     };
-    let outcome =
-        run_group_speakers(&turn_params, &speakers, &mut full_history_for_context).await?;
+    let outcome = run_group_speakers(
+        &turn_params,
+        &speakers,
+        &mut full_history_for_context,
+        #[cfg(target_os = "ios")]
+        ios_reply,
+    )
+    .await?;
 
     // The turn lease publishes completion through its current output consumer,
     // including early returns and failures.
@@ -782,10 +861,20 @@ fn spawn_jev_session(
     group_id: String,
     topic_id: String,
     connection: ChatConnectionSnapshot,
+    #[cfg(target_os = "ios")] mut ios_reply: Option<ReplyTask<tauri::Wry>>,
 ) {
     tauri::async_runtime::spawn(async move {
-        let result =
-            run_jev_session(&app, &turn, &session, &group_id, &topic_id, &connection).await;
+        let result = run_jev_session(
+            &app,
+            &turn,
+            &session,
+            &group_id,
+            &topic_id,
+            &connection,
+            #[cfg(target_os = "ios")]
+            &mut ios_reply,
+        )
+        .await;
         if let Err(error) = result {
             session.fail(error);
         }
@@ -802,11 +891,16 @@ async fn run_jev_session(
     group_id: &str,
     topic_id: &str,
     connection: &ChatConnectionSnapshot,
+    #[cfg(target_os = "ios")] ios_reply: &mut Option<ReplyTask<tauri::Wry>>,
 ) -> Result<(), String> {
     let key = TopicKey::new("group", group_id, topic_id);
     let _foreground = ForegroundLease::acquire(app, ForegroundTask::Stream, "群聊裁决与回复").ok();
     loop {
         session.await_inputs().await?;
+        #[cfg(target_os = "ios")]
+        if let Some(task) = ios_reply.as_ref() {
+            task.check_expiration()?;
+        }
         if turn.is_cancelled() || session.latest_scope_cancelled() {
             session.close(Some("cancelled_by_user".into()));
             return Ok(());
@@ -842,6 +936,16 @@ async fn run_jev_session(
         if members.len() > 254 {
             return Err("JEV 群聊最多支持 254 位可用成员。".into());
         }
+        #[cfg(target_os = "ios")]
+        if ios_reply.is_none() && members.iter().any(|agent| agent.stream_output) {
+            // Manual invitation/continue enters here before the first network arbitration.
+            *ios_reply = Some(ReplyTask::begin(
+                app,
+                &config.name,
+                "",
+                turn.ios_task_cancellation(),
+            ));
+        }
         if let Some((id, scope)) = session.next_speaker(input_revision)? {
             app.state::<ActiveGroupTurns>().publish(&key);
             let Some(speaker) = members.iter().find(|member| member.id == id) else {
@@ -872,7 +976,14 @@ async fn run_jev_session(
                 reply_policy: scope.as_ref().and_then(|scope| scope.policy.as_deref()),
                 reply_scope: scope.as_ref(),
             };
-            let outcome = run_group_speaker_turn(&params, speaker, &mut history).await?;
+            let outcome = run_group_speaker_turn(
+                &params,
+                speaker,
+                &mut history,
+                #[cfg(target_os = "ios")]
+                ios_reply,
+            )
+            .await?;
             session.speaker_finished(
                 outcome == GroupSpeakerOutcome::Settled,
                 Ok(json!({"status":outcome.status()})),
@@ -904,11 +1015,19 @@ async fn run_jev_session(
         {
             session.decision_finished();
             if session.close_if_current(runtime.revision, "safety_limit")? {
+                #[cfg(target_os = "ios")]
+                if let Some(task) = ios_reply.as_mut() {
+                    task.success = true;
+                }
                 return Ok(());
             }
             continue;
         }
         let db = app.state::<DbState>();
+        #[cfg(target_os = "ios")]
+        if let Some(task) = ios_reply.as_ref() {
+            task.update("", 0);
+        }
         let history_stats = load_group_member_history_stats(&db.pool, &key).await?;
         let settings = read_config(app.clone(), app.state::<SettingsState>()).await?;
         let mut request = build_jev_request(&members, &config, &runtime, &history_stats)?;
@@ -956,6 +1075,10 @@ async fn run_jev_session(
         )
         .await;
         session.decision_finished();
+        #[cfg(target_os = "ios")]
+        if let Some(task) = ios_reply.as_ref() {
+            task.check_expiration()?;
+        }
         if turn.is_cancelled() {
             session.close(Some("cancelled_by_user".into()));
             return Ok(());
@@ -998,6 +1121,10 @@ async fn run_jev_session(
         };
         let stop = reason.is_some();
         if session.accept_decision(runtime.revision, &ids, reason)? && stop {
+            #[cfg(target_os = "ios")]
+            if let Some(task) = ios_reply.as_mut() {
+                task.success = true;
+            }
             return Ok(());
         }
     }
@@ -1083,6 +1210,8 @@ pub async fn control_group_session(
         payload.group_id,
         payload.topic_id,
         connection,
+        #[cfg(target_os = "ios")]
+        None,
     );
     Ok(json!({"status":"accepted"}))
 }
@@ -1361,9 +1490,15 @@ mod group_turn_tests {
         let mut history = Vec::new();
         let speaker = members.iter().find(|member| member.id == ids[0]).unwrap();
         assert_eq!(
-            run_group_speaker_turn(&params, speaker, &mut history)
-                .await
-                .unwrap(),
+            run_group_speaker_turn(
+                &params,
+                speaker,
+                &mut history,
+                #[cfg(target_os = "ios")]
+                &mut None,
+            )
+            .await
+            .unwrap(),
             GroupSpeakerOutcome::Settled
         );
         let saved: (String, String) =
@@ -1479,7 +1614,13 @@ mod group_turn_tests {
         let mut history = Vec::new();
         let outcome =
             {
-                let request = run_group_speakers(&params, &speakers, &mut history);
+                let request = run_group_speakers(
+                    &params,
+                    &speakers,
+                    &mut history,
+                    #[cfg(target_os = "ios")]
+                    None,
+                );
                 tokio::pin!(request);
                 tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
@@ -1639,6 +1780,8 @@ pub async fn invite_group_member_to_speak(
             payload.group_id,
             payload.topic_id,
             connection,
+            #[cfg(target_os = "ios")]
+            None,
         );
         return Ok(json!({"status":"accepted"}));
     }
@@ -1683,6 +1826,16 @@ pub async fn invite_group_member_to_speak(
         speakers.push(speaker);
     }
 
+    #[cfg(target_os = "ios")]
+    let ios_reply = speakers.iter().any(|agent| agent.stream_output).then(|| {
+        ReplyTask::begin(
+            &app_handle,
+            &group_config.name,
+            &speakers[0].name,
+            group_turn.ios_task_cancellation(),
+        )
+    });
+
     // 全部成员配置供群上下文组装使用
     let mut active_member_configs = Vec::new();
     for member_id in &group_config.members {
@@ -1719,8 +1872,14 @@ pub async fn invite_group_member_to_speak(
         reply_scope: None,
     };
 
-    let outcome =
-        run_group_speakers(&turn_params, &speakers, &mut full_history_for_context).await?;
+    let outcome = run_group_speakers(
+        &turn_params,
+        &speakers,
+        &mut full_history_for_context,
+        #[cfg(target_os = "ios")]
+        ios_reply,
+    )
+    .await?;
 
     Ok(json!({"status": outcome.status()}))
 }

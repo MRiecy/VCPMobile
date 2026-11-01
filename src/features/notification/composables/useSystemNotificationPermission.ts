@@ -27,7 +27,7 @@ export function useSystemNotificationPermission() {
   const description = computed(() => {
     if (error.value) return error.value;
     switch (permission.value?.authorization) {
-      case 'notDetermined': return '可选择开启系统通知；不启用也能正常聊天。';
+      case 'notDetermined': return '请允许通知，以便接收后台回复完成提醒。';
       case 'denied': return '系统通知已关闭，可前往系统设置开启。';
       case 'authorized': return '已允许通知，显示方式由系统设置决定。';
       case 'provisional': return '已允许安静通知，提醒方式可在系统设置调整。';
@@ -52,9 +52,10 @@ export function useSystemNotificationPermission() {
       if (!disposed) permission.value = result;
     }).catch(cause => {
       console.warn('[NotificationPermission] Native observation failed:', cause);
-      if (!disposed) error.value = isRequest
-        ? '通知授权未完成，可重试或稍后在系统设置调整。聊天不受影响。'
-        : '暂时无法读取系统通知设置，请重试。聊天不受影响。';
+      if (!disposed) {
+        permission.value = null;
+        error.value = isRequest ? '通知授权未完成，请重新读取。' : '暂时无法读取系统通知设置，请重试。';
+      }
     }).finally(() => {
       pending = null;
       if (!disposed) busy.value = false;

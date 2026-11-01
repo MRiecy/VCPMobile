@@ -6,7 +6,6 @@ import { isAndroid, isIOS } from '../../core/utils/platform';
 import { useSystemNotificationPermission } from '../../features/notification/composables/useSystemNotificationPermission';
 import {
   androidStartupPermissionIds,
-  hasMissingStartupPermission,
   type AndroidStartupPermission,
   type DiskSpaceDto,
   type PermissionStatusDto,
@@ -15,20 +14,28 @@ import {
 const lifecycleStore = useAppLifecycleStore();
 const notificationPermission = useSystemNotificationPermission();
 
-const androidLabels = {
-  notification: { name: '系统通知', desc: '允许 VCP Mobile 显示运行状态和任务提醒。', icon: 'i-heroicons-bell' },
-  battery: { name: '电池优化豁免', desc: '允许 VCP Mobile 忽略系统电池优化，减少待机对连接的影响。', icon: 'i-heroicons-bolt' },
-  backgroundAllowed: { name: '允许后台运行', desc: '在应用详情的电池设置中解除后台运行限制。', icon: 'i-heroicons-arrow-path' },
-  notificationListener: { name: '通知使用权', desc: '在通知使用权列表中为「VCP 连接守护助手」开启访问权限。', icon: 'i-heroicons-shield-check' },
-} satisfies Record<AndroidStartupPermission, { name: string; desc: string; icon: string }>;
+const permissionLabels = {
+  notification: { step: 1, name: '允许通知', desc: '允许 VCP Mobile 显示运行状态和任务提醒。', icon: 'i-heroicons-bell' },
+  backgroundAllowed: { step: 1, name: '允许后台运行', desc: '在应用详情的电池设置中解除后台运行限制。', icon: 'i-heroicons-arrow-path' },
+  battery: { step: 2, name: '忽略电池优化', desc: '允许 VCP Mobile 忽略系统电池优化，减少待机对连接的影响。', icon: 'i-heroicons-bolt' },
+  notificationListener: { step: 2, name: '通知使用权', desc: '在通知使用权列表中为「VCP 连接守护助手」开启访问权限。', icon: 'i-heroicons-shield-check' },
+} satisfies Record<AndroidStartupPermission, { step: number; name: string; desc: string; icon: string }>;
 
 const status = ref<PermissionStatusDto | null>(null);
-const permissionItems = computed(() => {
-  if (isIOS) return [{ id: 'notification' as const, ...androidLabels.notification, name: '系统通知（可选）' }];
-  return androidStartupPermissionIds
+const permissionPages = computed(() => {
+  if (isIOS) return [[{ id: 'notification' as const, ...permissionLabels.notification }]];
+  const items = androidStartupPermissionIds
     .filter(id => status.value?.[id] != null)
-    .map(id => ({ id, ...androidLabels[id] }));
+    .map(id => ({ id, ...permissionLabels[id] }));
+  return [1, 2].map(step => items.filter(item => item.step === step));
 });
+
+// On Android the storage check is always the third page, even if this device
+// cannot evaluate any of the permissions on an earlier page.
+function nextVisibleStep(from: number): number {
+  const index = permissionPages.value.findIndex((items, i) => i + 1 >= from && items.length > 0);
+  return index < 0 ? 3 : index + 1;
+}
 
 const currentStep = ref(1);
 const permissionReadFailed = ref(false);
@@ -38,7 +45,6 @@ const freeDiskSpaceGB = ref<number | null>(null);
 const totalDiskSpaceGB = ref(0);
 const isDiskCheckError = ref(false);
 
-const allGranted = computed(() => status.value !== null && !hasMissingStartupPermission(status.value));
 const isGranted = (id: AndroidStartupPermission) =>
   isIOS ? notificationPermission.allowed.value : status.value?.[id] === true;
 const continuing = ref(false);
@@ -48,9 +54,9 @@ const continueToApp = async () => {
   try {
     await lifecycleStore.continueFromPermissionGuide();
     // A permission may have been revoked between displaying the button and startup's final read.
-    if (isAndroid && lifecycleStore.state === 'PERMISSIONS') {
-      currentStep.value = 1;
-      await checkPermissions();
+    if (lifecycleStore.state === 'PERMISSIONS') {
+      if (isIOS) await notificationPermission.refresh();
+      else await checkPermissions();
     }
   } catch (cause) {
     // The startup owner records ERROR and displays the existing retry screen.
@@ -70,8 +76,10 @@ const checkPermissions = async () => {
     if (read !== latestRead) return;
     status.value = snapshot;
     permissionReadFailed.value = false;
-    if (!allGranted.value) currentStep.value = 1;
-    else if (permissionItems.value.length === 0) currentStep.value = 2;
+    const missingPage = permissionPages.value.findIndex(items => items.some(item => !isGranted(item.id)));
+    currentStep.value = missingPage >= 0 && missingPage + 1 < currentStep.value
+      ? missingPage + 1
+      : nextVisibleStep(currentStep.value);
   } catch (e) {
     if (read !== latestRead) return;
     permissionReadFailed.value = true;
@@ -110,7 +118,7 @@ const request = async (type: AndroidStartupPermission) => {
       await invoke('plugin:vcp-mobile|request_android_permission', { pType: type === 'notification' ? 'notificationSettings' : type });
     }
   } catch (e) {
-    settingsError.value = `未能打开「${androidLabels[type].name}」设置，请在系统设置中调整后返回。`;
+    settingsError.value = `未能打开「${permissionLabels[type].name}」设置，请在系统设置中调整后返回。`;
     console.error(`[PermissionGate] Failed to open ${type} settings:`, e);
   } finally {
     openingAndroidSettings.value = false;
@@ -130,10 +138,10 @@ let checkTimer: ReturnType<typeof setInterval> | null = null;
 const refreshWhenVisible = () => {
   if (document.hidden) return;
   void checkPermissions();
-  if (currentStep.value === 2) void checkDiskSpace();
+  if (currentStep.value === 3) void checkDiskSpace();
 };
 
-watch(currentStep, step => { if (step === 2) void checkDiskSpace(); });
+watch(currentStep, step => { if (step === 3) void checkDiskSpace(); });
 watch(() => lifecycleStore.lifecycleSnapshot?.phase, phase => {
   if (isAndroid && phase === 'active') refreshWhenVisible();
 });
@@ -184,20 +192,15 @@ onUnmounted(() => {
     <div class="w-full flex-1 flex flex-col min-h-0">
       <!-- Progress Indicator -->
       <div v-if="isAndroid" class="flex items-center w-full px-5 pt-4 mb-2 shrink-0">
-        <!-- Step 1 -->
-        <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors duration-300"
-          :class="currentStep === 1 ? 'border-gray-900' : (currentStep > 1 ? 'border-gray-900 bg-gray-900' : 'border-gray-100')">
-          <div v-if="currentStep === 1" class="w-2 h-2 bg-gray-900 rounded-full"></div>
-          <span v-else-if="currentStep > 1" class="text-[10px] font-bold text-white">1</span>
-        </div>
-        <!-- Line 1→2 -->
-        <div class="h-[1px] flex-1 mx-4 transition-colors duration-300"
-          :class="currentStep > 1 ? 'bg-gray-900' : 'bg-gray-100'"></div>
-        <!-- Step 2 -->
-        <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors duration-300"
-          :class="currentStep === 2 ? 'border-gray-900 text-gray-900' : 'border-gray-100 text-gray-300'">
-          2
-        </div>
+        <template v-for="step in 3" :key="step">
+          <div v-if="step > 1" class="h-[1px] flex-1 mx-4 transition-colors duration-300"
+            :class="currentStep >= step ? 'bg-gray-900' : 'bg-gray-100'"></div>
+          <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors duration-300"
+            :aria-current="currentStep === step ? 'step' : undefined"
+            :class="currentStep > step ? 'border-gray-900 bg-gray-900 text-white' : currentStep === step ? 'border-gray-900 text-gray-900' : 'border-gray-100 text-gray-300'">
+            {{ step }}
+          </div>
+        </template>
       </div>
 
       <!-- Slide Container -->
@@ -205,18 +208,18 @@ onUnmounted(() => {
         <div class="flex h-full transition-transform duration-500 ease-in-out"
              :style="{ transform: `translateX(-${(currentStep - 1) * 100}%)` }">
 
-          <!-- ========== Step 1: Permissions ========== -->
-          <div :inert="currentStep !== 1" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
-            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">授予权限</h3>
+          <div v-for="(items, index) in permissionPages" :key="index" :inert="currentStep !== index + 1"
+            class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
+            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">{{ index === 0 ? '基础权限' : '特殊应用权限' }}</h3>
             <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
-              <template v-if="isIOS">选择是否接收系统通知。此设置可稍后在通知中心修改。</template>
+              <template v-if="isIOS">开启通知后即可进入应用。</template>
               <template v-else-if="permissionReadFailed">暂时无法读取权限。<button class="underline" @click="checkPermissions">重新检测</button></template>
               <template v-else-if="!status">正在读取系统权限…</template>
               <template v-else>开启以下权限后返回，应用会自动检查授权结果。</template>
             </p>
             <div class="w-full space-y-3 mb-4">
               <!-- Permission Cards -->
-              <div v-for="item in permissionItems" :key="item.id"
+              <div v-for="item in items" :key="item.id"
                 class="group flex items-center gap-4 px-4 py-3 rounded-2xl bg-gray-100/50 active:bg-gray-200/60 transition-all"
               >
                 <div class="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
@@ -231,7 +234,7 @@ onUnmounted(() => {
                   </div>
                   <p class="text-xs text-gray-500 opacity-70 leading-relaxed">{{ isIOS ? notificationPermission.description.value : item.desc }}</p>
                 </div>
-                <button v-if="isIOS || !isGranted(item.id)"
+                <button v-if="!isGranted(item.id)"
                   @click="request(item.id)"
                   :disabled="isIOS ? (notificationPermission.busy.value || notificationPermission.openingSettings.value) : openingAndroidSettings"
                   class="px-3 py-1.5 bg-gray-900 text-white text-[13px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
@@ -244,25 +247,25 @@ onUnmounted(() => {
             <!-- Bottom Action -->
             <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
               <p v-if="settingsError" role="alert" class="text-xs text-red-600">{{ settingsError }}</p>
-              <button v-if="isIOS" @click="continueToApp" :disabled="continuing"
+              <button v-if="isIOS && notificationPermission.allowed.value" @click="continueToApp" :disabled="continuing || notificationPermission.busy.value"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl disabled:opacity-50">
-                {{ continuing ? '正在进入…' : notificationPermission.allowed.value ? '继续进入应用' : '暂不启用，继续进入应用' }}
+                {{ continuing ? '正在进入…' : '继续进入应用' }}
               </button>
-              <button v-else-if="allGranted && !permissionReadFailed && currentStep === 1"
-                @click="currentStep = 2"
+              <button v-else-if="isAndroid && status && !permissionReadFailed && currentStep === index + 1 && items.every(item => isGranted(item.id))"
+                @click="currentStep = nextVisibleStep(currentStep + 1)"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >
                 <span>下一步</span>
                 <div class="i-heroicons-arrow-right text-lg"></div>
               </button>
-              <button v-else-if="status && !allGranted" @click="exitApp" class="text-xs font-bold text-gray-400 active:text-gray-900 transition-colors py-2 px-4">
+              <button v-else-if="isAndroid && status && items.some(item => !isGranted(item.id))" @click="exitApp" class="text-xs font-bold text-gray-400 active:text-gray-900 transition-colors py-2 px-4">
                 暂不授权，退出应用
               </button>
             </div>
           </div>
 
-          <!-- Step 2: Storage -->
-          <div v-if="isAndroid" :inert="currentStep !== 2" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
+          <!-- Step 3: Storage -->
+          <div v-if="isAndroid" :inert="currentStep !== 3" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
             <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">系统运行环境与存储空间检测</h3>
             <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
               完成应用锁定配置并确保充足的系统存储空间，以保障后台服务的高可用性。
@@ -317,7 +320,7 @@ onUnmounted(() => {
 
             <!-- Bottom Action -->
             <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
-              <button v-if="currentStep === 2 && isStorageSpaceOk" :disabled="continuing"
+              <button v-if="currentStep === 3 && isStorageSpaceOk" :disabled="continuing"
                 @click="continueToApp"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >

@@ -47,12 +47,18 @@ impl<R: Runtime> ForegroundLease<R> {
         let (_, _priority, screen_keep_on) = task.policy();
         #[cfg(target_os = "ios")]
         {
+            // Chat and SQLite finalization own their distinct iOS execution tasks.
+            if !screen_keep_on {
+                return Ok(Self {
+                    app: app.clone(),
+                    tag: None,
+                });
+            }
             crate::ios::run::<R, ()>(
                 app.clone(),
                 "acquireBackgroundExecution",
                 serde_json::json!({
                     "tag": tag,
-                    "audioRequired": matches!(task, ForegroundTask::Stream),
                     "screenKeepOn": screen_keep_on,
                 }),
             )
@@ -74,6 +80,60 @@ impl<R: Runtime> ForegroundLease<R> {
             release_foreground_inner(&self.app, &tag)?;
         }
         Ok(())
+    }
+}
+
+/// Small, ordered UIKit lifecycle transitions, issued from the Rust chat worker.
+#[cfg(target_os = "ios")]
+pub mod ios_chat {
+    use super::*;
+    use serde_json::json;
+
+    fn call<R: Runtime>(app: &AppHandle<R>, command: &str, args: serde_json::Value) -> bool {
+        crate::ios::run::<R, ()>(app.clone(), command, args)
+            .inspect_err(|error| log::warn!("[iOS Chat] {command}: {error}"))
+            .is_ok()
+    }
+
+    pub fn begin<R: Runtime>(app: &AppHandle<R>, tag: &str, title: &str, speaker: &str) -> bool {
+        call(
+            app,
+            "beginChatBackgroundTask",
+            json!({ "tag": tag, "title": title, "speaker": speaker }),
+        )
+    }
+
+    pub async fn update<R: Runtime>(
+        app: &AppHandle<R>,
+        tag: &str,
+        speaker: &str,
+        received_characters: u64,
+    ) {
+        if let Err(error) = crate::ios::run_async::<R, ()>(
+            app.clone(),
+            "updateChatBackgroundTask",
+            json!({ "tag": tag, "speaker": speaker, "receivedCharacters": received_characters }),
+        )
+        .await
+        {
+            log::warn!("[iOS Chat] updateChatBackgroundTask: {error}");
+        }
+    }
+
+    pub fn finish<R: Runtime>(app: &AppHandle<R>, tag: &str, success: bool) {
+        call(
+            app,
+            "finishChatBackgroundTask",
+            json!({ "tag": tag, "success": success }),
+        );
+    }
+
+    pub fn begin_finalization<R: Runtime>(app: &AppHandle<R>, tag: &str) -> bool {
+        call(app, "beginChatFinalization", json!({ "tag": tag }))
+    }
+
+    pub fn end_finalization<R: Runtime>(app: &AppHandle<R>, tag: &str) {
+        call(app, "endChatFinalization", json!({ "tag": tag }));
     }
 }
 

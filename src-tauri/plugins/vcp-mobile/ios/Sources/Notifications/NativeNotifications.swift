@@ -21,12 +21,17 @@ struct NativeNotificationPermission: Encodable {
 struct NativeNotificationClick: Encodable {
     let clickId: String
     let sequence: UInt64
-    let kind = "app"
+    let kind: String
+    let ownerType: String?
+    let ownerId: String?
+    let topicId: String?
+    let messageId: String?
 }
 
 private struct LocalNotificationArgs: Decodable {
     let title: String
     let body: String
+    let reply: [String: String]?
 }
 
 /// Owns notification callbacks and the latest user intent snapshot for this
@@ -121,6 +126,10 @@ final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
             return
         }
         DispatchQueue.main.async { [self] in
+            if args.reply != nil && UIApplication.shared.applicationState != .background {
+                invoke.resolve()
+                return
+            }
             if let error = installationError {
                 invoke.reject(error)
                 return
@@ -143,6 +152,9 @@ final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
                 content.title = args.title
                 content.body = args.body
                 content.sound = .default
+                if let reply = args.reply {
+                    content.userInfo = ["reply": reply]
+                }
                 let request = UNNotificationRequest(
                     identifier: Self.requestPrefix + UUID().uuidString,
                     content: content,
@@ -198,7 +210,13 @@ final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
         recentResponses.append(identity)
         if recentResponses.count > 64 { recentResponses.removeFirst() }
         sequence += 1
-        let click = NativeNotificationClick(clickId: UUID().uuidString, sequence: sequence)
+        let reply = notification.request.content.userInfo["reply"] as? [String: String]
+        let click = NativeNotificationClick(
+            clickId: UUID().uuidString, sequence: sequence,
+            kind: reply == nil ? "app" : "chat",
+            ownerType: reply?["ownerType"], ownerId: reply?["ownerId"],
+            topicId: reply?["topicId"], messageId: reply?["messageId"]
+        )
         pendingClick = click
         onClick?(click)
     }
@@ -209,7 +227,9 @@ final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let ours = notification.request.identifier.hasPrefix(Self.requestPrefix)
-        completionHandler(ours ? [.banner, .list, .sound] : [])
+        // A reply queued in the background can arrive just as the chat becomes visible.
+        let isReply = notification.request.content.userInfo["reply"] != nil
+        completionHandler(ours && !isReply ? [.banner, .list, .sound] : [])
     }
 
     func userNotificationCenter(

@@ -2,6 +2,7 @@ import process from "node:process";
 import { computed, nextTick, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { useChatScroll } from "@/core/composables/useChatScroll";
+import { scrollToMessageById } from "@/core/utils/scrollToMessage";
 
 const flushFrames = async () => {
   await new Promise((resolve) => setTimeout(resolve, 5));
@@ -177,6 +178,36 @@ function createLayoutScroll(list: HTMLElement) {
 }
 
 describe("useChatScroll streaming follow intent", () => {
+  it("keeps an explicitly opened reply in view as the first history layout settles", async () => {
+    const resizeObserver = installControllableResizeObserver();
+    const list = document.createElement("div");
+    const message = document.createElement("div");
+    message.dataset.messageId = "old-reply";
+    list.appendChild(message);
+    document.body.appendChild(list);
+    list.scrollTo = vi.fn();
+    message.scrollIntoView = vi.fn(() => { list.scrollTop = 300; });
+    Object.defineProperties(list, {
+      scrollHeight: { configurable: true, value: 1200 },
+      clientHeight: { configurable: true, value: 400 },
+    });
+    const scroll = createLayoutScroll(list);
+    try {
+      await nextTick();
+      expect(scrollToMessageById("old-reply", { flash: false, behavior: "instant" })).toBe(true);
+      list.dispatchEvent(new Event("scroll"));
+      await flushFrames();
+      resizeObserver.trigger();
+      expect(list.scrollTop).toBe(300);
+      expect(list.scrollTo).not.toHaveBeenCalled();
+      expect(scroll.showScrollToBottom.value).toBe(true);
+    } finally {
+      scroll.dispose();
+      resizeObserver.restore();
+      list.remove();
+    }
+  });
+
   it("keeps following when a delayed programmatic scroll event sees another large content batch", async () => {
     const resizeObserver = installControllableResizeObserver();
     const list = document.createElement("div");

@@ -405,8 +405,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     ownerType: ConversationOwnerType,
     topicId: string,
     anchorMessageId: string,
-    beforeN = 12,
-    afterN = 8,
+    { beforeN = 12, afterN = 8, beforeNavigate }: {
+      beforeN?: number; afterN?: number; beforeNavigate?: () => boolean;
+    } = {},
   ): Promise<AnchorLoadResult> => {
     const sourceEpoch = sessionStore.sessionEpoch;
     const anchorLoadId = ++currentAnchorLoadId;
@@ -443,6 +444,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     const anchorIndex = messages.findIndex((message) => message.id === anchorMessageId);
     if (anchorIndex === -1) return "missing";
+    if (beforeNavigate && !beforeNavigate()) return "aborted";
 
     const hydrated = messages.map(
       message => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, message.id) || message,
