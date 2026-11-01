@@ -308,7 +308,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun stopVoicePlayback(invoke: Invoke) = voiceOutput.stopVoicePlayback(invoke)
 
     @ActivityCallback
-    fun onBatteryOptimizationResult(invoke: Invoke, result: ActivityResult) = permissions.onBatteryOptimizationResult(invoke, result)
+    fun onPermissionSettingsResult(invoke: Invoke, result: ActivityResult) = permissions.onPermissionSettingsResult(invoke, result)
 
     // ==================================================================
     // Screen

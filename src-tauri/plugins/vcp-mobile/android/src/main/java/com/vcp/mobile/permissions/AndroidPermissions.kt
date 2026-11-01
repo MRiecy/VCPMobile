@@ -1,6 +1,8 @@
 package com.vcp.mobile.permissions
 
 import android.app.Activity
+import android.app.ActivityManager
+import android.app.NotificationManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -8,15 +10,18 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.os.UserManager
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.result.ActivityResult
 import androidx.core.content.ContextCompat
 import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSObject
 import com.vcp.mobile.runtime.deliverError
 import com.vcp.mobile.runtime.deliverResult
-import app.tauri.plugin.JSObject
+import com.vcp.mobile.service.VcpNotificationListenerService
+import org.json.JSONObject
 import java.util.Locale
 
 /** Shared permission snapshot and Android/OEM settings navigation. Operation waits stay with their owners. */
@@ -30,15 +35,17 @@ internal class AndroidPermissions(
 
     fun checkAllPermissions(invoke: Invoke) { invoke.deliverResult(permissionSnapshot()) }
 
-    private fun permissionSnapshot(): JSObject {
-        val pm = activity.getSystemService(Context.POWER_SERVICE) as PowerManager
-
-        val notificationGranted = if (Build.VERSION.SDK_INT >= 33) {
-            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-        } else {
-            true
+    private fun JSObject.putPermission(name: String, query: () -> Boolean?) {
+        val granted = try {
+            query()
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Could not read $name on this device", e)
+            null
         }
+        put(name, granted ?: JSONObject.NULL)
+    }
 
+    private fun permissionSnapshot(): JSObject {
         val storageGranted = if (Build.VERSION.SDK_INT >= 34) {
             val hasAll = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
             val hasVisualSelected = ContextCompat.checkSelfPermission(activity, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED") == PackageManager.PERMISSION_GRANTED
@@ -57,20 +64,23 @@ internal class AndroidPermissions(
         val locationGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
             ContextCompat.checkSelfPermission(activity, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-        val am = activity.getSystemService(Context.ACTIVITY_SERVICE) as? android.app.ActivityManager
-        val isRestricted = if (Build.VERSION.SDK_INT >= 28) {
-            am?.isBackgroundRestricted ?: false
-        } else {
-            false
-        }
-        val batteryOptimizationIgnored = pm.isIgnoringBatteryOptimizations(activity.packageName) && !isRestricted
         val result = JSObject()
-        result.put("notification", notificationGranted)
+        result.putPermission("notification") {
+            activity.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled()
+        }
+        result.putPermission("battery") {
+            activity.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(activity.packageName)
+        }
+        result.putPermission("backgroundAllowed") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                activity.getSystemService(ActivityManager::class.java)?.isBackgroundRestricted?.not()
+            } else null
+        }
+        result.putPermission("notificationListener", ::notificationListenerGranted)
         result.put("storage", storageGranted)
         result.put("microphone", microphoneGranted)
         result.put("camera", cameraGranted)
         result.put("location", locationGranted)
-        result.put("battery", batteryOptimizationIgnored)
 
         return result
     }
@@ -82,10 +92,16 @@ internal class AndroidPermissions(
                 if (Build.VERSION.SDK_INT >= 33) {
                     requestPermission("notification", invoke, "onPermissionResult")
                 } else {
-                    emitPermissionsToWebView()
-                    invoke.deliverResult()
+                    val snapshot = permissionSnapshot()
+                    if (snapshot.optBoolean("notification")) {
+                        emitEvent("vcp-permission-change", snapshot)
+                        invoke.deliverResult()
+                    } else {
+                        openNotificationSettings(invoke)
+                    }
                 }
             }
+            "notificationSettings" -> openNotificationSettings(invoke)
             "storage" -> {
                 if (Build.VERSION.SDK_INT >= 33) {
                     requestPermission("storage", invoke, "onPermissionResult")
@@ -104,45 +120,52 @@ internal class AndroidPermissions(
                     val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
                         data = Uri.parse("package:${activity.packageName}")
                     }
-                    launchActivity(invoke, intent, "onBatteryOptimizationResult")
+                    launchActivity(invoke, intent, "onPermissionSettingsResult")
                 } catch (e: Exception) {
                     val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                    launchActivity(invoke, intent, "onBatteryOptimizationResult")
+                    openPermissionSettings(invoke, intent)
                 }
             }
         }
+    }
+
+    private fun openNotificationSettings(invoke: Invoke) {
+        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
+        }
+        openPermissionSettings(invoke, intent)
+    }
+
+    private fun openPermissionSettings(invoke: Invoke, intent: Intent) {
+        try {
+            launchActivity(invoke, intent, "onPermissionSettingsResult")
+        } catch (e: RuntimeException) {
+            invoke.deliverError("Could not open ${intent.action}: ${e.message}")
+        }
+    }
+
+    private fun notificationListenerGranted(): Boolean? {
+        val userManager = activity.getSystemService(UserManager::class.java) ?: return null
+        if (userManager.isManagedProfile) return null
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+            val activityManager = activity.getSystemService(ActivityManager::class.java) ?: return null
+            if (activityManager.isLowRamDevice) return null
+        }
+        val listener = ComponentName(activity, VcpNotificationListenerService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            return activity.getSystemService(NotificationManager::class.java)?.isNotificationListenerAccessGranted(listener)
+        }
+        // API 26 stores the list of granted components in Secure settings. An empty list is a denial.
+        val granted = Settings.Secure.getString(activity.contentResolver, "enabled_notification_listeners")
+        return granted.orEmpty().split(':').any { ComponentName.unflattenFromString(it) == listener }
     }
 
     fun check_notification_listener_permission(invoke: Invoke) {
-        val context = activity.applicationContext
-        val pkgName = context.packageName
-        val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
-        var isEnabled = false
-        if (!flat.isNullOrEmpty()) {
-            val names = flat.split(":")
-            for (name in names) {
-                val cn = ComponentName.unflattenFromString(name)
-                if (cn != null && cn.packageName == pkgName) {
-                    isEnabled = true
-                    break
-                }
-            }
-        }
-        val ret = JSObject()
-        ret.put("enabled", isEnabled)
-        invoke.deliverResult(ret)
+        invoke.deliverResult(JSObject().apply { putPermission("enabled", ::notificationListenerGranted) })
     }
 
     fun request_notification_listener_permission(invoke: Invoke) {
-        try {
-            val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            activity.startActivity(intent)
-            invoke.deliverResult()
-        } catch (e: Exception) {
-            invoke.deliverError("Failed to open notification listener settings: ${e.message}")
-        }
+        openPermissionSettings(invoke, Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
     }
 
     private fun checkAutoStartStatus(): String {
@@ -246,75 +269,13 @@ internal class AndroidPermissions(
     }
 
     fun requestPowerManagementPermission(invoke: Invoke) {
-        val manufacturer = Build.MANUFACTURER.lowercase(Locale.ROOT)
-        var success = false
-        val intents = mutableListOf<Intent>()
-
-        if (manufacturer.contains("xiaomi") || manufacturer.contains("redmi")) {
-            // 小米省电策略
-            try {
-                val miuiIntent = Intent("miui.intent.action.OP_POWER_PRIORITY_SETTINGS").apply {
-                    putExtra("package_name", activity.packageName)
-                    putExtra("package_label", activity.applicationInfo.loadLabel(activity.packageManager).toString())
-                }
-                intents.add(miuiIntent)
-            } catch (e: Exception) {}
-            intents.add(Intent().setComponent(ComponentName("com.miui.powerkeeper", "com.miui.powerkeeper.ui.HiddenAppsConfigActivity")).apply {
-                putExtra("package_name", activity.packageName)
-                putExtra("package_label", activity.applicationInfo.loadLabel(activity.packageManager).toString())
-            })
-            intents.add(Intent().setComponent(ComponentName("com.miui.securitycenter", "com.miui.powercenter.PowerSettings")))
-        } else if (manufacturer.contains("oppo") || manufacturer.contains("oneplus") || manufacturer.contains("realme")) {
-            // OPPO 省电与后台完全行为
-            intents.add(Intent().setComponent(ComponentName("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaurd.PowerUsageModelActivity")))
-            intents.add(Intent().setComponent(ComponentName("com.coloros.oppoguardelf", "com.coloros.powermanager.fuelgaurd.PowerSavedModeActivity")))
-            try {
-                intents.add(Intent(Intent.ACTION_POWER_USAGE_SUMMARY))
-            } catch (e: Exception) {}
-        } else if (manufacturer.contains("huawei") || manufacturer.contains("honor")) {
-            // 华为
-            intents.add(Intent().setComponent(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.power.ui.PowerConsumptionActivity")))
-            intents.add(Intent().setComponent(ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.optimize.process.ProtectActivity")))
-        } else if (manufacturer.contains("vivo")) {
-            // VIVO
-            intents.add(Intent().setComponent(ComponentName("com.iqoo.secure", "com.iqoo.secure.ui.poweroptimize.PowerOptimizeActivity")))
+        try {
+            val packageUri = Uri.fromParts("package", activity.packageName, null)
+            launchActivity(invoke, Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri), "onPermissionSettingsResult")
+        } catch (e: RuntimeException) {
+            Log.w(TAG, "Could not open app settings for background restrictions", e)
+            invoke.deliverResult(JSObject().apply { put("success", false) })
         }
-
-        // 尝试打开特定的电池设置页面
-        for (intent in intents) {
-            try {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                activity.startActivity(intent)
-                success = true
-                break
-            } catch (e: Exception) {
-                // Try next
-            }
-        }
-
-        // 兜底退避
-        if (!success) {
-            try {
-                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                activity.startActivity(intent)
-                success = true
-            } catch (e: Exception) {
-                try {
-                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                        data = Uri.parse("package:${activity.packageName}")
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    activity.startActivity(intent)
-                    success = true
-                } catch (e2: Exception) {}
-            }
-        }
-
-        val result = JSObject()
-        result.put("success", success)
-        invoke.deliverResult(result)
     }
 
     fun onPermissionResult(invoke: Invoke) {
@@ -322,9 +283,10 @@ internal class AndroidPermissions(
         invoke.deliverResult()
     }
 
-    fun onBatteryOptimizationResult(invoke: Invoke, @Suppress("UNUSED_PARAMETER") result: ActivityResult) {
+    fun onPermissionSettingsResult(invoke: Invoke, @Suppress("UNUSED_PARAMETER") result: ActivityResult) {
         emitPermissionsToWebView()
-        invoke.deliverResult()
+        // Success means the settings page opened. Only the permission snapshot records a grant.
+        invoke.deliverResult(JSObject().apply { put("success", true) })
     }
 
     private fun emitPermissionsToWebView() {

@@ -35,27 +35,94 @@ describe('shared permission guide', () => {
     vi.useRealTimers();
   });
 
-  it('keeps Android permission requests and its existing storage check in the shared guide', async () => {
+  it('opens each Android setting but keeps denied permissions blocking when the user returns without changes', async () => {
     native.android = true;
     mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({
-      notification: false, storage: false, battery: false,
-      microphone: false, camera: false, location: false,
+      notification: false, battery: false, backgroundAllowed: false, notificationListener: false,
     }));
-    mockInvoke('plugin:vcp-mobile|check_notification_listener_permission', () => ({ enabled: false }));
+    mockInvoke('plugin:vcp-mobile|request_power_management_permission', () => true);
     mockInvoke('plugin:vcp-mobile|get_free_disk_space', () => ({ freeGb: 2, totalGb: 64 }));
-    mockInvoke('plugin:vcp-mobile|request_android_permission', () => undefined);
     wrapper = mount(PermissionGate);
     await flushPromises();
 
-    const requests = wrapper.findAll('button').filter(button => button.text() === '去授权');
-    expect(requests).toHaveLength(2);
-    await requests[0].trigger('click');
-    await requests[1].trigger('click');
-    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_android_permission', { pType: 'notification' });
+    const requests = wrapper.findAll('button').filter(button => /^去(授权|设置)$/.test(button.text()));
+    expect(requests).toHaveLength(4);
+    for (const button of requests) {
+      await button.trigger('click');
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flushPromises();
+    }
+    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_android_permission', { pType: 'notificationSettings' });
     expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_android_permission', { pType: 'battery' });
-    expect(wrapper.find('.vcp-permission-gate').exists()).toBe(true);
-    expect(wrapper.findAll('button').some(button => button.text().includes('存储空间不足') && button.attributes('disabled') !== undefined)).toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_power_management_permission');
+    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_notification_listener_permission');
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
+    expect(wrapper.findAll('button').filter(button => /^去(授权|设置)$/.test(button.text()))).toHaveLength(4);
+    expect(wrapper.findAll('button').some(button => button.text() === '下一步' && !button.element.disabled)).toBe(false);
     expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('hides an undetectable item, advances on a real grant and returns to the permission page on revocation', async () => {
+    native.android = true;
+    let notificationListener = false;
+    const snapshot = () => ({
+      notification: true, battery: null, backgroundAllowed: true, notificationListener,
+    });
+    mockInvoke('plugin:vcp-mobile|check_all_permissions', snapshot);
+    let freeGb = 2;
+    mockInvoke('plugin:vcp-mobile|get_free_disk_space', () => ({ freeGb, totalGb: 64 }));
+    wrapper = mount(PermissionGate);
+    await flushPromises();
+    const requestButtons = () => wrapper!.findAll('button').filter(button => /^去(授权|设置)$/.test(button.text()));
+    const next = () => wrapper!.findAll('button').find(button => button.text() === '下一步' && !button.element.disabled);
+    expect(requestButtons()).toHaveLength(1);
+    expect(wrapper.text()).not.toContain('电池优化豁免');
+    await requestButtons()[0].trigger('click');
+    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_notification_listener_permission');
+    expect(next()).toBeUndefined();
+
+    notificationListener = true;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+    await next()!.trigger('click');
+    expect(wrapper.findAll('button').some(button => button.text().includes('存储空间不足') && button.element.disabled)).toBe(true);
+
+    notificationListener = false;
+    window.dispatchEvent(new CustomEvent('vcp-permission-change', { detail: snapshot() }));
+    await flushPromises();
+    expect(requestButtons()).toHaveLength(1);
+    expect(next()).toBeUndefined();
+    notificationListener = true;
+    freeGb = 12;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+    await next()!.trigger('click');
+    const enter = wrapper.findAll('button').find(button => button.text() === '激活并进入应用' && !button.element.disabled)!;
+    await enter.trigger('click');
+    expect(continueFromPermissionGuide).toHaveBeenCalledOnce();
+  });
+
+  it('skips an empty permission page and ignores an older native read that arrives after returning', async () => {
+    native.android = true;
+    const unavailable = { notification: null, battery: null, backgroundAllowed: null, notificationListener: null };
+    let finishFirstRead!: () => void;
+    mockInvoke('plugin:vcp-mobile|check_all_permissions', () => new Promise(resolve => {
+      finishFirstRead = () => resolve({ ...unavailable, notification: false });
+    }));
+    mockInvoke('plugin:vcp-mobile|get_free_disk_space', () => ({ freeGb: 12, totalGb: 64 }));
+    wrapper = mount(PermissionGate);
+    await flushPromises();
+    expect(invokeMock).not.toHaveBeenCalledWith('plugin:vcp-mobile|get_free_disk_space');
+    mockInvoke('plugin:vcp-mobile|check_all_permissions', () => unavailable);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flushPromises();
+    finishFirstRead();
+    await flushPromises();
+    expect(wrapper.findAll('button').some(button => /^去(授权|设置)$/.test(button.text()))).toBe(false);
+    const enter = wrapper.findAll('button').find(button => button.text() === '激活并进入应用')!;
+    expect(enter.element.closest('[inert]')).toBeNull();
+    await enter.trigger('click');
+    expect(continueFromPermissionGuide).toHaveBeenCalledOnce();
   });
 
   it('offers one optional iOS notification item, reports refusal and still lets the user continue', async () => {

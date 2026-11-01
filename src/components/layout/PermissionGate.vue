@@ -1,65 +1,57 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
 import { isAndroid, isIOS } from '../../core/utils/platform';
 import { useSystemNotificationPermission } from '../../features/notification/composables/useSystemNotificationPermission';
-import type {
-  DiskSpaceDto,
-  ListenerPermissionDto,
-  PermissionStatusDto,
+import {
+  androidStartupPermissionIds,
+  hasMissingStartupPermission,
+  type AndroidStartupPermission,
+  type DiskSpaceDto,
+  type PermissionStatusDto,
 } from '../../core/types/native';
 
 const lifecycleStore = useAppLifecycleStore();
 const notificationPermission = useSystemNotificationPermission();
 
-// Only list permissions backed by the current platform's native requests.
-const permissionItems: ReadonlyArray<{
-  id: 'notification' | 'battery';
-  name: string;
-  desc: string;
-  icon: string;
-}> = isAndroid ? [
-  { id: 'notification', name: '系统通知', desc: '显示 Agent 运行状态和即时提醒', icon: 'i-heroicons-bell' },
-  { id: 'battery', name: '后台运行权限', desc: '切换到后台时保持连接不被系统中断', icon: 'i-heroicons-arrow-path' },
-] : isIOS ? [
-  { id: 'notification', name: '系统通知（可选）', desc: '接收本 App 的任务提醒；不启用也能聊天。', icon: 'i-heroicons-bell' },
-] : [];
+const androidLabels = {
+  notification: { name: '系统通知', desc: '允许 VCP Mobile 显示运行状态和任务提醒。', icon: 'i-heroicons-bell' },
+  battery: { name: '电池优化豁免', desc: '允许 VCP Mobile 忽略系统电池优化，减少待机对连接的影响。', icon: 'i-heroicons-bolt' },
+  backgroundAllowed: { name: '允许后台运行', desc: '在应用详情的电池设置中解除后台运行限制。', icon: 'i-heroicons-arrow-path' },
+  notificationListener: { name: '通知使用权', desc: '在通知使用权列表中为「VCP 连接守护助手」开启访问权限。', icon: 'i-heroicons-shield-check' },
+} satisfies Record<AndroidStartupPermission, { name: string; desc: string; icon: string }>;
 
-const status = ref<PermissionStatusDto>({
-  notification: false,
-  storage: false,
-  battery: false,
-  microphone: false,
-  camera: false,
-  location: false,
+const status = ref<PermissionStatusDto | null>(null);
+const permissionItems = computed(() => {
+  if (isIOS) return [{ id: 'notification' as const, ...androidLabels.notification, name: '系统通知（可选）' }];
+  return androidStartupPermissionIds
+    .filter(id => status.value?.[id] != null)
+    .map(id => ({ id, ...androidLabels[id] }));
 });
 
 const currentStep = ref(1);
-
-// Step 2 状态
-// 注：自启动已移出门禁——当前架构无 BOOT_COMPLETED 接收器、服务 START_NOT_STICKY、
-// 无推送/定时任务，没有任何代码路径消费该权限，配置了也是空转
-const hasClickedPower = ref(false);
-const userConfirmedPower = ref(false);
-const isNotificationListenerReady = ref(false);
-const hasClickedListener = ref(false);
-const userConfirmedListener = ref(false);
-
-// Step 3 状态
-const freeDiskSpaceGB = ref(0);
+const permissionReadFailed = ref(false);
+const openingAndroidSettings = ref(false);
+const settingsError = ref('');
+const freeDiskSpaceGB = ref<number | null>(null);
 const totalDiskSpaceGB = ref(0);
 const isDiskCheckError = ref(false);
 
-const allGranted = computed(() => permissionItems.every(item => status.value[item.id]));
-const isGranted = (id: 'notification' | 'battery') =>
-  isIOS ? notificationPermission.allowed.value : status.value[id];
+const allGranted = computed(() => status.value !== null && !hasMissingStartupPermission(status.value));
+const isGranted = (id: AndroidStartupPermission) =>
+  isIOS ? notificationPermission.allowed.value : status.value?.[id] === true;
 const continuing = ref(false);
 const continueToApp = async () => {
   if (continuing.value) return;
   continuing.value = true;
   try {
     await lifecycleStore.continueFromPermissionGuide();
+    // A permission may have been revoked between displaying the button and startup's final read.
+    if (isAndroid && lifecycleStore.state === 'PERMISSIONS') {
+      currentStep.value = 1;
+      await checkPermissions();
+    }
   } catch (cause) {
     // The startup owner records ERROR and displays the existing retry screen.
     console.error('[PermissionGate] Failed to continue startup:', cause);
@@ -68,35 +60,21 @@ const continueToApp = async () => {
   }
 };
 
-// 后台省电是否配置好 (优先自动感应电池优化白名单和无后台限制状态)
-const isPowerReady = computed(() => {
-  return status.value.battery || userConfirmedPower.value;
-});
+const isStorageSpaceOk = computed(() => freeDiskSpaceGB.value !== null && freeDiskSpaceGB.value >= 5.0);
 
-// 通知监听是否配置好
-const isListenerReady = computed(() => {
-  if (isNotificationListenerReady.value) return true;
-  return userConfirmedListener.value;
-});
-
-// Step 2 是否满足要求
-const step2Ready = computed(() => isPowerReady.value && isListenerReady.value);
-
-// Step 3 存储检测是否合格 (要求 >= 5.0 GB)
-const isStorageSpaceOk = computed(() => freeDiskSpaceGB.value >= 5.0);
-
-const check = async () => {
+let latestRead = 0;
+const checkPermissions = async () => {
+  const read = ++latestRead;
   try {
-    const res = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
-    status.value = res;
-    
-    // 检测通知栏监听服务
-    const listenerRes = await invoke<ListenerPermissionDto>('plugin:vcp-mobile|check_notification_listener_permission');
-    isNotificationListenerReady.value = listenerRes.enabled;
-    
-    // 检测内部存储空间
-    await checkDiskSpace();
+    const snapshot = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
+    if (read !== latestRead) return;
+    status.value = snapshot;
+    permissionReadFailed.value = false;
+    if (!allGranted.value) currentStep.value = 1;
+    else if (permissionItems.value.length === 0) currentStep.value = 2;
   } catch (e) {
+    if (read !== latestRead) return;
+    permissionReadFailed.value = true;
     console.error('[PermissionGate] Failed to check permissions:', e);
   }
 };
@@ -109,37 +87,33 @@ const checkDiskSpace = async () => {
     isDiskCheckError.value = false;
   } catch (e) {
     console.error('[PermissionGate] Failed to check disk space:', e);
+    freeDiskSpaceGB.value = null;
     isDiskCheckError.value = true;
   }
 };
 
-const request = async (type: 'notification' | 'battery') => {
+const request = async (type: AndroidStartupPermission) => {
   if (isIOS) {
     await notificationPermission.act();
     return;
   }
+  if (openingAndroidSettings.value) return;
+  openingAndroidSettings.value = true;
+  settingsError.value = '';
   try {
-    await invoke('plugin:vcp-mobile|request_android_permission', { pType: type });
+    if (type === 'notificationListener') {
+      await invoke('plugin:vcp-mobile|request_notification_listener_permission');
+    } else if (type === 'backgroundAllowed') {
+      const opened = await invoke<boolean>('plugin:vcp-mobile|request_power_management_permission');
+      if (!opened) throw new Error('Settings activity unavailable');
+    } else {
+      await invoke('plugin:vcp-mobile|request_android_permission', { pType: type === 'notification' ? 'notificationSettings' : type });
+    }
   } catch (e) {
-    console.error(`[PermissionGate] Failed to request ${type} permission:`, e);
-  }
-};
-
-const triggerPowerManagementSettings = async () => {
-  try {
-    await invoke('plugin:vcp-mobile|request_power_management_permission');
-    hasClickedPower.value = true;
-  } catch (e) {
-    console.error('[PermissionGate] Failed to request power management settings:', e);
-  }
-};
-
-const triggerNotificationListenerSettings = async () => {
-  try {
-    await invoke('plugin:vcp-mobile|request_notification_listener_permission');
-    hasClickedListener.value = true;
-  } catch (e) {
-    console.error('[PermissionGate] Failed to request notification listener settings:', e);
+    settingsError.value = `未能打开「${androidLabels[type].name}」设置，请在系统设置中调整后返回。`;
+    console.error(`[PermissionGate] Failed to open ${type} settings:`, e);
+  } finally {
+    openingAndroidSettings.value = false;
   }
 };
 
@@ -151,48 +125,43 @@ const exitApp = async () => {
   }
 };
 
-const goNext = () => {
-  if (currentStep.value < 3) {
-    currentStep.value++;
-  }
-};
-
 let checkTimer: ReturnType<typeof setInterval> | null = null;
 
-const onPermissionChange = (e: Event) => {
-  status.value = (e as CustomEvent<PermissionStatusDto>).detail;
+const refreshWhenVisible = () => {
+  if (document.hidden) return;
+  void checkPermissions();
+  if (currentStep.value === 2) void checkDiskSpace();
 };
 
-const onVisibilityChange = () => {
-  if (!document.hidden) check();
-};
+watch(currentStep, step => { if (step === 2) void checkDiskSpace(); });
+watch(() => lifecycleStore.lifecycleSnapshot?.phase, phase => {
+  if (isAndroid && phase === 'active') refreshWhenVisible();
+});
 
 onMounted(() => {
-  if (permissionItems.length === 0) {
+  if (!isAndroid && !isIOS) {
     void lifecycleStore.bootstrap(true).catch(error => {
       console.error('[PermissionGate] Failed to continue startup:', error);
     });
     return;
   }
   if (isIOS) return; // Its actual notification observer owns refresh and cleanup.
-  check();
-  // 当应用从后台切回前台时重检（用户在设置页操作后返回）
-  window.addEventListener('visibilitychange', onVisibilityChange);
-  // Kotlin 侧主动推送的权限变更事件
-  window.addEventListener('vcp-permission-change', onPermissionChange);
-  // 低频兜底轮询，防止极端情况下事件丢失
-  checkTimer = setInterval(check, 10000);
+  void checkPermissions();
+  document.addEventListener('visibilitychange', refreshWhenVisible);
+  window.addEventListener('vcp-permission-change', refreshWhenVisible);
+  checkTimer = setInterval(refreshWhenVisible, 10000);
 });
 
 onUnmounted(() => {
   if (checkTimer) clearInterval(checkTimer);
-  window.removeEventListener('visibilitychange', onVisibilityChange);
-  window.removeEventListener('vcp-permission-change', onPermissionChange);
+  latestRead++;
+  document.removeEventListener('visibilitychange', refreshWhenVisible);
+  window.removeEventListener('vcp-permission-change', refreshWhenVisible);
 });
 </script>
 
 <template>
-  <div v-if="permissionItems.length > 0" class="vcp-viewport-surface vcp-permission-gate vcp-safe-inline fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
+  <div v-if="isAndroid || isIOS" class="vcp-viewport-surface vcp-permission-gate vcp-safe-inline fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
     <!-- Top Section: 米白（所有步骤共享） -->
     <div class="vcp-permission-hero w-full bg-[#FAF6EE] flex flex-col items-center px-5 pb-3 shrink-0">
       <!-- Top Illustration Area -->
@@ -226,16 +195,8 @@ onUnmounted(() => {
           :class="currentStep > 1 ? 'bg-gray-900' : 'bg-gray-100'"></div>
         <!-- Step 2 -->
         <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors duration-300"
-          :class="currentStep === 2 ? 'border-gray-900 text-gray-900' : (currentStep > 2 ? 'border-gray-900 bg-gray-900 text-white' : 'border-gray-100 text-gray-300')">
+          :class="currentStep === 2 ? 'border-gray-900 text-gray-900' : 'border-gray-100 text-gray-300'">
           2
-        </div>
-        <!-- Line 2→3 -->
-        <div class="h-[1px] flex-1 mx-4 transition-colors duration-300"
-          :class="currentStep > 2 ? 'bg-gray-900' : 'bg-gray-100'"></div>
-        <!-- Step 3 -->
-        <div class="w-6 h-6 rounded-full border-2 flex items-center justify-center text-[10px] font-bold shrink-0 transition-colors duration-300"
-          :class="currentStep === 3 ? 'border-gray-900 text-gray-900' : 'border-gray-100 text-gray-300'">
-          3
         </div>
       </div>
 
@@ -245,11 +206,13 @@ onUnmounted(() => {
              :style="{ transform: `translateX(-${(currentStep - 1) * 100}%)` }">
 
           <!-- ========== Step 1: Permissions ========== -->
-          <div class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
+          <div :inert="currentStep !== 1" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
             <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">授予权限</h3>
             <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
               <template v-if="isIOS">选择是否接收系统通知。此设置可稍后在通知中心修改。</template>
-              <template v-else>VCP Mobile 需要以下权限才能稳定运行<br>VCP Mobile Core</template>
+              <template v-else-if="permissionReadFailed">暂时无法读取权限。<button class="underline" @click="checkPermissions">重新检测</button></template>
+              <template v-else-if="!status">正在读取系统权限…</template>
+              <template v-else>开启以下权限后返回，应用会自动检查授权结果。</template>
             </p>
             <div class="w-full space-y-3 mb-4">
               <!-- Permission Cards -->
@@ -268,125 +231,38 @@ onUnmounted(() => {
                   </div>
                   <p class="text-xs text-gray-500 opacity-70 leading-relaxed">{{ isIOS ? notificationPermission.description.value : item.desc }}</p>
                 </div>
-                <button v-if="isIOS || !status[item.id]"
+                <button v-if="isIOS || !isGranted(item.id)"
                   @click="request(item.id)"
-                  :disabled="isIOS && (notificationPermission.busy.value || notificationPermission.openingSettings.value)"
+                  :disabled="isIOS ? (notificationPermission.busy.value || notificationPermission.openingSettings.value) : openingAndroidSettings"
                   class="px-3 py-1.5 bg-gray-900 text-white text-[13px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                 >
-                  {{ isIOS ? notificationPermission.actionLabel.value : '去授权' }}
+                  {{ isIOS ? notificationPermission.actionLabel.value : item.id === 'battery' ? '去授权' : '去设置' }}
                 </button>
               </div>
             </div>
 
             <!-- Bottom Action -->
             <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
+              <p v-if="settingsError" role="alert" class="text-xs text-red-600">{{ settingsError }}</p>
               <button v-if="isIOS" @click="continueToApp" :disabled="continuing"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl disabled:opacity-50">
                 {{ continuing ? '正在进入…' : notificationPermission.allowed.value ? '继续进入应用' : '暂不启用，继续进入应用' }}
               </button>
-              <button v-else-if="allGranted && currentStep === 1"
-                @click="goNext"
+              <button v-else-if="allGranted && !permissionReadFailed && currentStep === 1"
+                @click="currentStep = 2"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >
                 <span>下一步</span>
                 <div class="i-heroicons-arrow-right text-lg"></div>
               </button>
-              <button v-else-if="!allGranted" @click="exitApp" class="text-xs font-bold text-gray-400 active:text-gray-900 transition-colors py-2 px-4">
+              <button v-else-if="status && !allGranted" @click="exitApp" class="text-xs font-bold text-gray-400 active:text-gray-900 transition-colors py-2 px-4">
                 暂不授权，退出应用
               </button>
             </div>
           </div>
 
-          <!-- ========== Step 2: Battery Optimization ========== -->
-          <div v-if="isAndroid" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
-            <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">品牌厂商后台管理</h3>
-            <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
-              由于国产手机系统拥有极其激进的后台强杀机制，必须强制前往设置允许后台完全运行并开启通知监听守护。
-            </p>
-
-            <div class="w-full space-y-4 mb-4">
-              <!-- 卡片 1：省电策略 (完全允许后台行为) -->
-              <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
-                <div class="flex items-center gap-3">
-                  <div class="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
-                    <div class="i-heroicons-bolt text-amber-500 text-lg"></div>
-                  </div>
-                  <div class="flex-1">
-                    <span class="font-semibold text-gray-900 text-sm">省电无限制策略</span>
-                    <span v-if="status.battery" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
-                  </div>
-                  <div v-if="status.battery" class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0">
-                    已开启
-                  </div>
-                  <button v-else
-                    @click="triggerPowerManagementSettings"
-                    class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
-                  >
-                    去设置
-                  </button>
-                </div>
-                <p class="text-xs text-gray-500 leading-relaxed pl-11">
-                  请在打开的系统页面中将本应用设为不受限：
-                  <span class="block mt-1 text-[11px] text-[#8B7D6B] font-bold">
-                    关联权限名称：允许完全后台行为 / 不限制 / 应用耗电管理
-                  </span>
-                </p>
-                <div v-if="!status.battery && hasClickedPower" class="mt-2 pl-11 flex items-center gap-2">
-                  <input type="checkbox" id="chkPower" v-model="userConfirmedPower" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
-                  <label for="chkPower" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已将本应用省电策略改为「无限制」</label>
-                </div>
-              </div>
-
-              <!-- 卡片 2：通知栏监听守护 (极度稳定的后台常驻) -->
-              <div class="flex flex-col gap-2 p-4 rounded-2xl bg-gray-100/50 border border-gray-200">
-                <div class="flex items-center gap-3">
-                  <div class="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
-                    <div class="i-heroicons-shield-check text-blue-500 text-lg"></div>
-                  </div>
-                  <div class="flex-1">
-                    <span class="font-semibold text-gray-900 text-sm">通知栏监听守护</span>
-                    <span v-if="isNotificationListenerReady" class="ml-2 text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-bold uppercase tracking-wider">自动感应 OK</span>
-                  </div>
-                  <div v-if="isNotificationListenerReady" class="px-3 py-1.5 text-green-600 text-[12px] font-bold shrink-0">
-                    已开启
-                  </div>
-                  <button v-else
-                    @click="triggerNotificationListenerSettings"
-                    class="px-3 py-1.5 bg-gray-900 text-white text-[12px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
-                  >
-                    去设置
-                  </button>
-                </div>
-                <p class="text-xs text-gray-500 leading-relaxed pl-11">
-                  启用通知使用权，使应用在系统底层获得极高的后台网络与运行豁免特权：
-                  <span class="block mt-1 text-[11px] text-[#8B7D6B] font-bold">
-                    请在列表中找到『VCP Mobile』并开启『允许访问通知』
-                  </span>
-                </p>
-                <div v-if="!isNotificationListenerReady && hasClickedListener" class="mt-2 pl-11 flex items-center gap-2">
-                  <input type="checkbox" id="chkListener" v-model="userConfirmedListener" class="rounded border-gray-300 text-gray-900 focus:ring-gray-900 w-4 h-4 cursor-pointer" />
-                  <label for="chkListener" class="text-xs text-gray-700 font-bold select-none cursor-pointer">我已开启通知栏监听</label>
-                </div>
-              </div>
-            </div>
-
-            <!-- Bottom Action -->
-            <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
-              <button v-if="step2Ready && currentStep === 2"
-                @click="goNext"
-                class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
-              >
-                <span>下一步</span>
-                <div class="i-heroicons-arrow-right text-lg"></div>
-              </button>
-              <button v-else-if="currentStep === 2" class="w-full py-4 bg-gray-300 text-gray-500 text-[15px] font-bold rounded-2xl cursor-not-allowed flex items-center justify-center gap-2" disabled>
-                <span>请先跳转完成保活设置</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- ========== Step 3: Hardened Keep-Alive & Storage Check ========== -->
-          <div v-if="isAndroid" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
+          <!-- Step 2: Storage -->
+          <div v-if="isAndroid" :inert="currentStep !== 2" class="w-full h-full flex-shrink-0 flex flex-col px-5 overflow-y-auto">
             <h3 class="text-lg font-semibold text-gray-900 mb-2 px-1 w-full">系统运行环境与存储空间检测</h3>
             <p class="text-sm text-[#8B7D6B] leading-relaxed mb-4 px-1">
               完成应用锁定配置并确保充足的系统存储空间，以保障后台服务的高可用性。
@@ -415,7 +291,7 @@ onUnmounted(() => {
                 </p>
 
                 <!-- Disk Space Status Bar -->
-                <div class="space-y-1" v-if="freeDiskSpaceGB > 0">
+                <div class="space-y-1" v-if="freeDiskSpaceGB !== null">
                   <div class="flex justify-between text-xs font-semibold">
                     <span :class="isStorageSpaceOk ? 'text-green-600' : 'text-red-500'">
                       {{ isStorageSpaceOk ? '✅ 系统可用存储充足' : '⚠️ 可用存储空间不足 5.0 GB' }}
@@ -433,7 +309,7 @@ onUnmounted(() => {
                   </div>
                 </div>
 
-                <p v-if="!isStorageSpaceOk && freeDiskSpaceGB > 0" class="text-[11px] text-red-500 font-bold leading-normal">
+                <p v-if="!isStorageSpaceOk && freeDiskSpaceGB !== null" class="text-[11px] text-red-500 font-bold leading-normal">
                   ⚠️ 系统可用存储空间低于 5.0 GB，后台进程可能会被系统终止运行。请清理设备存储以解除阻断。
                 </p>
               </div>
@@ -441,14 +317,18 @@ onUnmounted(() => {
 
             <!-- Bottom Action -->
             <div class="mt-auto w-full flex flex-col items-center gap-2 pb-[calc(var(--vcp-safe-bottom,48px)+24px)]">
-              <button v-if="isStorageSpaceOk"
-                @click="lifecycleStore.bootstrap(true)"
+              <button v-if="currentStep === 2 && isStorageSpaceOk" :disabled="continuing"
+                @click="continueToApp"
                 class="w-full py-4 bg-gray-900 text-white text-[15px] font-bold rounded-2xl active:scale-95 transition-all shadow-lg shadow-gray-900/10 flex items-center justify-center gap-2"
               >
-                <span>激活并进入应用</span>
+                <span>{{ continuing ? '正在进入…' : '激活并进入应用' }}</span>
                 <div class="i-heroicons-rocket-launch text-lg"></div>
               </button>
-              <button v-else class="w-full py-4 bg-red-100 text-red-400 text-[15px] font-bold rounded-2xl cursor-not-allowed flex items-center justify-center gap-2" disabled>
+              <button v-else-if="isDiskCheckError" @click="checkDiskSpace" class="w-full py-4 bg-gray-100 text-gray-900 text-[15px] font-bold rounded-2xl">
+                未能读取存储空间，重新检测
+              </button>
+              <p v-else-if="freeDiskSpaceGB === null" class="py-4 text-sm text-gray-500">正在检测可用存储空间…</p>
+              <button v-else-if="!isStorageSpaceOk" class="w-full py-4 bg-red-100 text-red-400 text-[15px] font-bold rounded-2xl cursor-not-allowed flex items-center justify-center gap-2" disabled>
                 <span>存储空间不足，已阻断进入</span>
               </button>
             </div>

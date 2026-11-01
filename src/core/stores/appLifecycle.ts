@@ -12,10 +12,7 @@ import { useAvatarStore } from './avatar';
 import { isAndroid, isIOS } from '../utils/platform';
 import { readNotificationPermission } from '../../features/notification/nativeNotifications';
 import { selectLatestLifecycleSnapshot, type LifecycleSnapshotDto } from '../types/lifecycle';
-import type {
-  ListenerPermissionDto,
-  PermissionStatusDto,
-} from '../types/native';
+import { hasMissingStartupPermission, type PermissionStatusDto } from '../types/native';
 import { bootMark, reportBootTrace, trackBootStage } from '../utils/bootTrace';
 import { useNotificationProcessor } from '../composables/useNotificationProcessor';
 import { useVoiceDocumentStore } from '../../features/chat/voice/voiceDocument';
@@ -395,9 +392,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         if (isAndroid) {
           try {
             const pStatus = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
-            const listenerRes = await invoke<ListenerPermissionDto>('plugin:vcp-mobile|check_notification_listener_permission');
             bootMark('fe:permissions_done');
-            if (!pStatus.notification || !pStatus.battery || !listenerRes.enabled) {
+            if (hasMissingStartupPermission(pStatus)) {
               console.log('[Lifecycle] Missing keep-alive critical permissions, entering permission gate');
               // 仅在确认缺失权限时才将状态设为 PERMISSIONS，避免权限完整时引导页一闪而过
               setState('PERMISSIONS', '权限缺失，展示引导界面');

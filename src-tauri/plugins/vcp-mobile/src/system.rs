@@ -44,10 +44,13 @@ fn canonical_file_in(root: &std::path::Path, path: &std::path::Path) -> Result<b
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionStatus {
-    pub notification: bool,
+    pub notification: Option<bool>,
     pub storage: bool,
-    pub battery: bool,
+    pub battery: Option<bool>,
+    pub background_allowed: Option<bool>,
+    pub notification_listener: Option<bool>,
     pub microphone: bool,
     pub camera: bool,
     pub location: bool,
@@ -192,9 +195,11 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
     {
         let _ = app;
         Ok(PermissionStatus {
-            notification: true,
+            notification: Some(true),
             storage: true,
-            battery: true,
+            battery: Some(true),
+            background_allowed: Some(true),
+            notification_listener: Some(true),
             microphone: true,
             camera: true,
             location: true,
@@ -203,7 +208,7 @@ pub fn check_all_permissions<R: Runtime>(app: AppHandle<R>) -> Result<Permission
 }
 
 #[tauri::command]
-pub fn request_android_permission<R: Runtime>(
+pub async fn request_android_permission<R: Runtime>(
     app: AppHandle<R>,
     p_type: String,
 ) -> Result<(), String> {
@@ -213,10 +218,11 @@ pub fn request_android_permission<R: Runtime>(
         let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
-            .run_mobile_plugin::<serde_json::Value>(
+            .run_mobile_plugin_async::<serde_json::Value>(
                 "requestAndroidPermission",
                 serde_json::json!({ "type": p_type }),
             )
+            .await
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
     }
     #[cfg(target_os = "ios")]
@@ -257,7 +263,7 @@ pub fn move_task_to_back<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
 
 #[derive(Serialize, Deserialize)]
 pub struct ListenerPermissionResponse {
-    pub enabled: bool,
+    pub enabled: Option<bool>,
 }
 
 #[tauri::command]
@@ -285,12 +291,14 @@ pub fn check_notification_listener_permission<R: Runtime>(
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        Ok(ListenerPermissionResponse { enabled: true })
+        Ok(ListenerPermissionResponse {
+            enabled: Some(true),
+        })
     }
 }
 
 #[tauri::command]
-pub fn request_notification_listener_permission<R: Runtime>(
+pub async fn request_notification_listener_permission<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<(), String> {
     #[cfg(target_os = "android")]
@@ -299,10 +307,11 @@ pub fn request_notification_listener_permission<R: Runtime>(
         let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
-            .run_mobile_plugin::<serde_json::Value>(
+            .run_mobile_plugin_async::<serde_json::Value>(
                 "request_notification_listener_permission",
                 serde_json::json!({}),
             )
+            .await
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
     }
     #[cfg(target_os = "ios")]
@@ -346,17 +355,20 @@ pub fn request_auto_start_permission<R: Runtime>(app: AppHandle<R>) -> Result<bo
 }
 
 #[tauri::command]
-pub fn request_power_management_permission<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
+pub async fn request_power_management_permission<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<bool, String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
 
         let res = plugin_handle
-            .run_mobile_plugin::<PermissionPageResult>(
+            .run_mobile_plugin_async::<PermissionPageResult>(
                 "requestPowerManagementPermission",
                 serde_json::json!({}),
             )
+            .await
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
 
         Ok(res.success)

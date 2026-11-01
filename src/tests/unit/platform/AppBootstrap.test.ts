@@ -330,24 +330,31 @@ describe('platform-aware bootstrap', () => {
     expect(useNotificationStore().historyList).toHaveLength(0);
   });
 
-  it('keeps the Android permission gate and rechecks native authorization before entering', async () => {
+  it.each(['notification', 'battery', 'backgroundAllowed', 'notificationListener'] as const)(
+    'blocks Android startup while %s is denied even if another check is unavailable', async (denied) => {
+      testPlatform.value = 'android';
+      const permissions = { notification: null, battery: null, backgroundAllowed: null, notificationListener: null };
+      mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ ...permissions, [denied]: false }));
+      const lifecycle = useAppLifecycleStore();
+
+      await lifecycle.bootstrap();
+      expect(lifecycle.state).toBe('PERMISSIONS');
+      await lifecycle.continueFromPermissionGuide();
+      expect(lifecycle.state).toBe('PERMISSIONS');
+
+      mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ ...permissions, [denied]: true }));
+      await lifecycle.continueFromPermissionGuide();
+      expect(lifecycle.state).toBe('READY');
+    },
+  );
+
+  it('continues Android startup when the device has no checkable gate items', async () => {
     testPlatform.value = 'android';
-    mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ notification: false, battery: true }));
-    mockInvoke('plugin:vcp-mobile|check_notification_listener_permission', () => ({ enabled: true }));
-    const lifecycle = useAppLifecycleStore();
-
-    await lifecycle.bootstrap();
-    expect(lifecycle.state).toBe('PERMISSIONS');
-    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(expect.arrayContaining([
-      'allocate_voice_document',
-      'connect_voice_document',
-      'plugin:vcp-mobile|check_all_permissions',
-      'plugin:vcp-mobile|check_notification_listener_permission',
-    ]));
-
-    mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ notification: true, battery: true }));
-    await lifecycle.bootstrap(true);
-    expect(lifecycle.state).toBe('READY');
+    mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({
+      notification: null, battery: null, backgroundAllowed: null, notificationListener: null,
+    }));
+    await useAppLifecycleStore().bootstrap();
+    expect(useAppLifecycleStore().state).toBe('READY');
   });
 
   it('retains the Android foreground fallback with an explicit warning when its permission query fails', async () => {
