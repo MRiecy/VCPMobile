@@ -1592,7 +1592,7 @@ pub(crate) struct FinalizedStreamMessage {
 
 #[derive(Debug)]
 enum StreamCommit {
-    Committed(Vec<ContentBlock>, u64, i64),
+    Committed(Vec<ContentBlock>, u64, i64, Option<String>),
     AlreadyFinalized(FinalizedStreamMessage),
     Removed,
 }
@@ -1689,7 +1689,7 @@ pub(crate) async fn retry_stream_terminal<R: tauri::Runtime>(
 
 async fn finalize_stream_message_inner<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
-    pool: &sqlx::Pool<sqlx::Sqlite>,
+    _pool: &sqlx::Pool<sqlx::Sqlite>,
     message_key: &MessageKey,
     terminal: std::sync::Arc<PendingStreamTerminal>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
@@ -1710,19 +1710,6 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     } else {
         Some(owner_id.to_string())
     };
-
-    let mut agent_name = None;
-    if let Some(ref aid) = final_agent_id {
-        if let Ok(Some(row)) =
-            sqlx::query("SELECT name FROM agents WHERE owner_type = 'agent' AND agent_id = ?")
-                .bind(aid)
-                .fetch_optional(pool)
-                .await
-        {
-            use sqlx::Row;
-            agent_name = Some(row.get::<String, _>("name"));
-        }
-    }
 
     let terminal_reason = &terminal.finish_reason;
     let mut context = if owner_id.is_empty() || topic_id.is_empty() {
@@ -1761,12 +1748,10 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             final_content,
             final_ts,
             terminal_reason,
-            final_agent_id.as_deref(),
-            agent_name.as_deref(),
         )
         .await
         {
-            Ok(StreamCommit::Committed(blocks, start_timestamp, updated_at)) => {
+            Ok(StreamCommit::Committed(blocks, start_timestamp, updated_at, _agent_name)) => {
                 #[cfg(target_os = "ios")]
                 if !replayed && !matches!(terminal_reason.as_str(), "error" | "cancelled_by_user") {
                     // The transaction won the terminal transition, so this reply exists
@@ -1777,7 +1762,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
                         owner_id,
                         topic_id,
                         message_id,
-                        agent_name.as_deref().unwrap_or("智能体"),
+                        _agent_name.as_deref().unwrap_or("智能体"),
                     );
                 }
                 (Some(blocks), start_timestamp, Some(updated_at))
@@ -1861,15 +1846,12 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     }))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn commit_stream_message(
     db_state: &DbState,
     message_key: &MessageKey,
     final_content: &str,
     final_ts: u64,
     finish_reason: &str,
-    agent_id: Option<&str>,
-    agent_name: Option<&str>,
 ) -> Result<StreamCommit, String> {
     let key = &message_key.topic;
     let owner_id = key.owner_id.as_str();
@@ -1884,7 +1866,7 @@ async fn commit_stream_message(
         .await?;
 
     let row = sqlx::query(
-        "SELECT m.timestamp, m.content, m.finish_reason, m.deleted_at,
+        "SELECT m.timestamp, m.content, m.name, m.agent_id, m.finish_reason, m.deleted_at,
                 ag.msg_id IS NOT NULL AS pending
          FROM messages m
          LEFT JOIN active_generations ag
@@ -1906,6 +1888,8 @@ async fn commit_stream_message(
         return Ok(StreamCommit::Removed);
     }
     let start_timestamp: i64 = row.get("timestamp");
+    let message_name: Option<String> = row.get("name");
+    let message_agent_id: Option<String> = row.get("agent_id");
     let fingerprint_timestamp = u64::try_from(start_timestamp)
         .map_err(|_| format!("Message {message_id} has a negative timestamp"))?;
     if let Some(reason) = row.get::<Option<String>, _>("finish_reason") {
@@ -1927,10 +1911,10 @@ async fn commit_stream_message(
     let content_hash = HashAggregator::compute_message_fingerprint(
         message_id,
         "assistant",
-        agent_name,
+        message_name.as_deref(),
         final_content,
         fingerprint_timestamp,
-        agent_id,
+        message_agent_id.as_deref(),
         &[],
     );
 
@@ -2038,6 +2022,7 @@ async fn commit_stream_message(
         blocks,
         start_timestamp as u64,
         activity.updated_at,
+        message_name,
     ))
 }
 
@@ -2559,17 +2544,21 @@ mod stream_lifecycle_tests {
             "terminal body",
             2,
             "completed",
-            Some("agent-1"),
-            Some("Agent"),
         )
         .await
         .expect("finalize generation");
-        let StreamCommit::Committed(_, terminal_timestamp, terminal_topic_updated_at) = committed
+        let StreamCommit::Committed(
+            _,
+            terminal_timestamp,
+            terminal_topic_updated_at,
+            committed_name,
+        ) = committed
         else {
             panic!("pending generation must commit");
         };
         assert_eq!(terminal_timestamp, skeleton.0 as u64);
         assert_eq!(terminal_topic_updated_at, 2);
+        assert_eq!(committed_name.as_deref(), Some("Agent"));
         let topic_updated_after_finalize: i64 =
             sqlx::query_scalar("SELECT updated_at FROM topics WHERE topic_id = 'topic-1'")
                 .fetch_one(&pool)
@@ -2602,8 +2591,6 @@ mod stream_lifecycle_tests {
             "late body",
             3,
             "completed",
-            Some("agent-1"),
-            Some("Agent"),
         )
         .await
         .expect("late finalization is idempotent");
@@ -2695,8 +2682,6 @@ mod stream_lifecycle_tests {
             "must roll back",
             2,
             "completed",
-            Some("agent-1"),
-            Some("Agent"),
         )
         .await
         .is_err());
@@ -2827,8 +2812,6 @@ mod stream_lifecycle_tests {
             "unowned body",
             999,
             "completed",
-            Some("agent-1"),
-            Some("Agent"),
         )
         .await
         .is_err());
@@ -2953,5 +2936,74 @@ mod stream_lifecycle_tests {
         )
         .await
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn finalizing_after_agent_rename_preserves_message_name_and_fingerprint() {
+        let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let key = message_key("message-rename");
+
+        // 1. 开始生成流：存入初始旧名 "OldAgent"
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("OldAgent"))
+            .await
+            .expect("begin generation");
+
+        // 2. 模拟生成期间助手被改名：在 agents 表中更新或插入新名字 "NewAgent"
+        sqlx::query(
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at) \
+             VALUES ('agent', 'agent-1', 'NewAgent', 'test-model', 1) \
+             ON CONFLICT(owner_type, agent_id) DO UPDATE SET name = 'NewAgent'",
+        )
+        .execute(&pool)
+        .await
+        .expect("update agent name to NewAgent");
+
+        // 3. 终态结算
+        let app = tauri::test::mock_app();
+        app.manage(db_state.clone());
+        let finalized = finalize_stream_message(
+            app.handle().clone(),
+            &pool,
+            &key,
+            "Final content".to_string(),
+            false,
+            Some("completed".to_string()),
+            None,
+            Some("agent-1".to_string()),
+        )
+        .await
+        .expect("finalize stream message");
+
+        assert!(finalized.is_some());
+
+        // 4. 验证数据库中持久化的消息记录：name 保持为流开始时的 "OldAgent"
+        let (name, hash, content, timestamp, agent_id): (
+            Option<String>,
+            String,
+            String,
+            i64,
+            Option<String>,
+        ) = sqlx::query_as(
+            "SELECT name, content_hash, content, timestamp, agent_id \
+             FROM messages WHERE msg_id = 'message-rename'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch finalized message");
+
+        assert_eq!(name.as_deref(), Some("OldAgent"));
+
+        // 5. 核心断言：content_hash 必须与消息自身 name ("OldAgent") 完全自洽，消除指纹漂移
+        let expected_hash = HashAggregator::compute_message_fingerprint(
+            "message-rename",
+            "assistant",
+            Some("OldAgent"),
+            &content,
+            timestamp as u64,
+            agent_id.as_deref(),
+            &[],
+        );
+        assert_eq!(hash, expected_hash);
     }
 }
