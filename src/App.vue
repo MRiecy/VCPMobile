@@ -16,8 +16,6 @@ import { useNotificationProcessor } from "./core/composables/useNotificationProc
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore, type ConversationKey } from "./core/stores/chatSessionStore";
-import { useChatHistoryStore } from "./core/stores/chatHistoryStore";
-import { scrollToMessageById } from "./core/utils/scrollToMessage";
 import { useVoiceCallStore } from "./features/chat/voice/voiceCallStore";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
 import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
@@ -27,7 +25,7 @@ import {
   useVcpCliStore,
   type VcpCliNotificationTarget,
 } from "./features/cli/vcpCliStore";
-import type { AgentListItemDto, TopicDto } from "./core/types/assistant";
+import type { AgentListItemDto } from "./core/types/assistant";
 
 // 初始化应用生命周期监听
 useAppLifecycle();
@@ -154,6 +152,7 @@ const parseNotificationClickTarget = (value: unknown): NotificationClickTarget |
 };
 
 let notificationNavigationGeneration = 0;
+let notificationChatIntent: number | null = null;
 let stopNotificationReadyWatch: WatchStopHandle | null = null;
 let appUnmounted = false;
 const isCurrentNotificationNavigation = (generation: number) =>
@@ -164,6 +163,13 @@ const routeNotificationClick = (rawDetail: unknown) => {
   const detail = parseNotificationClickTarget(rawDetail);
   if (!detail) return;
   const generation = ++notificationNavigationGeneration;
+  if (detail.kind === 'chat') {
+    notificationChatIntent = sessionStore.beginNavigation();
+  } else if (notificationChatIntent !== null && sessionStore.isNavigationCurrent(notificationChatIntent)) {
+    // An app-only or CLI click can supersede a still-validating chat notification.
+    sessionStore.beginNavigation();
+    notificationChatIntent = null;
+  }
   stopNotificationReadyWatch?.();
   stopNotificationReadyWatch = null;
   // A plain notification opens the app without inventing a chat destination.
@@ -272,54 +278,25 @@ const processNotificationClick = async (
     return;
   }
 
-  // 聊天通知先只读验证目标；过期通知不得关闭当前界面或清空当前 Topic。
+  const intent = notificationChatIntent;
+  if (intent === null || !sessionStore.isNavigationCurrent(intent) || !useModalHistory().canCloseAllModals()) return;
   try {
-    if (detail.messageId) {
-      await router.isReady();
-      await nextTick();
-      if (!isCurrentNotificationNavigation(generation)) return;
-      const result = await useChatHistoryStore().loadHistoryAround(
-        detail.ownerId, detail.ownerType, detail.topicId, detail.messageId,
-        { beforeNavigate: () => isCurrentNotificationNavigation(generation) && closeNavigationSurfaces() },
-      );
-      await nextTick();
-      if (!isCurrentNotificationNavigation(generation) || result === "aborted") return;
-      if (result === "missing") {
-        notificationStore.addNotification({
-          type: "warning", title: "通知已过期", message: "目标消息已不存在。", toastOnly: true,
-        });
-        return;
-      }
-      const current = sessionStore.currentConversationKey;
-      if (current?.ownerId !== detail.ownerId || current.ownerType !== detail.ownerType || current.topicId !== detail.topicId) return;
-      if (!scrollToMessageById(detail.messageId, { behavior: "instant" })) throw new Error("未能显示这条回复。");
-      return;
-    }
-    const topics = await invoke<TopicDto[]>("get_topics", {
-      ownerId: detail.ownerId,
-      ownerType: detail.ownerType,
-    });
-    if (!isCurrentNotificationNavigation(generation)) return;
-    const targetExists = topics.some((topic) => topic.id === detail.topicId);
-    if (!targetExists) {
-      notificationStore.addNotification({
-        type: "warning",
-        title: "通知已过期",
-        message: "目标话题已不存在，当前会话未受影响",
-        toastOnly: true,
-      });
-      return;
-    }
-
-    if (!closeNavigationSurfaces()) return;
-    if (!isCurrentNotificationNavigation(generation)) return;
-    await sessionStore.selectTopicById(
-      detail.ownerId,
-      detail.ownerType,
-      detail.topicId,
+    const status = await sessionStore.selectTopicById(
+      detail.ownerId, detail.ownerType, detail.topicId, intent, detail.messageId,
     );
+    if (!isCurrentNotificationNavigation(generation) || !sessionStore.isNavigationCurrent(intent)) return;
+    if (status === "accepted") {
+      if (useModalHistory().canCloseAllModals()) closeNavigationSurfaces();
+    } else if (status === "missing") {
+      notificationStore.addNotification({
+        type: "warning", title: "通知已过期",
+        message: detail.messageId ? "目标消息已不存在。" : "目标话题已不存在。", toastOnly: true,
+      });
+    } else {
+      sessionStore.notifyNavigationResult(status);
+    }
   } catch (error) {
-    if (!isCurrentNotificationNavigation(generation)) return;
+    if (!isCurrentNotificationNavigation(generation) || !sessionStore.isNavigationCurrent(intent)) return;
     console.error("[App] Failed to open notification target:", error);
     notificationStore.addNotification({
       type: "error",
@@ -327,6 +304,8 @@ const processNotificationClick = async (
       message: error instanceof Error ? error.message : String(error),
       toastOnly: true,
     });
+  } finally {
+    if (notificationChatIntent === intent) notificationChatIntent = null;
   }
 };
 
@@ -418,13 +397,14 @@ const handleExitRequest = async () => {
     return;
   }
 
-  // 通话由显式挂断结束；上层菜单、设置与查看器仍先消费返回。
-  if (voiceCallStore.active) return;
-
   // 2. 第二级：若当前在 Agent 聊天中（且已就绪），按返回键退回到初始零数据引导欢迎页
   if (lifecycleStore.state === 'READY' && sessionStore.currentSelectedItem !== null) {
     console.log('[ExitRequest] Resetting active session to welcome boot screen.');
-    sessionStore.clearConversation();
+    try {
+      sessionStore.notifyNavigationResult(await sessionStore.clearConversation());
+    } catch (error) {
+      notificationStore.addNotification({ type: 'error', title: '退出会话失败', message: String(error), toastOnly: true });
+    }
     return;
   }
 
@@ -475,8 +455,10 @@ const readPendingNotification = async () => {
   }
   if (isAndroid) androidPendingNotificationRead = true;
   readingPendingNotification = true;
+  const sequence = sessionStore.navigationSequence;
   try {
-    routeNotificationClick(await invoke<unknown>('plugin:vcp-mobile|get_pending_notification'));
+    const detail = await invoke<unknown>('plugin:vcp-mobile|get_pending_notification');
+    if (sessionStore.isNavigationCurrent(sequence)) routeNotificationClick(detail);
   } catch (error) {
     console.warn('[App] Failed to fetch pending notification click:', error);
   } finally {
@@ -554,6 +536,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   appUnmounted = true;
+  if (notificationChatIntent !== null && sessionStore.isNavigationCurrent(notificationChatIntent)) {
+    sessionStore.beginNavigation();
+  }
   notificationNavigationGeneration++;
   stopNotificationReadyWatch?.();
   stopNotificationReadyWatch = null;

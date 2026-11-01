@@ -87,7 +87,7 @@ export const useGuideStore = defineStore('guide', () => {
     activeStepIndex.value = 0;
     // 返回键在指引激活期间完全禁止：close 返回 false 时 useModalHistory
     // 自动补回 history entry（唯一退出出口是末步「我知道了」）。
-    registerModal(`Guide:${id}`, () => false);
+    registerModal(`Guide:${id}`, () => false, undefined, undefined, () => false);
   };
 
   /**

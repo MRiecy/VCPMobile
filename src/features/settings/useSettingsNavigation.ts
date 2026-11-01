@@ -105,7 +105,8 @@ export function useSettingsNavigation(options: {
   const openPage = (id: SettingsPageId) => {
     if (!options.isOpen.value || activeVisit.value || id === 'developer') return;
     showPage(id);
-    registerModal(SETTINGS_SUBPAGE_MODAL_ID, requestLeave, options.surface);
+    registerModal(SETTINGS_SUBPAGE_MODAL_ID, requestLeave, options.surface, undefined,
+      () => !developerOpen && !leavePromise && !pageHandle.value?.beforeLeave);
   };
 
   const openDeveloperPage = () => {

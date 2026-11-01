@@ -5,18 +5,16 @@
  * 分层定位：SlidePage 页面栈成员（overlay 类型 'globalSearch'），
  * 检索层走本地 SQLite FTS5（trigram），离线可用。
  *
- * 结果项点击 → 关闭搜索页 → 验证锚点 → 成功后切换会话并定位。
+ * Rust 接受目标窗口后关闭搜索页，ChatView 负责定位锚点。
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { ArrowLeft, ArrowUpDown, ChevronDown, Clock, Search, SlidersHorizontal, X } from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
-import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
 import { useAssistantStore } from '../../core/stores/assistant';
 import { useTopicStore } from '../../core/stores/topicListManager';
 import { useNotificationStore } from '../../core/stores/notification';
-import { scrollToMessageById } from '../../core/utils/scrollToMessage';
 import { useGlobalSearchStore } from './globalSearchStore';
 import {
   ROLE_LABELS,
@@ -39,7 +37,6 @@ const emit = defineEmits<{
 const store = useGlobalSearchStore();
 const overlayStore = useOverlayStore();
 const sessionStore = useChatSessionStore();
-const historyStore = useChatHistoryStore();
 const assistantStore = useAssistantStore();
 const topicStore = useTopicStore();
 const notificationStore = useNotificationStore();
@@ -279,45 +276,21 @@ const fmtTime = (ts: number): string => {
 
 // ---------- 跳转定位闭环 ----------
 const jumpToResult = async (item: FtsSearchResultItem) => {
+  const intent = sessionStore.beginNavigation();
   try {
-    const key = sessionStore.currentConversationKey;
-    const sameConversation =
-      key &&
-      key.ownerId === item.ownerId &&
-      key.ownerType === item.ownerType &&
-      key.topicId === item.topicId;
-
-    emit('close');
-
-    // 已在当前会话且消息在窗口内：直接定位
-    if (sameConversation && historyStore.currentChatHistory.some((m) => m.id === item.msgId)) {
-      await nextTick();
-      scrollToMessageById(item.msgId);
-      return;
-    }
-
-    // 先读取并验证锚点；只有成功后 HistoryStore 才切换会话并提交窗口。
-    const result = await historyStore.loadHistoryAround(
-      item.ownerId,
-      item.ownerType,
-      item.topicId,
-      item.msgId,
-    );
-    await nextTick();
-
-    if (result === 'loaded') {
-      scrollToMessageById(item.msgId);
-      return;
-    }
-    if (result === 'missing') {
+    const result = await sessionStore.selectTopicById(item.ownerId, item.ownerType, item.topicId, intent, item.msgId);
+    if (!sessionStore.isNavigationCurrent(intent)) return;
+    if (result === 'accepted') emit('close');
+    else if (result === 'missing') {
       notificationStore.addNotification({
         type: 'warning',
         title: '全局搜索',
         message: '目标消息已不存在或无法定位',
         toastOnly: true,
       });
-    }
+    } else sessionStore.notifyNavigationResult(result);
   } catch (e) {
+    if (!sessionStore.isNavigationCurrent(intent)) return;
     console.error('[GlobalSearch] Jump failed:', e);
     notificationStore.addNotification({
       type: 'error',

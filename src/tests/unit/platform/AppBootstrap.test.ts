@@ -29,6 +29,7 @@ vi.mock('../../../core/stores/chatSessionStore', () => ({
     currentSelectedItem: null,
     currentTopicId: null,
     reconcileCurrentConversation: () => {},
+    restoreFocus: async () => {},
   }),
 }));
 vi.mock('../../../core/stores/chatHistoryStore', () => ({

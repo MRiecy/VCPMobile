@@ -417,12 +417,12 @@ pub(super) fn register_call<R: tauri::Runtime>(
     app: &AppHandle<R>,
     call: Arc<CallInput>,
 ) -> Result<(), String> {
-    app.state::<VoiceServiceState>()
-        .registry
-        .lock()
-        .map_err(|error| error.to_string())?
-        .calls
-        .insert(call.id.clone(), call);
+    let state = app.state::<VoiceServiceState>();
+    let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
+    if registry.cancelled_calls.contains(&call.id) || call.cancel.is_cancelled() {
+        return Err(network::CANCELLED.into());
+    }
+    registry.calls.insert(call.id.clone(), call);
     Ok(())
 }
 
@@ -556,7 +556,7 @@ pub(super) fn fail_turn(
     cleanup_closed(app, session);
 }
 
-fn cleanup_closed(app: &AppHandle, session: &Arc<VoiceSession>) {
+fn cleanup_closed<R: tauri::Runtime>(app: &AppHandle<R>, session: &Arc<VoiceSession>) {
     if !session.input_closed.load(Ordering::Acquire)
         || session.pending_exports.load(Ordering::Acquire) != 0
     {
@@ -1062,7 +1062,10 @@ pub async fn close_voice_input(
     Ok(())
 }
 
-pub async fn stop_voice_service(app: AppHandle, session_id: String) -> Result<(), String> {
+pub async fn stop_voice_service<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> Result<(), String> {
     validate_id(&session_id)?;
     let input = app
         .state::<VoiceServiceState>()
@@ -1085,7 +1088,10 @@ pub async fn stop_voice_service(app: AppHandle, session_id: String) -> Result<()
     Ok(())
 }
 
-pub async fn stop_voice_call_inputs(app: AppHandle, call_id: String) -> Result<(), String> {
+pub async fn stop_voice_call_inputs<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    call_id: String,
+) -> Result<(), String> {
     validate_id(&call_id)?;
     let sessions = {
         let state = app.state::<VoiceServiceState>();

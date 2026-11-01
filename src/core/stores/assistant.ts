@@ -3,7 +3,7 @@ import { computed, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAvatarStore } from "./avatar";
 import { useNotificationStore } from "./notification";
-import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
+import { allowChatMutation, notifyCallDeletionBlocked } from "../../features/chat/chatMutationPolicy";
 import type {
   AgentConfigDto,
   AgentListItemDto,
@@ -125,6 +125,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       });
       return true;
     } catch (e: any) {
+      if (notifyCallDeletionBlocked(e)) return false;
       console.error("[AssistantStore] Failed to delete agent:", e);
       throw e;
     }
@@ -166,6 +167,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       });
       return true;
     } catch (e: any) {
+      if (notifyCallDeletionBlocked(e)) return false;
       console.error("[AssistantStore] Failed to delete group:", e);
       throw e;
     }

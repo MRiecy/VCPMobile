@@ -104,7 +104,8 @@ function toast(
 function ensureInternalModal(): void {
   if (!props.isOpen || !diaryStore.hasInternalState || internalRegistered.value) return;
   internalRegistered.value = true;
-  registerModal("Diary:Internal", () => handleInternalBack());
+  // Internal back may need several steps or a discard confirmation.
+  registerModal("Diary:Internal", () => handleInternalBack(), undefined, undefined, () => false);
 }
 
 function releaseInternalModal(): void {
@@ -268,7 +269,7 @@ watch(renameOpen, (open) => {
       if (diaryStore.activeMutation) return false;
       renameOpen.value = false;
       return true;
-    });
+    }, undefined, undefined, () => !diaryStore.activeMutation);
   } else if (!open && renameRegistered.value) {
     renameRegistered.value = false;
     unregisterModal("Diary:Dialog");

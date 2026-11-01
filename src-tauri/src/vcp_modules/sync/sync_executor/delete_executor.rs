@@ -1,3 +1,4 @@
+use crate::vcp_modules::chat::{chat_focus::DeleteScope, chat_navigation::observe_target_deletion};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_types::{MessageDeleteDecision, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
@@ -68,6 +69,7 @@ impl DeleteExecutor {
         let db = app.state::<DbState>();
 
         let active_ids = soft_delete_topic_data(&db, key, deleted_at).await?;
+        observe_target_deletion(app, &DeleteScope::Topic(key.clone())).await;
 
         if let Some(turns) = app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
             turns.cancel(key);
@@ -294,6 +296,7 @@ mod tests {
         let queue = DbWriteQueue::new(&db_state, 9001, temp_dir.path().join("attachments"));
         assert!(app.manage(db_state));
         assert!(app.manage(AgentConfigState::new()));
+        assert!(app.manage(crate::vcp_modules::chat::voice_service::VoiceCallState::default()));
         for index in 0..9 {
             queue
                 .submit(DbWriteTask::Agent {
@@ -349,8 +352,28 @@ mod tests {
 
     #[tokio::test]
     async fn topic_delete_rolls_back_every_step_when_owner_hash_fails() {
+        use crate::vcp_modules::chat::{chat_focus::FocusTarget, voice_service::VoiceCallState};
+
         let db = test_db().await;
         let pool = db.pool.clone();
+        let app = tauri::test::mock_app();
+        app.manage(db);
+        app.manage(VoiceCallState::default());
+        let calls = app.state::<VoiceCallState>();
+        let (document, _) = calls.attach_chat_document().unwrap();
+        calls.begin_navigation(document, 1).unwrap();
+        let initial = calls
+            .commit_navigation(
+                document,
+                1,
+                FocusTarget::Topic {
+                    owner_type: "agent".into(),
+                    owner_id: "agent".into(),
+                    topic_id: "topic".into(),
+                },
+                Some("message".into()),
+            )
+            .unwrap();
         sqlx::query(
             "CREATE TRIGGER fail_owner_hash
              BEFORE UPDATE OF content_hash ON agents
@@ -360,7 +383,7 @@ mod tests {
         .await
         .expect("install failure trigger");
 
-        let error = soft_delete_topic_data(&db, &topic("topic"), 42)
+        let error = DeleteExecutor::soft_delete_topic(app.handle(), &topic("topic"), 42)
             .await
             .expect_err("late owner hash failure must abort delete");
         assert!(error.contains("owner hash failure"));
@@ -382,6 +405,28 @@ mod tests {
         assert!(topic_deleted_at.is_none());
         assert!(message_deleted_at.is_none());
         assert_eq!(active_count, 1);
+        assert_eq!(calls.document_focus(document).unwrap(), initial);
+
+        sqlx::query("DROP TRIGGER fail_owner_hash")
+            .execute(&pool)
+            .await
+            .unwrap();
+        DeleteExecutor::soft_delete_topic(app.handle(), &topic("topic"), 42)
+            .await
+            .unwrap();
+        let after = calls.document_focus(document).unwrap();
+        assert_eq!(
+            after.target,
+            FocusTarget::Owner {
+                owner_type: "agent".into(),
+                owner_id: "agent".into()
+            }
+        );
+        assert_eq!(after.anchor_id, None);
+        DeleteExecutor::soft_delete_topic(app.handle(), &topic("topic"), 43)
+            .await
+            .unwrap();
+        assert_eq!(calls.document_focus(document).unwrap(), after);
     }
 
     #[tokio::test]

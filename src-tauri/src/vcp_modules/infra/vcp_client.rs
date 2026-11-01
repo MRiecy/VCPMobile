@@ -2999,7 +2999,10 @@ async fn reconnect_chat_output<R: Runtime>(
     reconnect_chat_output_for_webview(app, connection_id, channel, None).await
 }
 
-fn is_current_webview<R: Runtime>(app: &AppHandle<R>, webview: &tauri::Webview<R>) -> bool {
+pub(crate) fn is_current_webview<R: Runtime>(
+    app: &AppHandle<R>,
+    webview: &tauri::Webview<R>,
+) -> bool {
     let Some(current) = app.get_webview_window(webview.label()) else {
         return false;
     };

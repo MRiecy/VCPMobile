@@ -4,6 +4,10 @@
 use crate::vcp_modules::agent_types::{
     AgentConfig, AgentListItem, AgentLocalPreferences, AgentLocalSettingsPatch,
 };
+use crate::vcp_modules::chat::{
+    chat_focus::DeleteScope, chat_navigation::observe_target_deletion,
+    voice_service::VoiceCallState,
+};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::group::group_types::GroupListItem;
@@ -13,7 +17,7 @@ use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::{DeleteTarget, OwnerType, SYNC_TOMBSTONE_HASH};
-use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
+use crate::vcp_modules::topic_types::{MessageKey, OwnerKey, Topic, TopicKey};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
@@ -347,10 +351,16 @@ pub async fn delete_agent_internal<R: Runtime>(
     agent_id: &str,
     requested_deleted_at: Option<i64>,
 ) -> Result<i64, String> {
+    let scope = DeleteScope::Owner(OwnerKey::new("agent", agent_id));
+    let calls = app_handle.state::<VoiceCallState>();
+    let reservation = requested_deleted_at
+        .is_none()
+        .then(|| calls.reserve_local_delete(scope.clone()))
+        .transpose()?;
     // 与 save/update 共享同一把实体锁，避免迟到写入在删除后重新填充 cache。
     // 锁条目有意保留：删除后若同 ID 被重新创建，仍必须沿用同一所有权串行化。
     let mutex = state.acquire_lock(agent_id).await;
-    let _lock = mutex.lock().await;
+    let owner_guard = mutex.lock().await;
 
     let db_state = app_handle.state::<DbState>();
     let now = requested_deleted_at.unwrap_or_else(crate::vcp_modules::infra::utils::now_millis);
@@ -394,6 +404,8 @@ pub async fn delete_agent_internal<R: Runtime>(
         Some(Some(existing)) => {
             tx.commit().await.map_err(|e| e.to_string())?;
             state.caches.remove(agent_id);
+            drop(owner_guard);
+            observe_target_deletion(app_handle, &scope).await;
             return Ok(existing);
         }
         Some(None) => false,
@@ -503,15 +515,17 @@ pub async fn delete_agent_internal<R: Runtime>(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    for key in active_keys {
-        crate::vcp_modules::vcp_client::discard_deleted_generation(app_handle, &key).await;
-    }
-
     state.caches.remove(agent_id);
     if !affected_group_ids.is_empty() {
         if let Some(group_state) = app_handle.try_state::<GroupManagerState>() {
             group_state.invalidate_cache();
         }
+    }
+    drop(owner_guard);
+    observe_target_deletion(app_handle, &scope).await;
+    drop(reservation);
+    for key in active_keys {
+        crate::vcp_modules::vcp_client::discard_deleted_generation(app_handle, &key).await;
     }
     Ok(now)
 }

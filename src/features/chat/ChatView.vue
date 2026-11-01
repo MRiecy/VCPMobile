@@ -19,6 +19,7 @@ import { ArrowDown, ListChecks, SlidersHorizontal } from "@lucide/vue";
 import VoiceCallControls from "./voice/VoiceCallControls.vue";
 import { useVoiceCallStore } from "./voice/voiceCallStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
+import { scrollToMessageById } from "../../core/utils/scrollToMessage";
 import { useChatScroll } from "../../core/composables/useChatScroll";
 import { openPresentationMenu } from "./presentationMenu";
 
@@ -124,14 +125,23 @@ const scrollToLatest = async (smooth = true) => {
 
 // 监听话题切换与智能体变更，触发历史加载与防御性状态清空
 watch(
-  () => sessionStore.currentConversationKey,
-  (key) => {
+  [() => sessionStore.currentConversationKey, () => sessionStore.acceptedWindow?.windowRevision],
+  async ([key, revision]) => {
     showScrollToBottom.value = false;
     resetChatScroll();
     if (key) {
       console.log(`[ChatView] Topic changed to ${key.topicId}, loading history...`);
       topicStore.markTopicAsRead(key.ownerId, key.ownerType, key.topicId);
-      historyStore.loadHistoryPaginated(
+      const anchor = sessionStore.acceptedWindow?.anchorId;
+      if (anchor) {
+        const result = await historyStore.loadHistoryAround(key.ownerId, key.ownerType, key.topicId, anchor);
+        await nextTick();
+        if (result === "loaded" && sessionStore.acceptedWindow?.windowRevision === revision) {
+          scrollToMessageById(anchor, { behavior: "instant" });
+        }
+        return;
+      }
+      await historyStore.loadHistoryPaginated(
         key.ownerId,
         key.ownerType,
         key.topicId,

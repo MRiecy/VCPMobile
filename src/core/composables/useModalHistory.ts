@@ -17,6 +17,7 @@ interface ModalInstance {
   opener: HTMLElement | null;
   route: string;
   canDismiss?: () => boolean;
+  canLeaveForNavigation?: () => boolean;
 }
 
 // Global stack to track open modals across the entire application
@@ -192,12 +193,13 @@ export function useModalHistory() {
    * @param id Unique identifier for the modal
    * @param closeHandler Callback to close the modal (triggered by back gesture)
    */
-  const registerModal = (id: string, closeHandler: () => boolean | void, surface?: () => HTMLElement | null, canDismiss?: () => boolean) => {
+  const registerModal = (id: string, closeHandler: () => boolean | void, surface?: () => HTMLElement | null, canDismiss?: () => boolean, canLeaveForNavigation?: () => boolean) => {
     // Avoid double registration
     const existing = modalStack.value.find(m => m.id === id);
     if (existing) {
       if (surface) existing.surface = surface;
       if (canDismiss) existing.canDismiss = canDismiss;
+      if (canLeaveForNavigation) existing.canLeaveForNavigation = canLeaveForNavigation;
       return;
     }
 
@@ -206,7 +208,7 @@ export function useModalHistory() {
 
     // Add to our LIFO stack
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    modalStack.value.push({ id, close: closeHandler, surface, canDismiss, opener, route: window.location.hash });
+    modalStack.value.push({ id, close: closeHandler, surface, canDismiss, canLeaveForNavigation, opener, route: window.location.hash });
     stackRevision += 1;
   };
 
@@ -253,6 +255,10 @@ export function useModalHistory() {
     registerModal,
     unregisterModal,
     modalStackLength: () => modalStack.value.length,
+    // Some back handlers start an asynchronous settings save. Only a dedicated
+    // read-only predicate can admit notification navigation past those surfaces.
+    canCloseAllModals: () => modalStack.value.every(modal =>
+      modal.canLeaveForNavigation ? modal.canLeaveForNavigation() : !modal.canDismiss),
     initRootHistory,
     closeTopModal
   };

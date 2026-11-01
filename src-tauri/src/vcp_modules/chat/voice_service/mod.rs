@@ -23,6 +23,7 @@ mod tts;
 mod wav;
 mod workers;
 
+pub(crate) use call::target_deleted;
 pub use call::{
     begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
     voice_call_list_inputs, voice_call_select_input, VoiceCallState,

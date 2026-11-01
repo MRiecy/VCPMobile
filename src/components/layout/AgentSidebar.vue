@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
+import { useNotificationStore } from '../../core/stores/notification';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import { useTopicStore } from '../../core/stores/topicListManager';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
@@ -44,13 +45,15 @@ useSidebarSwipe(sidebarRef, {
 });
 
 const handleSelectItem = async (item: AssistantListItem) => {
-  activeTab.value = 'topics';
-  if (item) {
-    // selectItem 负责加载列表并恢复该 Owner 的上次活跃话题。
-    try {
-      await sessionStore.selectItem(item);
-    } catch {
-      // Topic Store 已统一显示加载失败提示。
+  const intent = sessionStore.beginNavigation();
+  try {
+    const result = await sessionStore.selectItem(item, intent);
+    if (!sessionStore.isNavigationCurrent(intent)) return;
+    if (result === 'accepted') activeTab.value = 'topics';
+    else sessionStore.notifyNavigationResult(result);
+  } catch (error) {
+    if (sessionStore.isNavigationCurrent(intent)) {
+      useNotificationStore().addNotification({ type: 'error', title: '打开会话失败', message: String(error), toastOnly: true });
     }
   }
 };

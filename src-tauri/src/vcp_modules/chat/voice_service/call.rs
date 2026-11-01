@@ -5,6 +5,7 @@ use super::{
     input, network, tts,
 };
 use crate::vcp_modules::{
+    chat::chat_focus::{DeleteScope, FocusSnapshot, FocusTarget, Navigation, CALL_IN_PROGRESS},
     chat::voice_submission::prepare_voice_submission,
     chat_manager::ChatMessage,
     message_service::MessageWriteResultDto,
@@ -33,6 +34,8 @@ pub struct VoiceCallSnapshot {
     pub target: TopicKey,
     pub revision: u64,
     pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<&'static str>,
     pub mic_state: &'static str,
     pub mic_stop_reason: Option<String>,
     pub input_state: &'static str,
@@ -227,6 +230,7 @@ impl CallInner {
 }
 struct Call {
     id: String,
+    target: TopicKey,
     input: Arc<CallInput>,
     inner: Mutex<CallInner>,
     vad_config: OnceCell<VoiceVadConfig>,
@@ -249,13 +253,134 @@ impl Call {
 #[derive(Default)]
 struct Registry {
     current: Option<Arc<Call>>,
+    last_ended: Option<Arc<Call>>,
     retired: VecDeque<String>,
+    navigation: Navigation,
+}
+
+impl Registry {
+    fn retire(&mut self, id: &str) -> Option<Arc<Call>> {
+        // Hangup can reach Rust before the start command is polled.
+        if !self.retired.iter().any(|old| old == id) {
+            if self.retired.len() == 128 {
+                self.retired.pop_front();
+            }
+            self.retired.push_back(id.into());
+        }
+        if !self.current.as_ref().is_some_and(|call| call.id == id) {
+            return None;
+        }
+        self.last_ended.clone_from(&self.current);
+        self.current.take()
+    }
 }
 #[derive(Default)]
 pub struct VoiceCallState {
     registry: Mutex<Registry>,
     revision: AtomicU64,
     generation: AtomicU64,
+}
+
+pub(crate) struct DeleteLease<'a> {
+    state: &'a VoiceCallState,
+    scope: DeleteScope,
+}
+
+impl Drop for DeleteLease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.state.registry.lock() {
+            registry.navigation.release_delete(&self.scope);
+        }
+    }
+}
+
+impl VoiceCallState {
+    fn registry(&self) -> Result<std::sync::MutexGuard<'_, Registry>, String> {
+        self.registry.lock().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn attach_chat_document(&self) -> Result<(u64, FocusSnapshot), String> {
+        Ok(self.registry()?.navigation.attach())
+    }
+
+    pub(crate) fn document_focus(&self, document: u64) -> Result<FocusSnapshot, String> {
+        self.registry()?.navigation.document_focus(document)
+    }
+
+    pub(crate) fn current_document_focus(&self, document: u64) -> Result<FocusSnapshot, String> {
+        self.registry()?.navigation.current_document_focus(document)
+    }
+
+    pub(crate) fn begin_restore(
+        &self,
+        document: u64,
+        scope: Option<DeleteScope>,
+    ) -> Result<FocusSnapshot, String> {
+        self.registry()?.navigation.begin_restore(document, scope)
+    }
+
+    pub(crate) fn commit_restore(
+        &self,
+        document: u64,
+        target: FocusTarget,
+    ) -> Result<FocusSnapshot, String> {
+        self.registry()?.navigation.commit_restore(document, target)
+    }
+
+    pub(crate) fn begin_navigation(
+        &self,
+        document: u64,
+        sequence: u64,
+    ) -> Result<FocusSnapshot, String> {
+        self.registry()?.navigation.begin(document, sequence)
+    }
+
+    pub(crate) fn validate_navigation(
+        &self,
+        document: u64,
+        sequence: u64,
+        scope: Option<DeleteScope>,
+    ) -> Result<(), String> {
+        self.registry()?
+            .navigation
+            .validate(document, sequence, scope)
+    }
+
+    pub(crate) fn commit_navigation(
+        &self,
+        document: u64,
+        sequence: u64,
+        target: FocusTarget,
+        anchor: Option<String>,
+    ) -> Result<FocusSnapshot, String> {
+        let mut registry = self.registry()?;
+        let Registry {
+            navigation,
+            current,
+            ..
+        } = &mut *registry;
+        navigation.commit(
+            document,
+            sequence,
+            target,
+            anchor,
+            current.as_ref().map(|call| &call.target),
+        )
+    }
+
+    pub(crate) fn reserve_local_delete(
+        &self,
+        scope: DeleteScope,
+    ) -> Result<DeleteLease<'_>, String> {
+        let mut registry = self.registry()?;
+        let Registry {
+            navigation,
+            current,
+            ..
+        } = &mut *registry;
+        navigation.reserve_delete(scope.clone(), current.as_ref().map(|call| &call.target))?;
+        Ok(DeleteLease { state: self, scope })
+    }
 }
 
 fn call<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<Arc<Call>> {
@@ -273,10 +398,13 @@ fn publish<R: Runtime>(app: &AppHandle<R>, inner: &mut CallInner) {
     let Some(state) = app.try_state::<VoiceCallState>() else {
         return;
     };
-    if inner.generation != state.generation.load(Ordering::Acquire) {
+    // Allocate first: a late publisher from the previous call can never obtain
+    // a deliverable revision after the new call's first snapshot.
+    let revision = state.revision.fetch_add(1, Ordering::SeqCst) + 1;
+    if inner.generation != state.generation.load(Ordering::SeqCst) {
         return;
     }
-    inner.snapshot.revision = state.revision.fetch_add(1, Ordering::Relaxed) + 1;
+    inner.snapshot.revision = revision;
     let _ = app.emit("vcp-voice-call", &inner.snapshot);
 }
 
@@ -284,34 +412,21 @@ fn reserve_conversation<R: Runtime>(
     app: AppHandle<R>,
     call_id: String,
     target: TopicKey,
-) -> Result<VoiceCallSnapshot, String> {
+    document: u64,
+    expected_revision: u64,
+) -> Result<Arc<Call>, String> {
     if call_id.is_empty() || call_id.len() > 128 || !target.is_valid() {
         return Err("语音通话目标无效。".into());
     }
-    let state = app.state::<VoiceCallState>();
-    let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
-    if registry.retired.contains(&call_id) {
-        return Err(network::CANCELLED.into());
-    }
-    if let Some(current) = &registry.current {
-        let inner = current.inner.lock().map_err(|error| error.to_string())?;
-        if inner.snapshot.active {
-            return if current.id == call_id && inner.snapshot.target == target {
-                Ok(inner.snapshot.clone())
-            } else {
-                Err("已有语音通话正在进行。".into())
-            };
-        }
-    }
     let input = Arc::new(CallInput::new(call_id.clone()));
-    input::register_call(&app, input.clone())?;
-    let mut inner = CallInner {
-        generation: state.generation.fetch_add(1, Ordering::AcqRel) + 1,
+    let inner = CallInner {
+        generation: 0,
         snapshot: VoiceCallSnapshot {
             call_id: call_id.clone(),
-            target,
+            target: target.clone(),
             revision: 0,
             active: true,
+            end_reason: None,
             mic_state: "closed",
             mic_stop_reason: None,
             input_state: "idle",
@@ -331,15 +446,45 @@ fn reserve_conversation<R: Runtime>(
         last_submission: None,
         work: None,
     };
-    publish(&app, &mut inner);
-    let snapshot = inner.snapshot.clone();
-    registry.current = Some(Arc::new(Call {
+    let mut snapshot = inner.snapshot.clone();
+    let mut call = Arc::new(Call {
         id: call_id,
+        target,
         input,
         inner: Mutex::new(inner),
         vad_config: OnceCell::new(),
-    }));
-    Ok(snapshot)
+    });
+    // The candidate is still private. Stamp it without acquiring a second
+    // lock, then publish its pointer under the same lock that admits navigation.
+    let candidate = Arc::get_mut(&mut call)
+        .ok_or("通话预留对象已被共享。")?
+        .inner
+        .get_mut()
+        .map_err(|error| error.to_string())?;
+    let state = app.state::<VoiceCallState>();
+    let mut registry = state.registry()?;
+    if registry.retired.contains(&snapshot.call_id) {
+        return Err(network::CANCELLED.into());
+    }
+    registry
+        .navigation
+        .check_call(document, expected_revision, &snapshot.target)?;
+    if let Some(current) = &registry.current {
+        return if current.id == snapshot.call_id && current.target == snapshot.target {
+            Ok(current.clone())
+        } else {
+            Err(CALL_IN_PROGRESS.into())
+        };
+    }
+    candidate.generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    snapshot.revision = state.revision.fetch_add(1, Ordering::SeqCst) + 1;
+    candidate.snapshot.revision = snapshot.revision;
+    let previous = registry.last_ended.take();
+    registry.current = Some(call.clone());
+    drop(registry);
+    drop(previous);
+    let _ = app.emit("vcp-voice-call", snapshot);
+    Ok(call)
 }
 
 fn retire_conversation<R: Runtime>(
@@ -347,20 +492,8 @@ fn retire_conversation<R: Runtime>(
     call_id: &str,
 ) -> Result<Option<Arc<Call>>, String> {
     let state = app.state::<VoiceCallState>();
-    let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
-    // End can run before begin is polled. Record it under the same admission
-    // lock as reserve, even when no matching call has been registered yet.
-    if !registry.retired.iter().any(|id| id == call_id) {
-        if registry.retired.len() == 128 {
-            registry.retired.pop_front();
-        }
-        registry.retired.push_back(call_id.into());
-    }
-    Ok(registry
-        .current
-        .as_ref()
-        .filter(|call| call.id == call_id)
-        .cloned())
+    let mut registry = state.registry()?;
+    Ok(registry.retire(call_id))
 }
 
 #[tauri::command]
@@ -368,12 +501,20 @@ pub async fn begin_voice_conversation(
     app: AppHandle,
     call_id: String,
     target: TopicKey,
+    document_id: u64,
+    expected_focus_revision: u64,
 ) -> Result<VoiceCallSnapshot, String> {
-    reserve_conversation(app.clone(), call_id.clone(), target)?;
-    let current = call(&app, &call_id).ok_or_else(|| network::CANCELLED.to_string())?;
+    let current = reserve_conversation(
+        app.clone(),
+        call_id.clone(),
+        target,
+        document_id,
+        expected_focus_revision,
+    )?;
     let result = async {
         // Reserve before the first await so hangup can revoke an initializing
         // call. Repeated begin/microphone intents keep the same VAD snapshot.
+        input::register_call(&app, current.input.clone())?;
         tts::stop_bubble_narration(&app).await?;
         current
             .vad_config
@@ -390,12 +531,8 @@ pub async fn begin_voice_conversation(
     }
     .await;
     if let Err(error) = result {
-        let _ = end_voice_conversation(app.clone(), call_id.clone()).await;
-        if let Some(call) = call(&app, &call_id) {
-            if let Ok(mut inner) = call.inner.lock() {
-                inner.snapshot.error = Some(error.clone());
-                publish(&app, &mut inner);
-            }
+        if let Some(retired) = retire_conversation(&app, &call_id)? {
+            let _ = finish_call(&app, retired, None, Some(error.clone())).await;
         }
         return Err(error);
     }
@@ -404,49 +541,48 @@ pub async fn begin_voice_conversation(
         let _ = tauri_plugin_vcp_mobile::voice::end_voice_call(app, call_id).await;
         return Err(error);
     }
-    get_voice_conversation_snapshot(app)?.ok_or_else(|| network::CANCELLED.into())
+    let inner = current.inner.lock().map_err(|error| error.to_string())?;
+    if !inner.snapshot.active || current.input.cancel.is_cancelled() {
+        return Err(network::CANCELLED.into());
+    }
+    Ok(inner.snapshot.clone())
 }
 
 pub(super) fn is_active<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
     let Some(state) = app.try_state::<VoiceCallState>() else {
         return Ok(false);
     };
-    let current = state
-        .registry
-        .lock()
-        .map_err(|e| e.to_string())?
-        .current
-        .clone();
-    current
-        .map(|call| {
-            call.inner
-                .lock()
-                .map(|inner| inner.snapshot.active)
-                .map_err(|e| e.to_string())
-        })
-        .transpose()
-        .map(|active| active.unwrap_or(false))
+    let registry = state.registry()?;
+    Ok(registry.current.is_some())
 }
 
 #[tauri::command]
-pub fn get_voice_conversation_snapshot(
-    app: AppHandle,
+pub fn get_voice_conversation_snapshot<R: Runtime>(
+    app: AppHandle<R>,
 ) -> Result<Option<VoiceCallSnapshot>, String> {
     let state = app.state::<VoiceCallState>();
-    let current = state
-        .registry
-        .lock()
-        .map_err(|error| error.to_string())?
-        .current
-        .clone();
+    let (current, active) = {
+        let registry = state.registry()?;
+        (
+            registry
+                .current
+                .as_ref()
+                .or(registry.last_ended.as_ref())
+                .cloned(),
+            registry.current.is_some(),
+        )
+    };
     current
         .map(|call| {
             call.inner
                 .lock()
-                .map(|inner| inner.snapshot.clone())
+                // Retiring releases the focus lock before publishing the final
+                // call snapshot. A recovering view must not revive that call.
+                .map(|inner| (active || !inner.snapshot.active).then(|| inner.snapshot.clone()))
                 .map_err(|error| error.to_string())
         })
         .transpose()
+        .map(Option::flatten)
 }
 
 #[tauri::command]
@@ -454,10 +590,54 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
     let Some(call) = retire_conversation(&app, &call_id)? else {
         return Ok(());
     };
+    finish_call(&app, call, None, None).await
+}
+
+pub(crate) async fn target_deleted<R: Runtime>(
+    app: &AppHandle<R>,
+    scope: &DeleteScope,
+) -> Result<(), String> {
+    let Some(state) = app.try_state::<VoiceCallState>() else {
+        return Ok(());
+    };
+    let (focus, call) = {
+        let mut registry = state.registry()?;
+        let focus = registry.navigation.deleted(scope);
+        let id = registry
+            .current
+            .as_ref()
+            .filter(|call| scope.contains(&call.target))
+            .map(|call| call.id.clone());
+        (focus, id.and_then(|id| registry.retire(&id)))
+    };
+    if let Some(focus) = focus {
+        let _ = app.emit("vcp-chat-focus", focus);
+    }
+    if let Some(call) = call {
+        finish_call(app, call, Some("target_deleted"), None).await?;
+    }
+    Ok(())
+}
+
+async fn finish_call<R: Runtime>(
+    app: &AppHandle<R>,
+    call: Arc<Call>,
+    reason: Option<&'static str>,
+    error: Option<String>,
+) -> Result<(), String> {
+    let call_id = call.id.clone();
+    let startup_failed = error.is_some();
     let ids = {
         let mut inner = call.inner.lock().map_err(|error| error.to_string())?;
         call.input.cancel.cancel();
         inner.snapshot.active = false;
+        inner.snapshot.end_reason = reason;
+        if reason == Some("target_deleted") {
+            inner.snapshot.notice = Some("通话目标已删除。".into());
+        }
+        if error.is_some() {
+            inner.snapshot.error = error;
+        }
         inner.snapshot.speaking_message_id = None;
         inner.snapshot.mic_state = "closed";
         inner.snapshot.input_state = "idle";
@@ -473,11 +653,11 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
             ids.push(reply.tts_id.clone());
             inner.snapshot.reply_state = "cancelled";
         }
-        publish(&app, &mut inner);
+        publish(app, &mut inner);
         ids
     };
     for id in &ids {
-        tts::request_stop(&app, id);
+        tts::request_stop(app, id);
     }
     // Revoke input work immediately. The native call route stays alive until
     // playback stop acknowledges its physical fade/cleanup, then capture and
@@ -495,9 +675,11 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
         result = route_result;
     }
     if let Err(error) = &result {
-        if let Ok(mut inner) = call.inner.lock() {
+        if startup_failed {
+            log::warn!("[VoiceCall] Cleanup after failed start: {error}");
+        } else if let Ok(mut inner) = call.inner.lock() {
             inner.snapshot.error = Some(error.clone());
-            publish(&app, &mut inner);
+            publish(app, &mut inner);
         }
     }
     result
@@ -1004,6 +1186,7 @@ pub(super) fn tts_status<R: Runtime>(
 mod tests {
     use super::super::batch::BatchCompletion;
     use super::*;
+    use crate::vcp_modules::chat::chat_focus::{DELETING, STALE};
 
     fn inner() -> CallInner {
         CallInner {
@@ -1013,6 +1196,7 @@ mod tests {
                 target: TopicKey::new("agent", "a", "t"),
                 revision: 0,
                 active: true,
+                end_reason: None,
                 mic_state: "closed",
                 mic_stop_reason: None,
                 input_state: "idle",
@@ -1058,10 +1242,42 @@ mod tests {
         });
     }
 
+    fn focus_topic(
+        state: &VoiceCallState,
+        document: u64,
+        sequence: u64,
+        topic: &TopicKey,
+    ) -> Result<FocusSnapshot, String> {
+        state.begin_navigation(document, sequence)?;
+        state.validate_navigation(document, sequence, Some(DeleteScope::Topic(topic.clone())))?;
+        state.commit_navigation(
+            document,
+            sequence,
+            FocusTarget::Topic {
+                owner_type: topic.owner_type.clone(),
+                owner_id: topic.owner_id.clone(),
+                topic_id: topic.topic_id.clone(),
+            },
+            None,
+        )
+    }
+
+    fn open_topic<R: Runtime>(app: &AppHandle<R>, topic: &TopicKey) -> (u64, u64) {
+        let state = app.state::<VoiceCallState>();
+        let (document, _) = state.attach_chat_document().unwrap();
+        (
+            document,
+            focus_topic(&state, document, 1, topic)
+                .unwrap()
+                .focus_revision,
+        )
+    }
+
     #[test]
     fn input_requires_a_ready_call_and_rejects_hangup() {
         let call = Call {
             id: "call".into(),
+            target: TopicKey::new("agent", "a", "t"),
             input: Arc::new(CallInput::new("call".into())),
             inner: Mutex::new(inner()),
             vad_config: OnceCell::new(),
@@ -1081,24 +1297,44 @@ mod tests {
         app.manage(VoiceCallState::default());
         app.manage(super::super::VoiceServiceState::default());
         let target = TopicKey::new("agent", "a", "t");
+        let (document, revision) = open_topic(app.handle(), &target);
 
         // This is the synchronous admission step used by the end command.
         assert!(retire_conversation(app.handle(), "cancelled")
             .unwrap()
             .is_none());
-        let late = reserve_conversation(app.handle().clone(), "cancelled".into(), target.clone());
+        let late = reserve_conversation(
+            app.handle().clone(),
+            "cancelled".into(),
+            target.clone(),
+            document,
+            revision,
+        );
         assert!(matches!(late, Err(error) if error == network::CANCELLED));
 
-        let next =
-            reserve_conversation(app.handle().clone(), "next".into(), target.clone()).unwrap();
-        assert!(next.active);
+        let next = reserve_conversation(
+            app.handle().clone(),
+            "next".into(),
+            target.clone(),
+            document,
+            revision,
+        )
+        .unwrap();
+        assert!(next.inner.lock().unwrap().snapshot.active);
         assert!(retire_conversation(app.handle(), "cancelled")
             .unwrap()
             .is_none());
         let current = call(app.handle(), "next").unwrap();
         assert!(!current.input.cancel.is_cancelled());
         assert!(current.inner.lock().unwrap().snapshot.active);
-        assert!(reserve_conversation(app.handle().clone(), "next".into(), target).is_ok());
+        assert!(reserve_conversation(
+            app.handle().clone(),
+            "next".into(),
+            target,
+            document,
+            revision
+        )
+        .is_ok());
         assert_eq!(
             app.state::<VoiceCallState>()
                 .registry
@@ -1111,14 +1347,162 @@ mod tests {
     }
 
     #[test]
+    fn navigation_and_dial_share_admission_before_native_setup() {
+        use std::sync::Barrier;
+
+        let app = tauri::test::mock_app();
+        app.manage(VoiceCallState::default());
+        let state = app.state::<VoiceCallState>();
+        let a = TopicKey::new("agent", "same", "t");
+        let b = TopicKey::new("group", "same", "t");
+        let (document, first_revision) = open_topic(app.handle(), &a);
+        let handle = app.handle();
+
+        let reserved = Barrier::new(2);
+        std::thread::scope(|threads| {
+            let dial = threads.spawn(|| {
+                let call = reserve_conversation(
+                    handle.clone(),
+                    "first".into(),
+                    a.clone(),
+                    document,
+                    first_revision,
+                );
+                reserved.wait();
+                call
+            });
+            reserved.wait();
+            assert_eq!(
+                focus_topic(&state, document, 2, &b),
+                Err(CALL_IN_PROGRESS.into())
+            );
+            let call = dial.join().unwrap().unwrap();
+            assert!(call.vad_config.get().is_none());
+            assert!(!call.input.cancel.is_cancelled());
+        });
+        state.begin_navigation(document, 3).unwrap();
+        let focus = state
+            .commit_navigation(
+                document,
+                3,
+                state.current_document_focus(document).unwrap().target,
+                Some("mid".into()),
+            )
+            .unwrap();
+        assert_eq!(focus.focus_revision, first_revision);
+        assert_eq!(focus.anchor_id.as_deref(), Some("mid"));
+        assert!(retire_conversation(app.handle(), "first")
+            .unwrap()
+            .is_some());
+        assert!(get_voice_conversation_snapshot(handle.clone())
+            .unwrap()
+            .is_none());
+
+        let switched = Barrier::new(2);
+        std::thread::scope(|threads| {
+            let late_dial = threads.spawn(|| {
+                switched.wait();
+                reserve_conversation(
+                    handle.clone(),
+                    "late".into(),
+                    a.clone(),
+                    document,
+                    first_revision,
+                )
+            });
+            let visit_b = focus_topic(&state, document, 4, &b);
+            let revisit_a = focus_topic(&state, document, 5, &a);
+            switched.wait();
+            visit_b.unwrap();
+            revisit_a.unwrap();
+            assert!(matches!(late_dial.join().unwrap(), Err(error) if error == STALE));
+        });
+        let (new_document, focus) = state.attach_chat_document().unwrap();
+        assert_eq!(state.document_focus(new_document).unwrap(), focus);
+        assert!(reserve_conversation(
+            app.handle().clone(),
+            "old-view".into(),
+            a.clone(),
+            document,
+            focus.focus_revision
+        )
+        .is_err());
+        // A late ticket issued for a destroyed document does not acquire focus.
+        let _unused = state.attach_chat_document().unwrap();
+        assert!(reserve_conversation(
+            app.handle().clone(),
+            "new-view".into(),
+            a,
+            new_document,
+            focus.focus_revision
+        )
+        .is_ok());
+    }
+
+    #[tokio::test]
+    async fn deletion_reserves_the_exact_target_and_only_a_committed_tombstone_ends_its_call() {
+        use crate::vcp_modules::topic_types::OwnerKey;
+
+        let app = tauri::test::mock_app();
+        app.manage(VoiceCallState::default());
+        app.manage(super::super::VoiceServiceState::default());
+        let state = app.state::<VoiceCallState>();
+        let a = TopicKey::new("agent", "same", "t");
+        let scope = DeleteScope::Topic(a.clone());
+        let owner = DeleteScope::Owner(OwnerKey::new("agent", "same"));
+        let other = DeleteScope::Topic(TopicKey::new("group", "same", "t"));
+        let (document, revision) = open_topic(app.handle(), &a);
+        {
+            let _uncommitted = state.reserve_local_delete(owner.clone()).unwrap();
+            assert!(
+                matches!(reserve_conversation(app.handle().clone(), "blocked".into(), a.clone(), document, revision),
+                Err(error) if error == DELETING)
+            );
+        }
+        let active =
+            reserve_conversation(app.handle().clone(), "call".into(), a, document, revision)
+                .unwrap();
+        assert!(
+            matches!(state.reserve_local_delete(scope.clone()), Err(error) if error == CALL_IN_PROGRESS)
+        );
+        assert!(
+            matches!(state.reserve_local_delete(owner), Err(error) if error == CALL_IN_PROGRESS)
+        );
+        let _unrelated = state.reserve_local_delete(other.clone()).unwrap();
+        target_deleted(app.handle(), &other).await.unwrap();
+        assert!(!active.input.cancel.is_cancelled());
+        // Host native teardown reports unsupported; logical deletion is already final.
+        let _ = target_deleted(app.handle(), &scope).await;
+        assert!(active.input.cancel.is_cancelled());
+        let terminal = get_voice_conversation_snapshot(app.handle().clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.end_reason, Some("target_deleted"));
+        assert!(!terminal.active);
+        assert!(matches!(
+            state.current_document_focus(document).unwrap().target,
+            FocusTarget::Owner { .. }
+        ));
+        target_deleted(app.handle(), &scope).await.unwrap();
+        assert_eq!(
+            active.inner.lock().unwrap().snapshot.revision,
+            terminal.revision
+        );
+    }
+
+    #[test]
     fn capture_snapshot_survives_view_loss_and_late_completions_without_ending_the_call() {
         let app = tauri::test::mock_app();
         app.manage(VoiceCallState::default());
         app.manage(super::super::VoiceServiceState::default());
+        let target = TopicKey::new("agent", "a", "t");
+        let (document, revision) = open_topic(app.handle(), &target);
         reserve_conversation(
             app.handle().clone(),
             "call".into(),
-            TopicKey::new("agent", "a", "t"),
+            target,
+            document,
+            revision,
         )
         .unwrap();
         let current = call(app.handle(), "call").unwrap();
@@ -1240,6 +1624,7 @@ mod tests {
         app.manage(super::super::VoiceServiceState::default());
         app.manage(ActiveGroupTurns::default());
         let target = TopicKey::new("group", "g", "t");
+        let (document, revision) = open_topic(app.handle(), &target);
         let old = app
             .state::<ActiveGroupTurns>()
             .try_acquire(target.clone())
@@ -1248,7 +1633,14 @@ mod tests {
             .state::<ActiveGroupTurns>()
             .try_acquire(TopicKey::new("group", "g", "other"))
             .unwrap();
-        reserve_conversation(app.handle().clone(), "call".into(), target).unwrap();
+        reserve_conversation(
+            app.handle().clone(),
+            "call".into(),
+            target,
+            document,
+            revision,
+        )
+        .unwrap();
         let current = call(app.handle(), "call").unwrap();
         begin_speech(app.handle(), &current.input).unwrap();
         assert!(old.is_cancelled());

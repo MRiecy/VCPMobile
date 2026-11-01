@@ -213,54 +213,32 @@ watch(
   { immediate: true },
 );
 
-let selectionRevision = 0;
-let selectionFrame = 0;
-let finishPaintWait: ((ready: boolean) => void) | null = null;
-
-const cancelPendingSelection = () => {
-  selectionRevision++;
-  cancelAnimationFrame(selectionFrame);
-  selectionFrame = 0;
-  finishPaintWait?.(false);
-  finishPaintWait = null;
-};
-
-const waitForDrawerPaint = () => new Promise<boolean>((resolve) => {
-  finishPaintWait = resolve;
-  // rAF 在绘制前执行；跨两帧给关闭 class 一次实际绘制机会。
-  selectionFrame = requestAnimationFrame(() => {
-    selectionFrame = requestAnimationFrame(() => {
-      selectionFrame = 0;
-      finishPaintWait = null;
-      resolve(true);
-    });
-  });
-});
+let disposed = false;
+let pendingIntent: number | null = null;
 
 const selectTopic = async (
   itemId: string,
   ownerType: "agent" | "group",
   topicId: string,
 ) => {
-  cancelPendingSelection();
-  const revision = selectionRevision;
-  const epoch = sessionStore.sessionEpoch;
-  const isCurrent = () => revision === selectionRevision && epoch === sessionStore.sessionEpoch;
-  const closingDrawer = layoutStore.leftDrawerOpen && !window.matchMedia('(min-width: 1024px)').matches;
-  layoutStore.setLeftDrawer(false);
-  if (closingDrawer) {
-    await nextTick();
-    if (!isCurrent() || !await waitForDrawerPaint()) return;
-  }
-  if (!isCurrent()) return;
-
-  if (router.currentRoute.value.path !== "/chat") {
-    await router.push("/chat");
+  const intent = sessionStore.beginNavigation();
+  pendingIntent = intent;
+  const isCurrent = () => !disposed && sessionStore.isNavigationCurrent(intent);
+  try {
+    const result = await sessionStore.selectTopicById(itemId, ownerType, topicId, intent);
     if (!isCurrent()) return;
+    if (result !== "accepted") {
+      sessionStore.notifyNavigationResult(result);
+      return;
+    }
+    layoutStore.setLeftDrawer(false);
+    if (router.currentRoute.value.path !== "/chat") await router.push("/chat");
+    if (isCurrent()) emit("select-topic");
+  } catch (error) {
+    if (isCurrent()) notificationStore.addNotification({ type: 'error', title: '打开话题失败', message: String(error), toastOnly: true });
+  } finally {
+    if (pendingIntent === intent) pendingIntent = null;
   }
-
-  await sessionStore.selectTopicById(itemId, ownerType, topicId);
-  emit("select-topic");
 };
 
 // 话题搜索逻辑集成
@@ -279,7 +257,8 @@ watch(
 );
 
 onUnmounted(() => {
-  cancelPendingSelection();
+  disposed = true;
+  if (pendingIntent !== null && sessionStore.isNavigationCurrent(pendingIntent)) sessionStore.beginNavigation();
   topicListStore.searchTerm = "";
 });
 </script>

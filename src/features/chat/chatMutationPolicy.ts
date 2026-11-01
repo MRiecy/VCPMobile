@@ -48,3 +48,11 @@ export function allowChatMutation(scope: ChatMutationScope): boolean {
   });
   return false;
 }
+
+export function notifyCallDeletionBlocked(error: unknown): boolean {
+  if ((error instanceof Error ? error.message : String(error)) !== 'call_in_progress') return false;
+  useNotificationStore().addNotification({
+    type: 'info', title: '通话中无法删除', message: '请先挂断正在进行的语音通话。', toastOnly: true,
+  });
+  return true;
+}

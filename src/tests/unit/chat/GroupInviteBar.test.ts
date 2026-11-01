@@ -24,7 +24,7 @@ const mountBar = async (
   ];
 
   const sessionStore = useChatSessionStore();
-  sessionStore.currentSelectedItem = item;
+  sessionStore.setConversation(item, null);
 
   await nextTick();
   return wrapper;

@@ -10,7 +10,7 @@ import type { TopicDto } from "../types/assistant";
 import { parseLocalPreferenceObject } from "../preferences/localPreference";
 
 import { useNotificationStore } from "./notification";
-import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
+import { allowChatMutation, notifyCallDeletionBlocked } from "../../features/chat/chatMutationPolicy";
 
 export type TopicSortMode = "created" | "updated";
 export type Topic = TopicDto & { updatedAt: number };
@@ -338,7 +338,6 @@ export const useTopicStore = defineStore("topic", () => {
           owner_type,
           new Set(requestTopics.keys()),
         );
-        sessionStore.reconcileCurrentConversation(topics.value);
       }
 
       console.log(
@@ -458,6 +457,9 @@ export const useTopicStore = defineStore("topic", () => {
     topicId: string,
   ) => {
     if (!allowChatMutation({ ownerId, ownerType, topicId })) return;
+    const key = sessionStore.currentConversationKey;
+    const navigation = key?.ownerId === ownerId && key.ownerType === ownerType && key.topicId === topicId
+      ? sessionStore.beginNavigation() : null;
     try {
       console.log(`[TopicStore] Deleting topic ${topicId}`);
       const replacementDto = await invoke<TopicDto | null>("delete_topic", {
@@ -495,19 +497,18 @@ export const useTopicStore = defineStore("topic", () => {
         toastOnly: true,
       });
 
-      // 如果删除的是当前选中的话题，按剩余列表恢复或清空当前 Topic。
-      if (
-        sessionStore.currentSelectedItem?.id === ownerId &&
-        sessionStore.currentSelectedItem?.type === ownerType &&
-        sessionStore.currentTopicId === topicId
-      ) {
-        if (replacement) {
-          await sessionStore.selectTopicById(ownerId, ownerType, replacement.id);
-        } else {
-          sessionStore.reconcileCurrentConversation(topics.value);
+      if (replacement && navigation !== null && sessionStore.isNavigationCurrent(navigation)) {
+        try {
+          const result = await sessionStore.selectTopicById(ownerId, ownerType, replacement.id, navigation);
+          sessionStore.notifyNavigationResult(result);
+        } catch (error) {
+          if (sessionStore.isNavigationCurrent(navigation)) notificationStore.addNotification({
+            type: "error", title: "无法打开替代话题", message: String(error), toastOnly: true,
+          });
         }
       }
     } catch (e) {
+      if (notifyCallDeletionBlocked(e)) return;
       console.error("[TopicStore] Failed to delete topic:", e);
       throw e;
     }
@@ -728,6 +729,17 @@ export const useTopicStore = defineStore("topic", () => {
     topics.value = [...topics.value];
   };
 
+  const projectWindowActivity = (
+    ownerId: string, ownerType: string, topicId: string,
+    activity: { msgCount: number; updatedAt: number; unread: boolean; unreadCount: number },
+  ) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
+    const index = topics.value.findIndex(topic => topic.id === topicId);
+    if (index === -1) return;
+    topics.value[index] = { ...topics.value[index], ...activity };
+    reorderTopics();
+  };
+
   /**
    * 标记话题为已读 (清空未读数并取消未读标记)
    */
@@ -749,6 +761,7 @@ export const useTopicStore = defineStore("topic", () => {
     isTopicPinned,
     toggleTopicPinned,
     setTopicUpdatedAt,
+    projectWindowActivity,
     loadTopicList,
     createTopic,
     deleteTopic,

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import { createPinia, disposePinia, type Pinia } from 'pinia';
 import piniaPluginPersistedstate from 'pinia-plugin-persistedstate';
@@ -59,6 +59,16 @@ function serveGroupTopics(topics: TopicDto[]) {
 beforeEach(() => {
   localStorage.clear();
   mockInvoke('get_assistants_snapshot', () => ownerSnapshot());
+  let revision = 0;
+  const empty = { target: { kind: 'welcome' }, focusRevision: 0, windowRevision: 0, anchorId: null };
+  mockInvoke('connect_chat_view', () => ({ documentId: 1, focus: empty }));
+  mockInvoke('register_chat_navigation_intent', () => ({ focus: empty }));
+  mockInvoke('request_chat_navigation', args => ({
+    status: 'accepted', focus: { target: args?.target, focusRevision: ++revision, windowRevision: revision, anchorId: args?.anchorId ?? null },
+  }));
+  mockInvoke('restore_chat_view', args => ({
+    status: 'accepted', focus: { target: args?.hint, focusRevision: ++revision, windowRevision: revision, anchorId: null },
+  }));
 });
 
 afterEach(() => {
@@ -68,7 +78,41 @@ afterEach(() => {
 });
 
 describe('real Pinia persisted-state conversation restoration', () => {
-  it('repairs malformed preference leaves before consumers run and preserves valid references', () => {
+  it('restores the admitted call topic and anchor ahead of a stale local preference', async () => {
+    localStorage.setItem('chatSession', JSON.stringify({
+      currentSelectedItem: { id: ownerId, type: 'group' }, currentTopicId: 'stale', lastActiveTopicMap: {},
+    }));
+    mockInvoke('restore_chat_view', args => {
+      expect(args?.hint).toMatchObject({ topicId: 'stale' });
+      return { status: 'accepted', focus: { target: { kind: 'topic', ownerId, ownerType: 'agent', topicId: 'call' },
+        anchorId: 'older-message', focusRevision: 3, windowRevision: 8 } };
+    });
+    const { session } = startFrontend();
+    await session.restoreFocus();
+    expect(session.currentConversationKey).toMatchObject({ ownerId, ownerType: 'agent', topicId: 'call' });
+    expect(session.acceptedWindow).toMatchObject({ focusRevision: 3, windowRevision: 8, anchorId: 'older-message' });
+    expect(invokeMock.mock.calls.some(([name]) => name === 'end_voice_conversation')).toBe(false);
+  });
+
+  it('projects the committed focus captured by a newer declined intent while the older reply is delayed', async () => {
+    const { session } = startFrontend();
+    const focus = { target: { kind: 'topic', ownerId, ownerType: 'group', topicId: 'committed' },
+      focusRevision: 1, windowRevision: 1, anchorId: 'kept' };
+    let finish!: (outcome: unknown) => void;
+    mockInvoke('request_chat_navigation', args => args?.sequence === 1
+      ? new Promise(resolve => { finish = resolve; }) : { status: 'call_in_progress' });
+    const older = session.selectTopicById(ownerId, 'group', 'committed');
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    mockInvoke('register_chat_navigation_intent', () => ({ focus }));
+    await expect(session.selectTopicById(ownerId, 'group', 'blocked')).resolves.toBe('call_in_progress');
+    expect(session.currentTopicId).toBe('committed');
+    const window = session.acceptedWindow;
+    finish({ status: 'accepted', focus });
+    await expect(older).resolves.toBe('stale');
+    expect(session.acceptedWindow).toBe(window);
+  });
+
+  it('repairs malformed preference leaves and waits for Rust before projecting a saved topic', async () => {
     const pinned = JSON.stringify(['group', ownerId, 'saved-topic']);
     localStorage.setItem('chatSession', JSON.stringify({
       currentSelectedItem: { id: ownerId, type: 'group', name: false },
@@ -81,6 +125,8 @@ describe('real Pinia persisted-state conversation restoration', () => {
     const restored = startFrontend();
     const guide = useGuideStore(restored.pinia);
     const diary = useDiaryStore(restored.pinia);
+    expect(restored.session.currentConversationKey).toBeNull();
+    await restored.session.restoreFocus();
     expect(restored.session.currentConversationKey?.topicId).toBe('saved-topic');
     expect(restored.session.lastActiveTopicMap).toEqual({ [`group:${ownerId}`]: 'saved-topic' });
     expect(restored.topics.sortMode).toBe('created');
@@ -128,9 +174,9 @@ describe('real Pinia persisted-state conversation restoration', () => {
     stopFrontend(first.pinia);
 
     const restored = startFrontend();
-    expect(restored.session.currentConversationKey).toEqual({
-      ownerId, ownerType: 'group', topicId: 'group-topic', epoch: 0,
-    });
+    expect(restored.session.currentConversationKey).toBeNull();
+    await restored.session.restoreFocus();
+    expect(restored.session.currentConversationKey).toMatchObject({ ownerId, ownerType: 'group', topicId: 'group-topic' });
     expect(restored.session.lastActiveTopicMap).toEqual({
       [`agent:${ownerId}`]: 'agent-topic',
       [`group:${ownerId}`]: 'group-topic',
@@ -166,7 +212,11 @@ describe('real Pinia persisted-state conversation restoration', () => {
     stopFrontend(first.pinia);
 
     const restored = startFrontend();
-    expect(restored.session.currentTopicId).toBe('deleted-topic');
+    expect(restored.session.currentTopicId).toBeNull();
+    mockInvoke('restore_chat_view', () => ({ status: 'accepted',
+      focus: { target: { kind: 'owner', ownerId, ownerType: 'group' }, focusRevision: 1, windowRevision: 1, anchorId: null },
+    }));
+    await restored.session.restoreFocus();
     serveGroupTopics([groupTopic('available-topic')]);
     await restored.assistants.fetchAgentsAndGroups();
     restored.session.reconcileCurrentConversation();
@@ -175,10 +225,16 @@ describe('real Pinia persisted-state conversation restoration', () => {
     expect(restored.session.lastActiveTopicMap[`group:${ownerId}`]).toBeUndefined();
     expect(restored.topics.isTopicPinned(ownerId, 'group', 'deleted-topic')).toBe(false);
 
+    mockInvoke('request_chat_navigation', args => {
+      expect(args).toMatchObject({ target: { kind: 'owner', ownerId, ownerType: 'group' }, selectRecent: true });
+      expect(args?.rememberedTopicId).toBeUndefined();
+      return { status: 'accepted', focus: { target: { kind: 'topic', ownerId, ownerType: 'group', topicId: 'available-topic' },
+        focusRevision: 2, windowRevision: 2, anchorId: null } };
+    });
     await restored.session.selectItem({ ...restored.assistants.groups[0], type: 'group' });
     expect(restored.session.currentConversationKey?.topicId).toBe('available-topic');
     await nextTick();
     stopFrontend(restored.pinia);
-    expect(startFrontend().session.currentTopicId).toBe('available-topic');
+    expect(startFrontend().session.coldHint.currentTopicId).toBe('available-topic');
   });
 });

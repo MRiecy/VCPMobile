@@ -4,7 +4,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useChatSessionStore } from './chatSessionStore';
 import { useAssistantStore } from './assistant';
-import { useTopicStore } from './topicListManager';
 import { useNotificationStore } from './notification';
 import type { Attachment, ChatMessage, MessageWriteResultDto } from '../types/chat';
 
@@ -44,6 +43,7 @@ export const useShareStore = defineStore('share', () => {
   let dismissedShare: ShareIdentity | null = null;
   const activeDraft = computed(() => current.value?.state === 'draft'
     && current.value.topicId === session.currentTopicId
+    && session.currentSelectedItem?.type === 'agent'
     && current.value.agentId === session.currentSelectedItem?.id ? current.value : null);
   const failures = computed(() => current.value?.items.filter(item => item.error) ?? []);
   const identity = (value: ShareIdentity): ShareIdentity => ({ generation: value.generation, deliveryId: value.deliveryId });
@@ -135,18 +135,26 @@ export const useShareStore = defineStore('share', () => {
   const openDraft = async (agentId: string, allowPartial = false) => {
     const share = current.value;
     if (!share || busy.value) return;
+    const intent = session.beginNavigation();
     busy.value = true;
     try {
       const result = await invoke<CurrentShare>('bind_current_share', {
         ...identity(share), agentId, allowPartial,
       });
       if (!isCurrent(share) || !apply(result)) return;
-      if (!assistant.agents.length) await assistant.fetchAgentsAndGroups();
-      if (!isCurrent(share) || !result.agentId || !result.topicId) return;
-      await useTopicStore().loadTopicList(result.agentId, 'agent');
-      if (!isCurrent(share)) return;
-      await session.selectTopicById(result.agentId, 'agent', result.topicId);
-      selectorOpen.value = false;
+      if (!result.agentId || !result.topicId || !session.isNavigationCurrent(intent)) return;
+      try {
+        if (!assistant.agents.length) await assistant.fetchAgentsAndGroups();
+        if (!isCurrent(share) || !session.isNavigationCurrent(intent)) return;
+        const status = await session.selectTopicById(result.agentId, 'agent', result.topicId, intent);
+        if (!isCurrent(share) || !session.isNavigationCurrent(intent)) return;
+        if (status === 'accepted') selectorOpen.value = false;
+        else session.notifyNavigationResult(status);
+      } catch (error) {
+        if (isCurrent(share) && session.isNavigationCurrent(intent)) {
+          useNotificationStore().addNotification({ type: 'error', title: '分享草稿已保存，打开失败', message: String(error), toastOnly: true });
+        }
+      }
     } catch (error) { notify(error); }
     finally { busy.value = false; }
   };

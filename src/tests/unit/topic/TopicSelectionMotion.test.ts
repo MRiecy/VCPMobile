@@ -3,6 +3,7 @@ import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
 import { nextTick } from 'vue';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import TopicList from '../../../features/topic/TopicList.vue';
+import { mockInvoke } from '../../mocks/tauri';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useLayoutStore } from '../../../core/stores/layout';
 import { useTopicStore, type Topic } from '../../../core/stores/topicListManager';
@@ -22,27 +23,18 @@ vi.mock('../../../core/composables/useModalHistory', () => ({
 
 let pinia: Pinia;
 let wrapper: VueWrapper | undefined;
-let frameId: number;
-let frames: Map<number, FrameRequestCallback>;
 let wideWindow: boolean;
 
 beforeEach(() => {
   localStorage.clear();
   pinia = createPinia();
   setActivePinia(pinia);
-  frameId = 0;
-  frames = new Map();
   wideWindow = false;
   navigation.currentRoute.value.path = '/chat';
+  mockInvoke('connect_chat_view', () => ({ documentId: 1 }));
+  mockInvoke('register_chat_navigation_intent', () => ({ focus: { focusRevision: 0 } }));
   navigation.push.mockReset().mockImplementation(async (path: string) => {
     navigation.currentRoute.value.path = path;
-  });
-  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
-    frames.set(++frameId, callback);
-    return frameId;
-  });
-  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => {
-    frames.delete(id);
   });
   vi.spyOn(window, 'matchMedia').mockImplementation(query => ({
     matches: wideWindow,
@@ -81,7 +73,7 @@ async function mountTopics(drawerOpen = true) {
   const topics = useTopicStore();
   topics.topics = [topic('first'), topic('second')];
   vi.spyOn(topics, 'loadTopicList').mockResolvedValue();
-  const select = vi.spyOn(session, 'selectTopicById').mockResolvedValue();
+  const select = vi.spyOn(session, 'selectTopicById').mockResolvedValue('accepted');
   layout.setLeftDrawer(drawerOpen);
   wrapper = mount(TopicList, {
     attachTo: document.body,
@@ -98,13 +90,6 @@ function clickTopic(id: string) {
   row!.element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 }));
 }
 
-async function renderFrame() {
-  const callbacks = [...frames.values()];
-  frames.clear();
-  for (const callback of callbacks) callback(performance.now());
-  await nextTick();
-  await flushPromises();
-}
 
 function deferred() {
   let resolve!: () => void;
@@ -113,110 +98,51 @@ function deferred() {
 }
 
 describe('topic selection during drawer motion', () => {
-  it('closes immediately and gives the drawer a paint opportunity before routing or selecting', async () => {
+  it('keeps the drawer and route unchanged until the destination has been admitted', async () => {
     navigation.currentRoute.value.path = '/welcome';
+    const pending = deferred();
     const { layout, select } = await mountTopics();
-    const operations: string[] = [];
-    navigation.push.mockImplementation(async (path: string) => {
-      operations.push(`route:${layout.leftDrawerOpen}`);
-      navigation.currentRoute.value.path = path;
-    });
-    select.mockImplementation(async () => {
-      operations.push(`select:${layout.leftDrawerOpen}`);
-    });
-
+    select.mockImplementation(async () => { await pending.promise; return 'accepted'; });
     clickTopic('first');
+    expect(select).toHaveBeenCalledWith('agent-a', 'agent', 'first', expect.any(Number));
+    expect(layout.leftDrawerOpen).toBe(true);
+    expect(navigation.push).not.toHaveBeenCalled();
+    pending.resolve();
+    await flushPromises();
     expect(layout.leftDrawerOpen).toBe(false);
-    expect(navigation.push).not.toHaveBeenCalled();
-    expect(select).not.toHaveBeenCalled();
-    await flushPromises();
-    expect(select).not.toHaveBeenCalled();
-
-    await renderFrame();
-    expect(navigation.push).not.toHaveBeenCalled();
-    expect(select).not.toHaveBeenCalled();
-    await renderFrame();
-    expect(operations).toEqual(['route:false', 'select:false']);
     expect(navigation.push).toHaveBeenCalledWith('/chat');
-    expect(select).toHaveBeenCalledExactlyOnceWith('agent-a', 'agent', 'first');
     expect(wrapper!.emitted('select-topic')).toHaveLength(1);
   });
 
-  it.each([
-    ['a permanent pane', true, true],
-    ['an already closed drawer', false, false],
-  ] as const)('does not delay selection for %s', async (_label, wide, open) => {
+  it.each([false, true])('leaves the current drawer intact on call rejection (wide=%s)', async wide => {
     wideWindow = wide;
-    const { select } = await mountTopics(open);
+    const { layout, select, session } = await mountTopics();
+    const notify = vi.spyOn(session, 'notifyNavigationResult');
+    select.mockResolvedValue('call_in_progress');
     clickTopic('first');
     await flushPromises();
-    expect(select).toHaveBeenCalledExactlyOnceWith('agent-a', 'agent', 'first');
+    expect(layout.leftDrawerOpen).toBe(true);
     expect(navigation.push).not.toHaveBeenCalled();
-    expect(frames.size).toBe(0);
-  });
-
-  it('replaces a selection waiting for paint with the newer topic intent', async () => {
-    const { select } = await mountTopics();
-    clickTopic('first');
-    await flushPromises();
-    await renderFrame();
-    expect(select).not.toHaveBeenCalled();
-
-    clickTopic('second');
-    await flushPromises();
-    await renderFrame();
-    await renderFrame();
-    expect(select).toHaveBeenCalledExactlyOnceWith('agent-a', 'agent', 'second');
-    expect(wrapper!.emitted('select-topic')).toHaveLength(1);
-    expect(frames.size).toBe(0);
-  });
-
-  it('cancels pending paint work on unmount without starting a session selection', async () => {
-    const { select } = await mountTopics();
-    clickTopic('first');
-    await flushPromises();
-    await renderFrame();
-    wrapper!.unmount();
-    wrapper = undefined;
-    expect(frames.size).toBe(0);
-    await renderFrame();
-    await renderFrame();
-    expect(select).not.toHaveBeenCalled();
-    expect(navigation.push).not.toHaveBeenCalled();
-  });
-
-  it('does not overwrite a conversation selected elsewhere while waiting for paint', async () => {
-    const { session, select } = await mountTopics();
-    clickTopic('first');
-    await flushPromises();
-    await renderFrame();
-    session.setConversation({ id: 'agent-b', name: 'B', type: 'agent' }, 'external-topic');
-    await renderFrame();
-    expect(select).not.toHaveBeenCalled();
-    expect(session.currentTopicId).toBe('external-topic');
     expect(wrapper!.emitted('select-topic')).toBeUndefined();
+    expect(notify).toHaveBeenCalledExactlyOnceWith('call_in_progress');
   });
 
-  it.each(['session-change', 'unmount'] as const)('rechecks a pending route after %s', async interruption => {
+  it.each(['new-topic', 'unmount'] as const)('ignores a late admission after %s', async interruption => {
     navigation.currentRoute.value.path = '/welcome';
-    const route = deferred();
-    navigation.push.mockImplementation(() => route.promise);
-    const { session, select } = await mountTopics();
+    const pending = deferred();
+    const { layout, select } = await mountTopics();
+    select.mockImplementationOnce(async () => { await pending.promise; return 'accepted'; });
     clickTopic('first');
-    await flushPromises();
-    await renderFrame();
-    await renderFrame();
-    expect(navigation.push).toHaveBeenCalledWith('/chat');
-    expect(select).not.toHaveBeenCalled();
-
-    if (interruption === 'session-change') {
-      session.setConversation({ id: 'agent-b', name: 'B', type: 'agent' }, 'external-topic');
+    if (interruption === 'new-topic') {
+      select.mockResolvedValue('missing');
+      clickTopic('second');
     } else {
       wrapper!.unmount();
       wrapper = undefined;
     }
-    route.resolve();
+    pending.resolve();
     await flushPromises();
-    expect(select).not.toHaveBeenCalled();
+    expect(layout.leftDrawerOpen).toBe(true);
+    expect(navigation.push).not.toHaveBeenCalled();
   });
 });

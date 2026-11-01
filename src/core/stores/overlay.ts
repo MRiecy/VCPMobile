@@ -139,7 +139,7 @@ export const useOverlayStore = defineStore('overlay', () => {
       void syncStore.close();
       popPageInternal();
       return true;
-    });
+    }, undefined, undefined, () => syncStore.canDismiss);
   };
 
   const closeSyncSession = async () => {

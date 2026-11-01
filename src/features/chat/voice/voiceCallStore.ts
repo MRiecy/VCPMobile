@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
-import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue';
-import { useChatSessionStore, type ConversationKey } from '../../../core/stores/chatSessionStore';
+import { computed, onScopeDispose, ref, shallowRef } from 'vue';
+import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
+import { useNotificationStore } from '../../../core/stores/notification';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { createMicrophoneMonitor } from './microphoneMonitor';
 import { createVoiceConversation, type VoiceCallSnapshot, type VoiceServiceView } from './voiceConversation';
@@ -30,6 +31,8 @@ const AUDIO_ERRORS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bvoice_playback_busy\b/, '正在朗读，请等待结束后重试。'],
   [/\bvoice_call_not_active\b/, '通话会话已结束，请重新进入语音模式。'],
   [/\bvoice_call_busy\b/, '上一通话正在结束，请稍后重试。'],
+  [/\bcall_in_progress\b/, '已有通话进行中，请先挂断。'],
+  [/\bstale_navigation\b/, '当前会话已变化，请在目标话题重新开始通话。'],
   [/\bvoice_segment_retention_busy\b/, '前面的语音仍在识别，请稍后再开启麦克风。'],
   [/\baudio_conversion_drain_failed\b/, '末尾音频处理失败，请重新说一遍。'],
   [/\b(voice_start_failed|audio_start_failed)\b/, '麦克风启动失败，请检查音频设备后重试。'],
@@ -53,7 +56,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const lifecycle = useAppLifecycleStore();
   const document = useVoiceDocumentStore();
   const active = ref(false);
-  const conversation = shallowRef<ConversationKey | null>(null);
+  const notifications = useNotificationStore();
   const captureState = ref<VoiceCallSnapshot['micState']>('closed');
   const inputDeviceId = ref<string | null>(null);
   const microphonePending = ref(false);
@@ -79,9 +82,12 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   };
 
   const voiceConversation = createVoiceConversation({
-    conversation: () => conversation.value ?? session.currentConversationKey,
-    isConversationCurrent: key => session.isConversationCurrent(key),
+    conversation: () => session.currentConversationKey,
+    window: () => session.acceptedWindow,
     connectDocument: document.connect,
+    onTargetDeleted: snapshot => notifications.addNotification({
+      type: 'info', title: '通话已结束', message: snapshot.notice || '通话目标已删除。', toastOnly: true,
+    }),
     onView: view => {
       serviceState.value = view.state;
       serviceMessage.value = view.message;
@@ -90,8 +96,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     onSnapshot: snapshot => {
       monitor.observe(snapshot?.active && snapshot.micState !== 'closed' ? snapshot.inputSessionId : null);
       active.value = snapshot?.active ?? false;
-      conversation.value = snapshot?.active && session.currentConversationKey
-        ? { ...session.currentConversationKey } : null;
       ttsState.value = snapshot?.ttsState ?? 'idle';
       speakingMessageId.value = snapshot?.active && snapshot.ttsState === 'speaking'
         ? snapshot.speakingMessageId ?? null : null;
@@ -138,8 +142,8 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     });
   };
 
-  const enableMicrophone = async () => {
-    if (!active.value || lifecycle.isBackground) return;
+  const enableMicrophone = async (startingCall = false) => {
+    if ((!active.value && !startingCall) || lifecycle.isBackground) return;
     const generation = ++microphoneGeneration;
     syncPlaybackState();
     microphonePending.value = true;
@@ -152,7 +156,15 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
         serviceMessage.value = '配置语音服务并重新开麦后，即可识别与朗读。';
       }
     } catch (error) {
-      if (generation !== microphoneGeneration || !active.value) return;
+      if (generation !== microphoneGeneration) return;
+      if (!active.value) {
+        notifications.addNotification({ type: 'error', title: '无法开始通话',
+          message: audioErrorMessage(error, '当前会话已变化或通话未就绪，请重试。'), toastOnly: true });
+        if (errorDetail(error) === 'call_in_progress') {
+          await voiceConversation.recover().catch(failure => console.warn('[VoiceCall] 无法恢复当前通话', failure));
+        }
+        return;
+      }
       syncPlaybackState();
       errorMessage.value = audioErrorMessage(error, '麦克风启动失败，请重试。');
     } finally {
@@ -161,19 +173,19 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   };
 
   const start = () => {
-    if (active.value || !session.currentConversationKey) return;
-    conversation.value = { ...session.currentConversationKey };
-    active.value = true;
-    voiceConversation.begin();
-    void enableMicrophone();
+    if (active.value || microphonePending.value || !session.currentConversationKey) return;
+    void enableMicrophone(true);
   };
 
   const end = () => {
-    voiceConversation.stop();
+    void voiceConversation.stop().catch(error => {
+      notifications.addNotification({ type: 'error', title: '挂断通话时出错',
+        message: audioErrorMessage(error, '音频清理未完成，请检查当前通话状态。'), toastOnly: true });
+    });
     // Hangup has one Rust owner. Do not race it with a separate mute/drain
     // command that could admit an unsent transcript while hangup cancels it.
     microphoneGeneration += 1;
-    monitor.detach();
+    microphonePending.value = false;
   };
 
   const recover = () => voiceConversation.recover();
@@ -187,9 +199,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     else void enableMicrophone();
   };
 
-  watch(() => session.currentConversationKey, () => {
-    if (active.value && !session.isConversationCurrent(conversation.value)) end();
-  }, { flush: 'sync' });
   // Native lifecycle facts stop capture even when this document is suspended.
   // Foreground recovery only projects the snapshot; it never reopens the mic.
   onScopeDispose(() => {

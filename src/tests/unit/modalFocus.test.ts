@@ -60,6 +60,18 @@ describe('modal focus ownership', () => {
     expect(document.activeElement).toBe(next);
   });
 
+  it('checks notification navigation without closing the drawer or starting a settings save', () => {
+    const modal = history.useModalHistory();
+    const saveBeforeClosing = vi.fn(() => false);
+    const closeDrawer = vi.fn();
+    modal.registerModal('settings', saveBeforeClosing, undefined, saveBeforeClosing);
+    modal.registerModal('drawer', closeDrawer);
+    expect(modal.canCloseAllModals()).toBe(false);
+    expect(saveBeforeClosing).not.toHaveBeenCalled();
+    expect(closeDrawer).not.toHaveBeenCalled();
+    expect(modal.modalStackLength()).toBe(2);
+  });
+
   it('binds a Store-owned page identity through its feature and SlidePage boundary', async () => {
     const Page = defineComponent({ components: { SlidePage },
       template: '<SlidePage :is-open="true"><button class="first">One</button><button class="last">Two</button></SlidePage>',

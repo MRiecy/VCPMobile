@@ -119,14 +119,14 @@ const openManager = (event: MouseEvent) => {
 };
 watch(pickerOpen, async open => {
   if (open) {
-    registerModal(pickerId, requestClosePicker, () => pickerSurface.value);
+    registerModal(pickerId, requestClosePicker, () => pickerSurface.value, undefined, () => false);
     await nextTick();
     if (pickerOpen.value) pickerCloseButton.value?.focus({ preventScroll: true });
   } else unregisterModal(pickerId);
 }, { flush: 'sync' });
 watch(managerOpen, async open => {
   if (open) {
-    registerModal(managerId, requestCloseManager, () => managerSurface.value);
+    registerModal(managerId, requestCloseManager, () => managerSurface.value, undefined, () => false);
     await nextTick();
     if (managerOpen.value) closeButton.value?.focus({ preventScroll: true });
   } else unregisterModal(managerId);

@@ -1,5 +1,8 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, onScopeDispose, shallowRef } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useNotificationStore } from "./notification";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
 import { parseLocalPreferenceObject } from "../preferences/localPreference";
@@ -17,66 +20,58 @@ export interface ConversationKey {
   epoch: number;
 }
 
+type FocusTarget =
+  | { kind: 'welcome' }
+  | { kind: 'owner'; ownerType: OwnerType; ownerId: string }
+  | { kind: 'topic'; ownerType: OwnerType; ownerId: string; topicId: string };
+
+interface FocusSnapshot {
+  target: FocusTarget;
+  focusRevision: number;
+  windowRevision: number;
+  anchorId: string | null;
+}
+
+export type AcceptedWindow = Omit<FocusSnapshot, 'target'> & { documentId: number };
+type NavigationRejection = 'call_in_progress' | 'missing' | 'stale';
+export type NavigationStatus = 'accepted' | NavigationRejection;
+type NavigationResult = { status: 'accepted'; focus: FocusSnapshot } | { status: NavigationRejection };
+
 export const useChatSessionStore = defineStore("chatSession", () => {
-  const currentSelectedItem = ref<ConversationOwnerItem | null>(null);
-  const currentTopicId = ref<string | null>(null);
-  const sessionEpoch = ref(0);
+  const projection = shallowRef<{
+    item: ConversationOwnerItem | null; topicId: string | null; epoch: number;
+    key: ConversationKey | null; window: AcceptedWindow | null;
+  }>({ item: null, topicId: null, epoch: 0, key: null, window: null });
+  const acceptedWindow = computed(() => projection.value.window);
+  const currentSelectedItem = computed(() => projection.value.item);
+  const currentTopicId = computed(() => projection.value.topicId);
+  const sessionEpoch = computed(() => projection.value.epoch);
+  const currentConversationKey = computed(() => projection.value.key);
+  const navigationSequence = ref(0);
+  let documentId: number | null = null;
+  let connection: Promise<number> | null = null;
+  let releaseListener: UnlistenFn | null = null;
+  let registration: Promise<boolean> | null = null;
+  let disposed = false;
+  const coldHint = ref<{ currentSelectedItem: ConversationOwnerItem | null; currentTopicId: string | null }>({
+    currentSelectedItem: null, currentTopicId: null,
+  });
   const lastActiveTopicMap = ref<Record<string, string>>({});
   const ownerMapKey = (ownerType: ConversationOwnerType, ownerId: string) =>
     `${ownerType}:${ownerId}`;
 
-  const currentConversationKey = computed<ConversationKey | null>(() => {
-    const ownerId = currentSelectedItem.value?.id;
-    const ownerType = currentSelectedItem.value?.type;
-    const topicId = currentTopicId.value;
-    if (!ownerId || !topicId || (ownerType !== "agent" && ownerType !== "group")) {
-      return null;
-    }
-    return { ownerId, ownerType, topicId, epoch: sessionEpoch.value };
-  });
-
+  // All reactive readers see the target, identity and window change together.
   const setConversation = (
-    item: ConversationOwnerItem | null,
-    topicId: string | null,
+    item: ConversationOwnerItem | null, topicId: string | null, window?: AcceptedWindow,
   ) => {
-    const ownerType: ConversationOwnerType | null = item
-      ? item.type === "agent" || item.type === "group"
-        ? item.type
-        : null
-      : null;
-    const nextItem = item && ownerType ? { ...item, type: ownerType } : null;
-    const changed =
-      currentSelectedItem.value?.id !== nextItem?.id ||
-      currentSelectedItem.value?.type !== nextItem?.type ||
-      currentTopicId.value !== topicId;
-
-    if (!changed) {
-      if (currentSelectedItem.value && nextItem) {
-        currentSelectedItem.value.name = nextItem.name;
-        currentSelectedItem.value.avatarCalculatedColor =
-          nextItem.avatarCalculatedColor;
-      }
-      return;
-    }
-
-    sessionEpoch.value += 1;
-    currentSelectedItem.value = nextItem;
-    currentTopicId.value = topicId;
-  };
-
-  const clearConversation = () => setConversation(null, null);
-
-  const clearCurrentTopic = () => {
-    const selected = currentSelectedItem.value;
-    if (!selected || (selected.type !== "agent" && selected.type !== "group")) {
-      clearConversation();
-      return;
-    }
-    const mapKey = ownerMapKey(selected.type, selected.id);
-    if (lastActiveTopicMap.value[mapKey] === currentTopicId.value) {
-      delete lastActiveTopicMap.value[mapKey];
-    }
-    setConversation({ ...selected, type: selected.type }, null);
+    const previous = projection.value;
+    const changed = previous.item?.id !== item?.id || previous.item?.type !== item?.type || previous.topicId !== topicId
+      || Boolean(previous.window && window && previous.window.focusRevision !== window.focusRevision);
+    const epoch = previous.epoch + Number(changed);
+    let key = previous.key;
+    if (changed) key = item && topicId ? { ownerId: item.id, ownerType: item.type, topicId, epoch } : null;
+    projection.value = { item, topicId, key, epoch, window: window ?? (changed ? null : previous.window) };
+    coldHint.value = { currentSelectedItem: item, currentTopicId: topicId };
   };
 
   const isConversationCurrent = (key: ConversationKey | null | undefined) => {
@@ -116,142 +111,139 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 
   const assistantStore = useAssistantStore();
 
-  /**
-   * 选择一个助手或群组，并自动跳转到最近的话题
-   * @param loadHistoryCallback 回调函数，用于触发历史加载 (解耦 HistoryStore)
-   */
-  const selectTopicById = async (
-    itemId: string,
-    ownerType: ConversationOwnerType,
-    topicId: string,
-    loadHistoryCallback?: (itemId: string, ownerType: string, topicId: string) => Promise<void>
-  ) => {
-    // 设置当前选中的项目详情 (确保头像和色调同步)
-    const agent = ownerType === "agent"
-      ? assistantStore.agents.find((a) => a.id === itemId)
-      : undefined;
-    const group = ownerType === "group"
-      ? assistantStore.groups.find((g) => g.id === itemId)
-      : undefined;
-    if (ownerType === "agent" && agent) {
-      setConversation({ ...agent, type: "agent" }, topicId);
-    } else if (ownerType === "group" && group) {
-      setConversation({ ...group, type: "group" }, topicId);
-    } else {
-      throw new Error(`Conversation owner ${itemId} not found`);
-    }
-    lastActiveTopicMap.value[ownerMapKey(ownerType, itemId)] = topicId;
+  const targetOf = (item: ConversationOwnerItem | null, topicId: string | null): FocusTarget => {
+    if (!item) return { kind: 'welcome' };
+    const owner = { ownerType: item.type, ownerId: item.id };
+    return topicId ? { kind: 'topic', ...owner, topicId } : { kind: 'owner', ...owner };
+  };
 
-    if (loadHistoryCallback) {
-      await loadHistoryCallback(itemId, ownerType, topicId);
+  const ownerInfo = (target: Exclude<FocusTarget, { kind: 'welcome' }>): ConversationOwnerItem => {
+    const owners = target.ownerType === 'agent' ? assistantStore.agents : assistantStore.groups;
+    const owner = owners.find(candidate => candidate.id === target.ownerId);
+    return { id: target.ownerId, name: owner?.name, avatarCalculatedColor: owner?.avatarCalculatedColor, type: target.ownerType };
+  };
+
+  const applyFocus = (id: number, focus: FocusSnapshot) => {
+    if (disposed || id !== documentId) return;
+    const previous = acceptedWindow.value;
+    if (previous && previous.documentId === id && focus.windowRevision <= previous.windowRevision) return;
+    const target = focus.target;
+    const window = { documentId: id, focusRevision: focus.focusRevision, windowRevision: focus.windowRevision, anchorId: focus.anchorId };
+    const previousHint = coldHint.value;
+    if (target.kind === 'owner' && previousHint.currentSelectedItem?.id === target.ownerId
+      && previousHint.currentSelectedItem.type === target.ownerType) {
+      const mapKey = ownerMapKey(target.ownerType, target.ownerId);
+      if (lastActiveTopicMap.value[mapKey] === previousHint.currentTopicId) delete lastActiveTopicMap.value[mapKey];
+    }
+    const topic = target.kind === 'topic' ? target.topicId : null;
+    setConversation(target.kind === 'welcome' ? null : ownerInfo(target), topic, window);
+    if (target.kind === 'topic') lastActiveTopicMap.value[ownerMapKey(target.ownerType, target.ownerId)] = target.topicId;
+  };
+
+  // Allocate immediately, before asynchronous listener installation. Older
+  // documents cannot reclaim navigation when a late callback finally runs.
+  const connect = () => {
+    if (connection) return connection;
+    let pending: FocusSnapshot | null = null;
+    const attached = invoke<{ documentId: number; focus: FocusSnapshot }>('connect_chat_view');
+    const listening = listen<FocusSnapshot>('vcp-chat-focus', ({ payload }) => {
+      if (documentId !== null) applyFocus(documentId, payload);
+      else if (!pending || pending.windowRevision < payload.windowRevision) pending = payload;
+    });
+    connection = Promise.all([attached, listening]).then(([result, release]) => {
+      if (disposed) throw new Error('chat_view_disposed');
+      releaseListener = release;
+      documentId = result.documentId;
+      if (pending) applyFocus(documentId, pending);
+      return documentId;
+    }).catch(error => {
+      void listening.then(release => release(), () => {});
+      connection = null;
+      throw error;
+    });
+    return connection;
+  };
+
+  const beginNavigation = () => {
+    const sequence = ++navigationSequence.value;
+    registration = connect().then(async id => {
+      if (!isNavigationCurrent(sequence)) return false;
+      const registered = await invoke<{ focus: FocusSnapshot } | null>('register_chat_navigation_intent', { documentId: id, sequence });
+      if (!registered || !isNavigationCurrent(sequence)) return false;
+      // An earlier action can commit in Rust before this tap but return to JS
+      // after it. Registration carries the actual starting focus of this tap.
+      if (registered.focus.focusRevision > 0) applyFocus(id, registered.focus);
+      return true;
+    });
+    // App-only notifications may supersede an old intent without navigating.
+    void registration.catch(error => console.warn('[ChatSession] Intent registration failed:', error));
+    return sequence;
+  };
+
+  const isNavigationCurrent = (sequence: number) => !disposed && sequence === navigationSequence.value;
+
+  const navigate = async (
+    target: FocusTarget, sequence: number,
+    options: { anchorId?: string; selectRecent?: boolean; rememberedTopicId?: string; sortMode?: string } = {},
+  ): Promise<NavigationStatus> => {
+    if (!isNavigationCurrent(sequence) || !await registration || !isNavigationCurrent(sequence)) return 'stale';
+    const id = await connect();
+    if (!isNavigationCurrent(sequence)) return 'stale';
+    const result = await invoke<NavigationResult>('request_chat_navigation', { documentId: id, sequence, target, ...options });
+    if (!isNavigationCurrent(sequence)) return 'stale';
+    if (result.status === 'accepted' && (acceptedWindow.value?.windowRevision ?? 0) > result.focus.windowRevision) return 'stale';
+    if (result.status === 'accepted') applyFocus(id, result.focus);
+    return result.status;
+  };
+
+  const restoreFocus = async (): Promise<void> => {
+    const hint = targetOf(coldHint.value.currentSelectedItem, coldHint.value.currentTopicId);
+    const id = await connect();
+    const result = await invoke<NavigationResult>('restore_chat_view', { documentId: id, hint });
+    if (result.status === 'accepted') applyFocus(id, result.focus);
+  };
+
+  const selectTopicById = (
+    ownerId: string, ownerType: OwnerType, topicId: string, sequence = beginNavigation(), anchorId?: string,
+  ) => navigate({ kind: 'topic', ownerId, ownerType, topicId }, sequence, { anchorId });
+
+  const selectItem = (item: ConversationOwnerItem, sequence = beginNavigation()) =>
+    navigate(targetOf(item, null), sequence, {
+      selectRecent: true,
+      rememberedTopicId: lastActiveTopicMap.value[ownerMapKey(item.type, item.id)],
+      sortMode: useTopicStore().effectiveSortMode,
+    });
+
+  const selectOwnerOnly = (item: ConversationOwnerItem, sequence = beginNavigation()) =>
+    navigate(targetOf(item, null), sequence);
+
+  const clearConversation = (sequence = beginNavigation()) => navigate({ kind: 'welcome' }, sequence);
+
+  // Entity refreshes can update labels. Only a Rust focus snapshot can
+  // invalidate an owner or topic after a confirmed deletion.
+  const reconcileCurrentConversation = () => {
+    const target = targetOf(currentSelectedItem.value, currentTopicId.value);
+    if (target.kind !== 'welcome') setConversation(ownerInfo(target), currentTopicId.value);
+  };
+
+  const notifyNavigationResult = (status: NavigationStatus) => {
+    if (status === 'call_in_progress' || status === 'missing') {
+      useNotificationStore().addNotification({
+        type: 'info', title: status === 'call_in_progress' ? '通话中无法切换会话' : '目标已不存在',
+        message: status === 'call_in_progress' ? '请先挂断当前通话。' : '会话或目标消息已被删除。', toastOnly: true,
+      });
     }
   };
 
-  /**
-   * 选择一个项目 (Agent/Group)，自动加载其记录的或最新的话题
-   */
-  const selectItem = async (
-    item: ConversationOwnerItem,
-    loadHistoryCallback?: (itemId: string, ownerType: string, topicId: string) => Promise<void>
-  ) => {
-    if (!item) return;
-    
-    const ownerId = item.id;
-    if (item.type !== "agent" && item.type !== "group") {
-      throw new Error(`Conversation owner ${ownerId} has no valid type`);
-    }
-    const ownerType: ConversationOwnerType = item.type;
-    
-    // 如果已经选中了该项，且当前已有话题，则不重复加载
-    if (
-      currentSelectedItem.value?.id === ownerId &&
-      currentSelectedItem.value?.type === ownerType &&
-      currentTopicId.value
-    ) {
-      return;
-    }
-
-    // 选择意图已发生：先关闭旧会话，再用当前数据库列表校验持久化的 Topic。
-    setConversation({ ...item, type: ownerType }, null);
-    const selectionEpoch = sessionEpoch.value;
-    const topicStore = useTopicStore();
-    await topicStore.loadTopicList(ownerId, ownerType);
-    if (
-      sessionEpoch.value !== selectionEpoch ||
-      currentSelectedItem.value?.id !== ownerId ||
-      currentSelectedItem.value?.type !== ownerType ||
-      currentTopicId.value !== null
-    ) {
-      console.log(`[ChatSessionStore] Discarding stale owner selection for ${ownerId}.`);
-      return;
-    }
-
-    const mapKey = ownerMapKey(ownerType, ownerId);
-    const ownerTopics = topicStore.topics.filter(
-      (topic) => topic.ownerId === ownerId && topic.ownerType === ownerType,
-    );
-    const rememberedTopicId = lastActiveTopicMap.value[mapKey];
-    const rememberedTopic = rememberedTopicId
-      ? ownerTopics.find((topic) => topic.id === rememberedTopicId)
-      : undefined;
-    if (rememberedTopicId && !rememberedTopic) {
-      delete lastActiveTopicMap.value[mapKey];
-    }
-    const targetTopicId = rememberedTopic?.id || ownerTopics[0]?.id;
-
-    if (targetTopicId) {
-      await selectTopicById(ownerId, ownerType, targetTopicId, loadHistoryCallback);
-    } else {
-      // 没有任何话题的极端情况
-      console.warn(`[ChatSessionStore] No topics found for ${ownerId}`);
-      setConversation({ ...item, type: ownerType }, null);
-    }
-  };
-
-  const reconcileCurrentConversation = (loadedTopics?: Array<{
-    id: string;
-    ownerId: string;
-    ownerType: ConversationOwnerType;
-  }>) => {
-    const selected = currentSelectedItem.value;
-    if (!selected) return;
-    if (selected.type !== "agent" && selected.type !== "group") {
-      clearConversation();
-      return;
-    }
-
-    const ownerType: ConversationOwnerType = selected.type;
-    const freshOwner = ownerType === "agent"
-      ? assistantStore.agents.find((agent) => agent.id === selected.id)
-      : assistantStore.groups.find((group) => group.id === selected.id);
-    if (!freshOwner) {
-      clearConversation();
-      return;
-    }
-
-    let topicId = currentTopicId.value;
-    if (topicId && loadedTopics) {
-      const ownerTopics = loadedTopics.filter(
-        (topic) =>
-          topic.ownerId === selected.id && topic.ownerType === ownerType,
-      );
-      if (!ownerTopics.some((topic) => topic.id === topicId)) {
-        const mapKey = ownerMapKey(ownerType, selected.id);
-        if (lastActiveTopicMap.value[mapKey] === topicId) {
-          delete lastActiveTopicMap.value[mapKey];
-        }
-        topicId = null;
-      } else {
-        lastActiveTopicMap.value[ownerMapKey(ownerType, selected.id)] = topicId;
-      }
-    }
-
-    setConversation({ ...freshOwner, type: ownerType }, topicId);
-  };
+  onScopeDispose(() => {
+    disposed = true;
+    releaseListener?.();
+  });
 
   return {
     currentSelectedItem,
     currentTopicId,
+    coldHint,
     sessionEpoch,
     currentConversationKey,
     currentTopic,
@@ -259,7 +251,13 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     lastActiveTopicMap,
     setConversation,
     clearConversation,
-    clearCurrentTopic,
+    acceptedWindow,
+    navigationSequence,
+    beginNavigation,
+    isNavigationCurrent,
+    selectOwnerOnly,
+    notifyNavigationResult,
+    restoreFocus,
     isConversationCurrent,
     reconcileCurrentConversation,
     selectTopicById,
@@ -267,9 +265,9 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   };
 }, {
   persist: {
-    pick: ['currentSelectedItem', 'currentTopicId', 'lastActiveTopicMap'],
+    pick: ['coldHint', 'lastActiveTopicMap'],
     serializer: {
-      serialize: JSON.stringify,
+      serialize: state => JSON.stringify({ ...state.coldHint, lastActiveTopicMap: state.lastActiveTopicMap }),
       deserialize(raw) {
         const value = parseLocalPreferenceObject(raw);
         const item = value.currentSelectedItem;
@@ -291,8 +289,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
             /^(agent|group):/.test(owner) && typeof topic === "string"))
           : {};
         return {
-          currentSelectedItem,
-          currentTopicId: typeof value.currentTopicId === "string" ? value.currentTopicId : null,
+          coldHint: { currentSelectedItem, currentTopicId: typeof value.currentTopicId === "string" ? value.currentTopicId : null },
           lastActiveTopicMap,
         };
       },

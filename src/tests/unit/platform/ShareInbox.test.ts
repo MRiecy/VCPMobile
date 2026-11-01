@@ -7,8 +7,11 @@ import { emitTauriEvent, mockInvoke, invokeMock, listenMock } from '../../mocks/
 
 const context = vi.hoisted(() => ({ session: {} as {
   currentTopicId: string | null;
-  currentSelectedItem: { id: string } | null;
-  selectTopicById: (agentId: string, ownerType: string, topicId: string) => Promise<void>;
+  currentSelectedItem: { id: string; type: string } | null;
+  beginNavigation: () => number;
+  isNavigationCurrent: (intent: number) => boolean;
+  notifyNavigationResult: (result: string) => void;
+  selectTopicById: (agentId: string, ownerType: string, topicId: string, intent: number) => Promise<string>;
 }, notices: vi.fn() }));
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => context.session }));
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({ agents: [{ id: 'agent' }], fetchAgentsAndGroups: async () => {} }) }));
@@ -28,7 +31,11 @@ let pinia: Pinia;
 beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
-  context.session = reactive({ currentTopicId: 'topic', currentSelectedItem: { id: 'agent' }, selectTopicById: vi.fn(async () => {}) });
+  context.session = reactive({
+    currentTopicId: 'topic', currentSelectedItem: { id: 'agent', type: 'agent' },
+    beginNavigation: () => 1, isNavigationCurrent: intent => intent === 1, notifyNavigationResult: vi.fn(),
+    selectTopicById: vi.fn(async () => 'accepted'),
+  });
   context.notices.mockClear();
 });
 afterEach(() => disposePinia(pinia));
@@ -287,7 +294,7 @@ describe('one current share', () => {
     expect(store.current?.attachments).toEqual(attachments);
     await store.openDraft('agent');
     expect(store.activeDraft?.text).toBe('shared text');
-    expect(context.session.selectTopicById).toHaveBeenCalledExactlyOnceWith('agent', 'agent', 'topic');
+    expect(context.session.selectTopicById).toHaveBeenCalledExactlyOnceWith('agent', 'agent', 'topic', 1);
 
     store.$dispose();
     const recovered = useShareStore();

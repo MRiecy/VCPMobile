@@ -6,7 +6,6 @@ import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
 import { useNotificationStore, type VcpStatus } from './notification';
 import { useChatSessionStore } from './chatSessionStore';
-import { useChatHistoryStore } from './chatHistoryStore';
 import { useTopicStore } from './topicListManager';
 import { useAvatarStore } from './avatar';
 import { isAndroid, isIOS } from '../utils/platform';
@@ -167,22 +166,11 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       const promises: Promise<unknown>[] = [
         trackBootStage('fe:preload_settings', settingsStore.fetchSettings()),
         trackBootStage('fe:preload_agents', assistantStore.fetchAgentsAndGroups()),
-        trackBootStage('fe:preload_avatars', avatarStore.preloadMetadata())
+        trackBootStage('fe:preload_avatars', avatarStore.preloadMetadata()),
+        trackBootStage('fe:restore_chat_focus', sessionStore.restoreFocus()),
       ];
 
-      // 启动预加载：若 Pinia 恢复了活跃会话，提前拉取首屏聊天历史
-      // 让 DB + IPC 开销与 Vue 组件挂载并行，ChatView mount 后直接命中缓存（零延迟）
-      if (sessionStore.currentSelectedItem?.id && sessionStore.currentTopicId) {
-        const historyStore = useChatHistoryStore();
-        const ownerId = sessionStore.currentSelectedItem.id;
-        const ownerType = sessionStore.currentSelectedItem.type;
-        const topicId = sessionStore.currentTopicId;
-        if (ownerType === 'agent' || ownerType === 'group') {
-          console.log(`[Lifecycle] Preloading chat history for ${ownerType} ${ownerId}, topic: ${topicId}`);
-          promises.push(trackBootStage('fe:preload_history', historyStore.preloadHistory(ownerId, ownerType, topicId, 5)));
-        }
-      }
-
+      // Restore the admitted focus/window before the chat page mounts.
       await Promise.all(promises);
       bootMark('fe:preload_done');
       sessionStore.reconcileCurrentConversation();

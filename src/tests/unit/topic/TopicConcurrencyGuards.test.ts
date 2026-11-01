@@ -244,18 +244,18 @@ describe("topic list concurrency guards", () => {
     });
     await expect.poll(() => callIndex).toBe(1);
 
-    sessionStore.currentSelectedItem = {
+    sessionStore.setConversation({
       id: "agent-a",
       name: "A refreshed",
       type: "agent",
-    };
+    }, "topic-a");
     await expect.poll(() => callIndex).toBe(1);
 
-    sessionStore.currentSelectedItem = {
+    sessionStore.setConversation({
       id: "agent-b",
       name: "B",
       type: "agent",
-    };
+    }, null);
     await expect.poll(() => callIndex).toBe(2);
 
     wrapper.unmount();

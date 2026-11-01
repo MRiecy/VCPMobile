@@ -15,6 +15,28 @@ const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
 const isCreating = ref(false);
 
+const openCreatedOwner = async (id: string, name: string, type: 'agent' | 'group', intent: number) => {
+  try {
+    await assistantStore.fetchAgentsAndGroups();
+    if (!sessionStore.isNavigationCurrent(intent)) return;
+    const result = await sessionStore.selectOwnerOnly({ id, name, type }, intent);
+    if (!sessionStore.isNavigationCurrent(intent)) return;
+    if (result !== 'accepted') {
+      sessionStore.notifyNavigationResult(result);
+      return;
+    }
+    layoutStore.setLeftDrawer(false);
+    if (type === 'agent') overlayStore.openAgentSettings(id);
+    else overlayStore.openGroupSettings(id);
+    // The list store reports its own load failures.
+    void topicListStore.loadTopicList(id, type).catch(() => {});
+  } catch (error) {
+    if (sessionStore.isNavigationCurrent(intent)) {
+      notificationStore.addNotification({ type: 'error', title: '创建成功，打开设置失败', message: String(error), toastOnly: true });
+    }
+  }
+};
+
 const handleCreateAgent = async () => {
   if (isCreating.value) return;
   console.info('[AgentsCreator] create-agent clicked');
@@ -27,27 +49,10 @@ const handleCreateAgent = async () => {
       if (!name) return;
 
       isCreating.value = true;
+      const intent = sessionStore.beginNavigation();
       try {
         const newAgent = await assistantStore.createAgent(name);
-        await assistantStore.fetchAgentsAndGroups();
-        if (newAgent?.id) {
-          // 选中新创建的 Agent
-          sessionStore.setConversation({
-            id: newAgent.id,
-            name: newAgent.name,
-            type: 'agent'
-          }, null);
-          // 加载话题列表
-          try {
-            await topicListStore.loadTopicList(newAgent.id, 'agent');
-          } catch {
-            // Topic Store 已统一显示加载失败提示；Agent 创建本身仍然成功。
-          }
-          // 关闭侧边栏
-          layoutStore.setLeftDrawer(false);
-          // 开启配置 Overlay
-          overlayStore.openAgentSettings(newAgent.id);
-        }
+        if (newAgent?.id) await openCreatedOwner(newAgent.id, newAgent.name, 'agent', intent);
       } catch (error) {
         console.error('[AgentsCreator] create-agent failed', error);
         notificationStore.addNotification({
@@ -74,27 +79,10 @@ const handleCreateGroup = async () => {
       if (!name) return;
 
       isCreating.value = true;
+      const intent = sessionStore.beginNavigation();
       try {
         const newGroup = await assistantStore.createGroup(name);
-        await assistantStore.fetchAgentsAndGroups();
-        if (newGroup?.id) {
-          // 选中新创建 of Group
-          sessionStore.setConversation({
-            id: newGroup.id,
-            name: newGroup.name,
-            type: 'group'
-          }, null);
-          // 加载话题列表
-          try {
-            await topicListStore.loadTopicList(newGroup.id, 'group');
-          } catch {
-            // Topic Store 已统一显示加载失败提示；Group 创建本身仍然成功。
-          }
-          // 关闭侧边栏
-          layoutStore.setLeftDrawer(false);
-          // 开启配置 Overlay
-          overlayStore.openGroupSettings(newGroup.id);
-          }
+        if (newGroup?.id) await openCreatedOwner(newGroup.id, newGroup.name, 'group', intent);
       } catch (error) {
         console.error('[AgentsCreator] create-group failed', error);
         notificationStore.addNotification({

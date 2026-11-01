@@ -1,6 +1,9 @@
 // TopicService: 处理会话话题生命周期的模块
 // 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
 
+use super::chat_focus::DeleteScope;
+use super::chat_navigation::observe_target_deletion;
+use super::voice_service::VoiceCallState;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
@@ -14,7 +17,7 @@ use sqlx::{sqlite::SqliteRow, Row};
 use std::collections::HashMap;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
-const TOPIC_LIST_QUERY: &str = "WITH topic_list AS (
+pub(super) const TOPIC_LIST_QUERY: &str = "WITH topic_list AS (
          SELECT t.topic_id, t.title, t.created_at, t.locked, t.unread, t.unread_count, t.msg_count,
             CASE
                 WHEN MAX(m.updated_at) IS NULL
@@ -43,7 +46,7 @@ pub enum TopicSortMode {
 }
 
 impl TopicSortMode {
-    fn query_code(self) -> i32 {
+    pub(super) fn query_code(self) -> i32 {
         match self {
             Self::Created => 0,
             Self::Updated => 1,
@@ -249,6 +252,9 @@ pub async fn delete_topic(
 ) -> Result<Option<Topic>, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let key = TopicKey::new(&owner_type, &owner_id, &topic_id);
+    let scope = DeleteScope::Topic(key.clone());
+    let calls = app_handle.state::<VoiceCallState>();
+    let reservation = calls.reserve_local_delete(scope.clone())?;
     let replacement = Topic {
         id: if owner_type == "group" {
             format!("group_topic_{now}")
@@ -271,6 +277,8 @@ pub async fn delete_topic(
     let deletion = delete_topic_data_inner(&db_state, &key, now, Some(replacement))
         .await?
         .ok_or_else(|| format!("Topic {topic_id} does not exist"))?;
+    observe_target_deletion(&app_handle, &scope).await;
+    drop(reservation);
     if !deletion.deleted {
         return Ok(None);
     }

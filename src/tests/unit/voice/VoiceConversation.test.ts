@@ -12,9 +12,9 @@ function deferred<T>() {
 }
 
 const key: ConversationKey = { ownerId: 'agent', ownerType: 'agent', topicId: 'topic', epoch: 1 };
-let current = true;
 let onView: ReturnType<typeof vi.fn<(view: VoiceServiceView) => void>>;
 let onSnapshot: ReturnType<typeof vi.fn<(snapshot: VoiceCallSnapshot | null) => void>>;
+let onTargetDeleted: ReturnType<typeof vi.fn<(snapshot: VoiceCallSnapshot) => void>>;
 let controller: ReturnType<typeof createVoiceConversation>;
 let connectDocument: ReturnType<typeof vi.fn<() => Promise<string>>>;
 async function beginCall() {
@@ -34,14 +34,15 @@ function snapshot(overrides: Partial<VoiceCallSnapshot> = {}): VoiceCallSnapshot
 }
 
 beforeEach(() => {
-  current = true;
   onView = vi.fn();
   onSnapshot = vi.fn();
+  onTargetDeleted = vi.fn();
   connectDocument = vi.fn().mockResolvedValue('document-1');
   mockInvoke('get_voice_conversation_snapshot', () => null);
   mockInvoke('begin_voice_conversation', args => snapshot({ callId: args!.callId as string }));
   controller = createVoiceConversation({
-    conversation: () => key, isConversationCurrent: () => current, connectDocument, onView, onSnapshot,
+    conversation: () => key, window: () => ({ documentId: 1, focusRevision: 4, windowRevision: 5, anchorId: null }),
+    connectDocument, onView, onSnapshot, onTargetDeleted,
   });
 });
 afterEach(() => controller.dispose());
@@ -50,7 +51,7 @@ describe('Rust voice conversation projection', () => {
   it('binds an explicit start intent to its target without exporting the Vue epoch', async () => {
     const callId = await beginCall();
     expect(invokeMock).toHaveBeenCalledWith('begin_voice_conversation', {
-      callId, target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
+      callId, target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' }, documentId: 1, expectedFocusRevision: 4,
     });
     expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['begin_voice_conversation']);
     expect(listenMock).toHaveBeenCalledExactlyOnceWith('vcp-voice-call', expect.any(Function));
@@ -124,6 +125,42 @@ describe('Rust voice conversation projection', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
+  it('announces a live deletion once and silently restores an already ended call', async () => {
+    const ended = snapshot({ active: false, endReason: 'target_deleted', revision: 3 });
+    mockInvoke('get_voice_conversation_snapshot', () => ended);
+    await expect(controller.recover()).resolves.toMatchObject({ endReason: 'target_deleted' });
+    emitTauriEvent('vcp-voice-call', { ...ended, revision: 4 });
+    expect(onTargetDeleted).not.toHaveBeenCalled();
+    const removed = { ...ended, callId: 'new-call', revision: 5 };
+    emitTauriEvent('vcp-voice-call', removed);
+    emitTauriEvent('vcp-voice-call', { ...removed, revision: 6, error: 'cleanup failed' });
+    expect(onTargetDeleted).toHaveBeenCalledExactlyOnceWith(removed);
+  });
+
+  it('keeps a live call visible and retryable when the hangup command fails', async () => {
+    const callId = await beginCall();
+    const ending = deferred<void>();
+    mockInvoke('end_voice_conversation', () => ending.promise);
+    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ callId, revision: 2 }));
+    const stopped = controller.stop();
+    expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ active: true, callId }));
+    ending.reject(new Error('end failed'));
+    await expect(stopped).rejects.toThrow('end failed');
+    expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ active: true, callId, revision: 2 }));
+    mockInvoke('end_voice_conversation', () => emitTauriEvent('vcp-voice-call', snapshot({ callId, revision: 3, active: false })));
+    await controller.stop();
+    expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ active: false, callId }));
+  });
+
+  it('adopts a surviving replacement call after its predecessor ended while the view was frozen', async () => {
+    await beginCall();
+    const target = { ownerId: 'group', ownerType: 'group' as const, topicId: 'new' };
+    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ callId: 'replacement', revision: 9, target }));
+    await expect(controller.recover()).resolves.toMatchObject({ callId: 'replacement', target });
+    await controller.stop();
+    expect(invokeMock).toHaveBeenCalledWith('end_voice_conversation', { callId: 'replacement' });
+  });
+
   it('does not hang up an established call when its listener is disposed', async () => {
     await beginCall();
     const count = invokeMock.mock.calls.length;
@@ -161,13 +198,13 @@ describe('Rust voice conversation projection', () => {
     expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ active: true, callId }));
   });
 
-  it('keeps the Vue epoch a display guard and does not cancel background Rust work', async () => {
-    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ revision: 2, replyState: 'generating' }));
+  it('recovers the actual call target even if the saved Vue topic differs', async () => {
+    const target = { ...key, topicId: 'other-topic' };
+    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ target, revision: 2, replyState: 'generating' }));
     await controller.recover();
     onSnapshot.mockClear();
-    current = false;
-    emitTauriEvent('vcp-voice-call', snapshot({ revision: 3, replyState: 'finished' }));
-    expect(onSnapshot).not.toHaveBeenCalled();
+    emitTauriEvent('vcp-voice-call', snapshot({ target, revision: 3, replyState: 'finished' }));
+    expect(onSnapshot).toHaveBeenCalledWith(expect.objectContaining({ target, replyState: 'finished' }));
     expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['get_voice_conversation_snapshot']);
   });
 
@@ -233,6 +270,15 @@ describe('Rust voice conversation projection', () => {
     beginning.resolve(snapshot({ callId }));
     await expect(opening).resolves.toBeNull();
     expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['begin_voice_conversation']);
+  });
+
+  it('preserves native call initialization failure after the inactive event cleared pending capture', async () => {
+    mockInvoke('begin_voice_conversation', args => {
+      emitTauriEvent('vcp-voice-call', snapshot({ callId: args!.callId as string, active: false, error: 'route unavailable' }));
+      throw new Error('route unavailable');
+    });
+    await expect(controller.openMicrophone()).rejects.toThrow('route unavailable');
+    expect(invokeMock.mock.calls.some(([name]) => name === 'start_voice_microphone')).toBe(false);
   });
 
   it.each(['resolve', 'reject'] as const)('leaves admission ordering and a late %s to Rust after early close', async outcome => {

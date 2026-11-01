@@ -4,7 +4,6 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { cancelFileOperation, pickFile } from "../../core/utils/nativeFilePicker";
 import { useAssistantStore } from "../../core/stores/assistant";
-import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { SETTINGS_DEFAULTS } from "../../core/config/generated/defaults";
@@ -34,7 +33,6 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits(["close", "delete"]);
 
 const assistantStore = useAssistantStore();
-const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 const { registerModal } = useModalHistory();
@@ -397,17 +395,11 @@ const handleDelete = async () => {
     try {
       if (!await assistantStore.deleteAgent(agentId)) return;
       if (!isOpenEditorCurrent(epoch, agentId)) return;
-      if (
-        sessionStore.currentSelectedItem?.type === "agent" &&
-        sessionStore.currentSelectedItem?.id === agentId
-      ) {
-        sessionStore.clearConversation();
-      }
       // 删除成功后关闭页面不再把当前草稿自动保存到墓碑实体。
       originalConfig.value = JSON.parse(JSON.stringify(agentConfig.value));
       emit("close");
     } catch (err) {
-      console.error("Failed to delete agent:", err);
+      notificationStore.addNotification({ type: 'error', title: '删除失败', message: String(err), toastOnly: true });
     }
   }
 };

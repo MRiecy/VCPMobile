@@ -69,7 +69,8 @@ function mountComposer(component: Component = InputEnhancer) {
     },
   }, () => {
     const session = useChatSessionStore();
-    session.setConversation({ id: 'voice-agent', type: 'agent', name: '语音助手' }, 'voice-topic');
+    session.setConversation({ id: 'voice-agent', type: 'agent', name: '语音助手' }, 'voice-topic',
+      { documentId: 1, focusRevision: 1, windowRevision: 1, anchorId: null });
     const history = useChatHistoryStore();
     history.loadedConversationKey = session.currentConversationKey;
     history.currentChatHistory = [{ id: 'existing-message', role: 'assistant', content: '已有消息', timestamp: 1, blocks: [] }];
@@ -113,6 +114,11 @@ beforeEach(() => {
   audio.stopCapture.mockResolvedValue(undefined);
   mockInvoke('allocate_voice_document', () => 'document-1');
   mockInvoke('start_voice_microphone', () => audio.startCapture());
+  mockInvoke('begin_voice_conversation', args => ({
+    callId: args!.callId, target: args!.target, revision: 1, active: true, micState: 'closed',
+    inputState: 'idle', replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
+    inputSessionId: null, lastPersistedMessageId: null,
+  }));
   mockInvoke('close_voice_microphone', () => audio.stopCapture());
   window.history.replaceState({ vcpRoot: true, vcpMain: true }, '', '#/chat');
   vi.spyOn(window.history, 'back').mockImplementation(() => {

@@ -327,7 +327,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         return { addedCount: 0, aborted: true };
       }
       if (isMissingTopicError(e)) {
-        sessionStore.clearCurrentTopic();
         return { addedCount: 0, aborted: true };
       }
       notifyHistoryLoadFailure();

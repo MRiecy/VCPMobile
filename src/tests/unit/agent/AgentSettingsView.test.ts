@@ -173,7 +173,7 @@ describe('Agent settings authoritative voice draft', () => {
     });
   });
 
-  it('keeps deletion confirmation and clears the selected conversation only on success', async () => {
+  it('closes only after confirmed deletion and leaves focus changes to Rust', async () => {
     const wrapper = await render();
     context.currentSelectedItem = { type: 'agent', id: 'a' };
     context.showConfirm.mockResolvedValueOnce(false);
@@ -188,7 +188,8 @@ describe('Agent settings authoritative voice draft', () => {
     await button(wrapper, '删除此 Agent').trigger('click');
     await flushPromises();
     expect(context.showConfirm).toHaveBeenLastCalledWith({ title: '删除 Agent', message: '确定要删除这个 Agent 吗？此操作不可撤销。', isDanger: true });
-    expect(context.clearConversation).toHaveBeenCalledOnce();
+    expect(context.deleteAgent).toHaveBeenLastCalledWith('a');
+    expect(context.clearConversation).not.toHaveBeenCalled();
     expect(wrapper.emitted('close')).toHaveLength(1);
     expect(context.saveAgent).not.toHaveBeenCalled();
   });

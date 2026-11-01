@@ -24,43 +24,6 @@ const canCreateTopic = computed(
   () => Boolean(currentItemId.value) && !isCreating.value,
 );
 
-const selectTopic = async (
-  itemId: string,
-  topicId: string,
-  topicName: string,
-  ownerType: string,
-  expectedEpoch: number,
-  allowUnselectedOwner: boolean,
-) => {
-  if (router.currentRoute.value.path !== "/chat") {
-    await router.push("/chat");
-  }
-
-  const currentOwner = sessionStore.currentSelectedItem;
-  if (
-    sessionStore.sessionEpoch !== expectedEpoch ||
-    (currentOwner
-      ? currentOwner.id !== itemId || currentOwner.type !== ownerType
-      : !allowUnselectedOwner)
-  ) {
-    return;
-  }
-
-  // 使用统一的 sessionStore 选择话题，历史加载由 ChatView 的 watcher 响应
-  await sessionStore.selectTopicById(
-    itemId,
-    ownerType as "agent" | "group",
-    topicId,
-  );
-
-  const createdTopic = topicStore.topics.find((topic) => topic.id === topicId);
-  if (createdTopic) {
-    createdTopic.name = topicName;
-  }
-
-  layoutStore.setLeftDrawer(false);
-};
-
 const handleCreateTopic = async () => {
   if (isCreating.value) return;
 
@@ -70,7 +33,6 @@ const handleCreateTopic = async () => {
   );
 
   const owner = sessionStore.currentSelectedItem;
-  const allowUnselectedOwner = !owner;
   const ownerId = owner?.id || currentItemId.value;
   if (!ownerId) {
     notificationStore.addNotification({
@@ -85,7 +47,7 @@ const handleCreateTopic = async () => {
   const ownerType = owner?.type || (
     assistantStore.agents.some((a) => a.id === ownerId) ? "agent" : "group"
   );
-  const selectionEpoch = sessionStore.sessionEpoch;
+  const intent = sessionStore.beginNavigation();
 
   const newTopicName = `新话题 ${new Date().toLocaleTimeString([], {
     hour: "2-digit",
@@ -99,22 +61,18 @@ const handleCreateTopic = async () => {
       ownerType,
       newTopicName,
     );
-    if (
-      newTopic?.id &&
-      sessionStore.sessionEpoch === selectionEpoch &&
-      (sessionStore.currentSelectedItem
-        ? sessionStore.currentSelectedItem.id === ownerId &&
-          sessionStore.currentSelectedItem.type === ownerType
-        : allowUnselectedOwner)
-    ) {
-      await selectTopic(
-        ownerId,
-        newTopic.id,
-        newTopic.name,
-        ownerType,
-        selectionEpoch,
-        allowUnselectedOwner,
-      );
+    if (!newTopic?.id || !sessionStore.isNavigationCurrent(intent)) return;
+    try {
+      const result = await sessionStore.selectTopicById(ownerId, ownerType, newTopic.id, intent);
+      if (!sessionStore.isNavigationCurrent(intent)) return;
+      if (result === 'accepted') {
+        layoutStore.setLeftDrawer(false);
+        if (router.currentRoute.value.path !== "/chat") await router.push("/chat");
+      } else sessionStore.notifyNavigationResult(result);
+    } catch (error) {
+      if (sessionStore.isNavigationCurrent(intent)) {
+        notificationStore.addNotification({ type: 'error', title: '话题已创建，打开失败', message: String(error), toastOnly: true });
+      }
     }
   } catch (error) {
     console.error("[TopicCreator] create-topic failed", error);

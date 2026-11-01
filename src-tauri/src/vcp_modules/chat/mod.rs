@@ -1,6 +1,8 @@
 pub mod ast_diff;
 pub mod aurora_pipeline;
+pub(crate) mod chat_focus;
 pub mod chat_manager;
+pub(crate) mod chat_navigation;
 pub mod content_parser;
 pub mod context_assembler;
 pub mod context_injection;

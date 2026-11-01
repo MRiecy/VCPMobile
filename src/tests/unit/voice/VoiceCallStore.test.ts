@@ -31,7 +31,11 @@ vi.mock('../../../core/stores/appLifecycle', () => ({ useAppLifecycleStore: () =
 vi.mock('../../../features/chat/voice/voiceConversation', () => ({
   createVoiceConversation: (options: { onSnapshot: (snapshot: VoiceCallSnapshot | null) => void }) => {
     context.onSnapshot = options.onSnapshot;
-    return { begin: vi.fn(), openMicrophone: context.start, stop: context.endCall, closeMicrophone: context.stop,
+    return { openMicrophone: () => {
+      if (!context.onSnapshot) throw new Error('missing listener');
+      publishCapture('closed');
+      return context.start();
+    }, stop: context.endCall, closeMicrophone: context.stop,
       recover: context.recover, dispose: context.disposeConversation };
   },
 }));
@@ -78,7 +82,7 @@ beforeEach(() => {
   });
   context.stop.mockReset().mockImplementation(async () => { publishCapture('closed', 'requested'); });
   context.detach.mockReset();
-  context.endCall.mockReset().mockImplementation(() => context.onSnapshot?.(null));
+  context.endCall.mockReset().mockImplementation(async () => context.onSnapshot?.(null));
   context.disposeConversation.mockReset();
   context.recover.mockReset().mockResolvedValue(null);
   context.onLevel = undefined;
@@ -135,7 +139,7 @@ describe('voice call lifecycle', () => {
     request.resolve({ configured: true });
     await flushPromises();
 
-    expect(action === 'mute' ? context.stop : context.detach).toHaveBeenCalledOnce();
+    expect(action === 'mute' ? context.stop : context.endCall).toHaveBeenCalledOnce();
     expect(store.active).toBe(action === 'mute');
     expect(store.microphoneState).toBe('off');
     expect(store.level).toBe(0);
@@ -191,18 +195,18 @@ describe('voice call lifecycle', () => {
     expect(store.microphoneState).toBe('on');
   });
 
-  it('ends the call and releases audio when the bound conversation is replaced', async () => {
+  it('keeps the Rust call when the projected conversation epoch changes', async () => {
     const store = useVoiceCallStore();
     store.start();
     await flushPromises();
 
     context.session.currentConversationKey = { ...context.session.currentConversationKey!, epoch: 2 };
 
-    expect(context.detach).toHaveBeenCalledOnce();
+    expect(context.detach).not.toHaveBeenCalled();
     expect(context.stop).not.toHaveBeenCalled();
-    expect(context.endCall).toHaveBeenCalledOnce();
-    expect(store.active).toBe(false);
-    expect(store.microphoneState).toBe('off');
+    expect(context.endCall).not.toHaveBeenCalled();
+    expect(store.active).toBe(true);
+    expect(store.microphoneState).toBe('on');
   });
 
   it('reports a hardware interruption without leaving the call and cleans up on disposal', async () => {

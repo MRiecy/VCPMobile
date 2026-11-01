@@ -427,25 +427,26 @@ describe("chat conversation concurrency guards", () => {
       { id: "agent-b", name: "B", model: "test", avatarCalculatedColor: null },
       { id: "agent-c", name: "C", model: "test", avatarCalculatedColor: null },
     ];
-    const topicsB = deferred<void>();
-    const topicsC = deferred<void>();
-    mockInvoke("get_topics_streamed", (args) =>
-      args?.ownerId === "agent-b" ? topicsB.promise : topicsC.promise,
-    );
+    const topicsB = deferred<unknown>();
+    const arrival = deferred<void>();
+    const selected = (id: string, revision: number) => ({
+      status: "accepted", focus: { focusRevision: revision, windowRevision: revision, anchorId: null,
+        target: { kind: "topic", ownerType: "agent", ownerId: "agent-" + id, topicId: "topic-" + id } },
+    });
+    const initialFocus = { target: { kind: "welcome" }, focusRevision: 0, windowRevision: 0, anchorId: null };
+    mockInvoke("connect_chat_view", () => ({ documentId: 1, focus: initialFocus }));
+    mockInvoke("register_chat_navigation_intent", () => ({ focus: initialFocus }));
+    mockInvoke("request_chat_navigation", args => {
+      if ((args?.target as { ownerId: string }).ownerId === "agent-c") return selected("c", 2);
+      arrival.resolve();
+      return topicsB.promise;
+    });
 
     const selectingB = session.selectItem({ id: "agent-b", name: "B", type: "agent" });
+    await arrival.promise;
     const selectingC = session.selectItem({ id: "agent-c", name: "C", type: "agent" });
-    channelInstances[1]?.emit([{
-      id: "topic-c",
-      name: "Topic C",
-    }]);
-    topicsC.resolve();
     await selectingC;
-    channelInstances[0]?.emit([{
-      id: "topic-b",
-      name: "Topic B",
-    }]);
-    topicsB.resolve();
+    topicsB.resolve(selected("b", 1));
     await selectingB;
 
     expect(session.currentConversationKey).toMatchObject({

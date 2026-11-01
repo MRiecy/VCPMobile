@@ -205,7 +205,7 @@ watch(() => props.img, (newImg) => {
 
 onMounted(() => {
   modalRegistered = true;
-  registerModal(MODAL_ID, handleCancel, () => surfaceRef.value);
+  registerModal(MODAL_ID, handleCancel, () => surfaceRef.value, undefined, () => !isConfirming.value);
 });
 
 onBeforeUnmount(() => {

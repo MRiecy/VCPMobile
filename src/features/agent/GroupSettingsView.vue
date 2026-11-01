@@ -6,7 +6,6 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { cancelFileOperation, pickFile } from "../../core/utils/nativeFilePicker";
 import { useAssistantStore } from "../../core/stores/assistant";
-import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
@@ -57,7 +56,6 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits(["close"]);
 
 const assistantStore = useAssistantStore();
-const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 const { registerModal, unregisterModal } = useModalHistory();
@@ -544,12 +542,6 @@ const handleDelete = async () => {
     try {
       if (!await assistantStore.deleteGroup(groupId)) return;
       if (!isOpenEditorCurrent(epoch, groupId)) return;
-      if (
-        sessionStore.currentSelectedItem?.type === "group" &&
-        sessionStore.currentSelectedItem?.id === groupId
-      ) {
-        sessionStore.clearConversation();
-      }
       // 删除成功后关闭页面不再把当前草稿自动保存到墓碑实体。
       retainedDrafts.delete(groupId);
       originalConfig.value = cloneConfig(groupConfig.value);

@@ -55,8 +55,7 @@ function seedAgentsAndRow() {
 
 function seedMatureTopic() {
   const sessionStore = useChatSessionStore();
-  sessionStore.currentTopicId = 't1';
-  sessionStore.currentSelectedItem = { id: 'a1', type: 'agent' };
+  sessionStore.setConversation({ id: 'a1', type: 'agent' }, 't1');
   useTopicStore().topics = [{ id: 't1', name: '已总结的话题标题' }] as never;
   useChatHistoryStore().currentChatHistory = [
     { role: 'user' },

@@ -37,6 +37,9 @@ macro_rules! app_command_handler {
             append_single_message, delete_messages, edit_resend_message, load_chat_history, load_chat_history_around,
             load_chat_history_streamed, patch_single_message, truncate_history_after_message,
         };
+        use crate::vcp_modules::chat::chat_navigation::{
+            connect_chat_view, register_chat_navigation_intent, request_chat_navigation, restore_chat_view,
+        };
         use crate::vcp_modules::chat::voice_service::{
             begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
             start_voice_microphone, close_voice_microphone, voice_call_list_inputs, voice_call_select_input,
@@ -187,6 +190,10 @@ macro_rules! app_command_handler {
                 edit_resend_message,
                 fetch_raw_message_content,
                 handle_agent_chat_message,
+                connect_chat_view,
+                register_chat_navigation_intent,
+                request_chat_navigation,
+                restore_chat_view,
                 load_chat_history,
                 load_chat_history_around,
                 load_chat_history_streamed,
