@@ -46,9 +46,9 @@ const onExport = async () => {
     if (!saved.ok) throw new Error(saved.error);
     const [domains, groupPreferences, agentPreferences, standaloneData] = await Promise.all([
       captureBackupDomains(),
-      captureBackupGroupPreferences().catch(() => ({})),
-      captureBackupAgentPreferences().catch(() => ({})),
-      captureBackupStandaloneData().catch(() => ({ modelFavorites: [], tarvenRules: [] })),
+      captureBackupGroupPreferences(),
+      captureBackupAgentPreferences(),
+      captureBackupStandaloneData(),
     ]);
     if (disposed || !props.active) return;
     exportOperationId = `config_export_${crypto.randomUUID()}`;

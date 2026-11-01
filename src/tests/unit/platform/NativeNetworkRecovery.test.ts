@@ -28,12 +28,6 @@ vi.mock('../../../core/stores/ragObserver', () => ({
 vi.mock('../../../features/chat/voice/voiceHistorySync', () => ({
   createVoiceHistorySync: () => ({ reconcile: voiceRecover, dispose: voiceDispose }),
 }));
-const platform = vi.hoisted(() => ({ value: 'ios' as 'android' | 'ios' }));
-vi.mock('../../../core/utils/platform', () => ({
-  get nativePlatform() { return platform.value; },
-  get isAndroid() { return platform.value === 'android'; },
-  get isIOS() { return platform.value === 'ios'; },
-}));
 
 describe('native network recovery', () => {
   let wrapper: VueWrapper | undefined;
@@ -45,7 +39,6 @@ describe('native network recovery', () => {
   });
 
   beforeEach(() => {
-    platform.value = 'ios';
     recover.mockReset().mockResolvedValue(undefined);
     voiceRecover.mockReset().mockResolvedValue(undefined);
     voiceDispose.mockReset();
@@ -68,13 +61,14 @@ describe('native network recovery', () => {
     wrapper = undefined;
   });
 
-  it.each(['android', 'ios'] as const)('coalesces native and browser online in the existing recovery owner on %s', async nativePlatform => {
-    platform.value = nativePlatform;
+  it('recovers from native network changes and ignores browser online events', async () => {
     let finish: () => void = () => {};
     recover.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
     wrapper = mount(consumer);
     await flushPromises();
 
+    window.dispatchEvent(new Event('online'));
+    await flushPromises();
     emitTauriEvent('vcp-network-changed', { connected: false });
     expect(recover).not.toHaveBeenCalled();
     emitTauriEvent('vcp-network-changed', { connected: true });
@@ -85,6 +79,9 @@ describe('native network recovery', () => {
 
     finish();
     await flushPromises();
+    window.dispatchEvent(new Event('online'));
+    await flushPromises();
+    expect(recover).toHaveBeenCalledTimes(1);
     emitTauriEvent('vcp-network-changed', { connected: true });
     expect(recover).toHaveBeenCalledTimes(2);
   });
@@ -132,7 +129,7 @@ describe('native network recovery', () => {
     expect(refreshInfo).toHaveBeenCalledTimes(1);
   });
 
-  it('waits for READY and a real active iOS snapshot while the document is visible', async () => {
+  it('waits for READY and a native active snapshot while the document is visible', async () => {
     wrapper = mount(consumer);
     await flushPromises();
     lifecycle.state = 'LOADING';

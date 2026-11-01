@@ -7,6 +7,7 @@ import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { pickFile, withNativeFileOperation } from "../../core/utils/nativeFilePicker";
 import { useSettingsStore, type AppSettings } from "../../core/stores/settings";
 import { buildSettingsUpdate, type SettingsFieldValues } from "../../core/config/fields";
+import type { ConfigBackupImportResult } from "../../core/config/generated/config";
 import { useTopicStore } from "../../core/stores/topicListManager";
 import { useDiaryStore } from "../diary/diaryStore";
 import { useUpdateStore } from "../../core/stores/update";
@@ -264,17 +265,15 @@ export async function restoreBackupPreferences(
   }
 }
 
-export const restoreClientPreferences = restoreBackupPreferences;
-
 /** Apply present, normalized fields through their existing persistence owners. */
 export async function applyConfigBackup(
   backup: ParsedConfigBackup,
   applySettings: (
     changes: Partial<SettingsFieldValues>,
     groupPreferences: Record<string, GroupLocalSettingsPatch>,
-    agentPreferences?: Record<string, AgentLocalSettingsPatch>,
+    agentPreferences: Record<string, AgentLocalSettingsPatch>,
     standaloneData?: StandaloneDataImport,
-  ) => Promise<{ missingGroups?: boolean; missingAgents?: boolean } | boolean>,
+  ) => Promise<Pick<ConfigBackupImportResult, 'missingGroups' | 'missingAgents'>>,
 ): Promise<BackupImportResult> {
   backup = normalizeParsedConfigBackup(backup);
   const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
@@ -289,27 +288,13 @@ export async function applyConfigBackup(
 
   if (databaseScopes.length) {
     try {
-      const applyRes = (backup.agentPreferences !== undefined || backup.standaloneData !== undefined)
-        ? await applySettings(
-            backupFieldChanges(backup.domains),
-            backup.groupPreferences ?? {},
-            backup.agentPreferences ?? {},
-            backup.standaloneData,
-          )
-        : await applySettings(
-            backupFieldChanges(backup.domains),
-            backup.groupPreferences ?? {},
-          );
+      const { missingGroups, missingAgents } = await applySettings(
+        backupFieldChanges(backup.domains),
+        backup.groupPreferences ?? {},
+        backup.agentPreferences ?? {},
+        backup.standaloneData,
+      );
       result.applied.push(...databaseScopes);
-
-      let missingGroups = false;
-      let missingAgents = false;
-      if (typeof applyRes === 'boolean') {
-        missingGroups = applyRes;
-      } else if (applyRes && typeof applyRes === 'object') {
-        missingGroups = Boolean(applyRes.missingGroups ?? (applyRes as any).missing_groups);
-        missingAgents = Boolean(applyRes.missingAgents ?? (applyRes as any).missing_agents);
-      }
 
       if (missingGroups) {
         result.skipped.push('部分群聊尚未同步到本机，请先同步，再次导入');
@@ -348,24 +333,13 @@ export function captureBackupAgentPreferences(): Promise<Record<string, AgentLoc
 
 export async function captureBackupStandaloneData(): Promise<StandaloneData> {
   const [modelFavorites, tarvenRules] = await Promise.all([
-    invoke<string[]>('get_favorite_models').catch(() => []),
-    invoke<TarvenRule[]>('get_tarven_rules').catch(() => []),
+    invoke<string[]>('get_favorite_models'),
+    invoke<TarvenRule[]>('get_tarven_rules'),
   ]);
   return {
     modelFavorites,
     tarvenRules,
   };
-}
-
-export async function captureBackupPayload(now: Date = new Date()): Promise<ConfigBackupFile> {
-  const [domains, groupPreferences, agentPreferences, standaloneData] = await Promise.all([
-    captureBackupDomains(),
-    captureBackupGroupPreferences().catch(() => ({})),
-    captureBackupAgentPreferences().catch(() => ({})),
-    captureBackupStandaloneData().catch(() => ({ modelFavorites: [], tarvenRules: [] })),
-  ]);
-  const preferences = captureBackupPreferences();
-  return buildBackupPayload(domains, preferences, now, groupPreferences, agentPreferences, standaloneData);
 }
 
 /** Check whether staged entity backup payload is still within its 7-day TTL */
@@ -553,14 +527,9 @@ export async function pickConfigBackup(operationId: string): Promise<ParsedConfi
  */
 export async function applyImport(
   backup: ParsedConfigBackup,
-  customApplySettings?: (
-    changes: Partial<SettingsFieldValues>,
-    groupPreferences: Record<string, GroupLocalSettingsPatch>,
-    agentPreferences?: Record<string, AgentLocalSettingsPatch>,
-    standaloneData?: StandaloneDataImport,
-  ) => Promise<{ missingGroups?: boolean; missingAgents?: boolean } | boolean>,
+  acceptImportedFields?: (changes: Partial<SettingsFieldValues>) => void,
 ): Promise<BackupImportResult> {
-  const baseHandler = customApplySettings ?? (async (changes, groupPreferences, agentPreferences, standaloneData) => {
+  return applyConfigBackup(backup, async (changes, groupPreferences, agentPreferences, standaloneData) => {
     const settingsStore = useSettingsStore();
     const snapshot = settingsStore.snapshot ?? (await settingsStore.fetchSettings().then(() => settingsStore.snapshot));
     if (!snapshot) throw new Error('配置尚未加载');
@@ -575,39 +544,24 @@ export async function applyImport(
       const issues = saveResult.status === 'rejected' ? saveResult.issues : saveResult.conflicts;
       throw new Error(issues.map(issue => `${issue.domain}.${issue.field}: ${issue.message}`).join('\n'));
     }
+    acceptImportedFields?.(changes);
 
-    if (Object.keys(groupPreferences).length || (agentPreferences && Object.keys(agentPreferences).length)) {
+    if (Object.keys(groupPreferences).length || Object.keys(agentPreferences).length) {
       try {
         await useAssistantStore().fetchAgentsAndGroups();
         useChatSessionStore().reconcileCurrentConversation();
       } catch {
-        // ignore
+        useNotificationStore().addNotification({
+          type: 'warning', title: '配置已导入',
+          message: '实体配置已保存，列表刷新失败，请重新打开会话查看。', toastOnly: true,
+        });
       }
     }
-
-    return importRes;
-  });
-
-  const wrappedHandler = async (
-    changes: Partial<SettingsFieldValues>,
-    groupPreferences: Record<string, GroupLocalSettingsPatch>,
-    agentPreferences?: Record<string, AgentLocalSettingsPatch>,
-    standaloneData?: StandaloneDataImport,
-  ) => {
-    const applyRes = await baseHandler(changes, groupPreferences, agentPreferences, standaloneData);
-    let missingGroups = false;
-    let missingAgents = false;
-    if (typeof applyRes === 'boolean') {
-      missingGroups = applyRes;
-    } else if (applyRes && typeof applyRes === 'object') {
-      missingGroups = Boolean(applyRes.missingGroups ?? (applyRes as any).missing_groups);
-      missingAgents = Boolean(applyRes.missingAgents ?? (applyRes as any).missing_agents);
-    }
-
+    const { missingGroups, missingAgents } = importRes;
     if (missingGroups || missingAgents) {
       writeStagedEntityBackup({
-        agentPreferences: backup.agentPreferences ?? {},
-        groupPreferences: backup.groupPreferences ?? {},
+        agentPreferences: missingAgents ? agentPreferences : undefined,
+        groupPreferences: missingGroups ? groupPreferences : undefined,
       });
       useNotificationStore().addNotification({
         type: 'info',
@@ -617,8 +571,6 @@ export async function applyImport(
       });
     }
 
-    return applyRes;
-  };
-
-  return await applyConfigBackup(backup, wrappedHandler);
+    return importRes;
+  });
 }

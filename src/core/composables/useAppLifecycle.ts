@@ -3,7 +3,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useAppLifecycleStore } from '../stores/appLifecycle';
 import { useChatStreamStore } from '../stores/chatStreamStore';
 import { useRagObserverStore } from '../stores/ragObserver';
-import { isIOS } from '../utils/platform';
 import type { LifecycleSnapshotDto } from '../types/lifecycle';
 import { createVoiceHistorySync } from '../../features/chat/voice/voiceHistorySync';
 
@@ -16,16 +15,13 @@ export function useAppLifecycle() {
   let unlistenNetwork: UnlistenFn | null = null;
   let recoveryPromise: Promise<void> | null = null;
   let disposed = false;
-  const documentHidden = ref(typeof document !== 'undefined' && document.hidden);
+  const documentHidden = ref(document.hidden);
   const activeEpoch = ref<number | null>(null);
   const visibleEpoch = ref(0);
 
   const reconcileInterruptedStreams = (source: string) => {
     if (disposed || lifecycleStore.state !== 'READY' || documentHidden.value) return;
-    const phase = lifecycleStore.lifecycleSnapshot?.phase;
-    // iOS must receive its first native snapshot before starting foreground recovery.
-    if (isIOS && !phase) return;
-    if (phase && phase !== 'active') return;
+    if (lifecycleStore.lifecycleSnapshot?.phase !== 'active') return;
     if (recoveryPromise) return recoveryPromise;
     console.log(`[useAppLifecycle] ${source}. Triggering stream recovery.`);
     recoveryPromise = Promise.allSettled([
@@ -37,13 +33,9 @@ export function useAppLifecycle() {
           console.error(`[useAppLifecycle] Recovery failed (${source}):`, result.reason);
         }
       }
-    })
-      .catch(err => {
-        console.error(`[useAppLifecycle] Failed to recover streams (${source}):`, err);
-      })
-      .finally(() => {
-        recoveryPromise = null;
-      });
+    }).finally(() => {
+      recoveryPromise = null;
+    });
     return recoveryPromise;
   };
 
@@ -79,23 +71,14 @@ export function useAppLifecycle() {
     });
 
   const handleVisibilityChange = () => {
-    if (typeof document !== 'undefined') {
-      documentHidden.value = document.hidden;
-      if (!documentHidden.value) visibleEpoch.value++;
-    }
-  };
-
-  const handleOnline = () => {
-    void reconcileInterruptedStreams("Device online");
+    documentHidden.value = document.hidden;
+    if (!documentHidden.value) visibleEpoch.value++;
   };
 
   onMounted(async () => {
-    if (typeof window !== 'undefined') {
-      document.addEventListener("visibilitychange", handleVisibilityChange);
-      window.addEventListener("online", handleOnline);
-    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // iOS NWPath observations feed the same recovery owner as browser online.
+    // Android and iOS native callbacks are the sole network recovery signal.
     // A satisfied path is a retry hint, not proof that the configured server is reachable.
     void listen<{ connected: boolean }>('vcp-network-changed', (event) => {
       if (event.payload.connected === true) {
@@ -133,10 +116,7 @@ export function useAppLifecycle() {
   onUnmounted(() => {
     disposed = true;
     voiceHistory.dispose();
-    if (typeof window !== 'undefined') {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("online", handleOnline);
-    }
+    document.removeEventListener("visibilitychange", handleVisibilityChange);
     if (unlisten) {
       unlisten();
     }

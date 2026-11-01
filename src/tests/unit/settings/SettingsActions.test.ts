@@ -4,6 +4,9 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import type { Component } from 'vue';
 import { deleteTempFile } from 'tauri-plugin-vcp-mobile';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
+import { useAssistantStore } from '../../../core/stores/assistant';
+import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
+import { readStagedEntityBackup } from '../../../features/settings/useConfigBackup';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { THEME_PREFERENCE_DEFAULTS } from '../../../core/stores/theme';
 import type { SettingsSaveResult } from '../../../features/settings/editing/useSettingsEditSession';
@@ -112,12 +115,17 @@ async function confirmImport(wrapper: VueWrapper) {
 }
 
 beforeEach(() => {
+  localStorage.clear();
   setActivePinia(createPinia());
   mockInvoke('preview_chat_endpoint', () => ({ finalUrl: 'https://draft.example/v1/chat/completions', modelDiscoveryUrl: 'https://draft.example/v1/models' }));
   mockInvoke('test_vcp_connection', () => ({ success: true, status: 200, modelCount: 2, modelDiscoveryAvailable: true }));
   mockInvoke('regenerate_emoticon_library', () => 2);
   mockInvoke('plugin:vcp-mobile|save_to_downloads', () => ({ displayName: 'backup.vcpcfg' }));
   mockInvoke('export_config_domains', () => ({ identity: { userName: '已提交用户' }, server: { apiKey: 'saved-key' }, conversation: { topicSummaryModel: 'summary-model' } }));
+  mockInvoke('export_group_preferences', () => ({}));
+  mockInvoke('export_agent_preferences', () => ({}));
+  mockInvoke('get_favorite_models', () => []);
+  mockInvoke('get_tarven_rules', () => []);
 });
 
 afterEach(() => {
@@ -126,6 +134,17 @@ afterEach(() => {
 });
 
 describe('依赖配置提交的设置动作', () => {
+  it.each(['export_group_preferences', 'export_agent_preferences', 'get_favorite_models', 'get_tarven_rules'])(
+    '导出读取 %s 失败时显示错误，不保存缺项备份', async command => {
+      mockInvoke(command, () => { throw new Error('backup read failed'); });
+      const wrapper = render(ConfigBackupSection, { active: true, commit: async () => saved(), applyImport: vi.fn() });
+      await action(wrapper, '导出').get('button').trigger('click');
+      await flushPromises();
+      expect(wrapper.text()).toContain('backup read failed');
+      expect(callsFor('plugin:vcp-mobile|save_to_downloads')).toHaveLength(0);
+    },
+  );
+
   const cases = [
     { component: VcpCoreSettingsSection, label: '检查模型发现', command: 'test_vcp_connection' },
     { component: SyncSettingsSection, label: 'REFRESH', command: 'regenerate_emoticon_library' },
@@ -344,7 +363,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     });
     mockInvoke('import_settings_backup', (args) => {
       persisted = applyRequest(persisted, args?.request as ConfigUpdate);
-      return { result: { status: 'saved', snapshot: persisted }, missingGroups: false };
+      return { result: { status: 'saved', snapshot: persisted }, missingGroups: false, missingAgents: false };
     });
     return render(ConnectionSettingsPage, { active: true });
   }
@@ -552,7 +571,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await confirmImport(wrapper);
     await flushPromises();
 
-    expect(callsFor('import_settings_backup')).toEqual([['import_settings_backup', { request: { patches: [{ domain: 'server', expectedRevision: '1', changes: { apiKey: 'imported-key' }, baseValues: { apiKey: 'draft-key' } }] }, groupPreferences: {} }]]);
+    expect(callsFor('import_settings_backup')).toEqual([['import_settings_backup', { request: { patches: [{ domain: 'server', expectedRevision: '1', changes: { apiKey: 'imported-key' }, baseValues: { apiKey: 'draft-key' } }] }, groupPreferences: {}, agentPreferences: {} }]]);
     expect((field(wrapper, 'API Key').element as HTMLInputElement).value).toBe('imported-key');
     expect((field(wrapper, 'Mobile Sync Token').element as HTMLInputElement).value).toBe('unsubmitted-token');
     expect(useSettingsStore().settings?.sync.token).toBe('');
@@ -574,13 +593,13 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await confirmImport(wrapper);
     await flushPromises();
     expect(callsFor('import_settings_backup')).toEqual([
-      ['import_settings_backup', { request: { patches: [] }, groupPreferences }],
+      ['import_settings_backup', { request: { patches: [] }, groupPreferences, agentPreferences: {} }],
     ]);
     expect(callsFor('get_assistants_snapshot')).toHaveLength(1);
     expect(wrapper.text()).toContain('配置导入成功');
   });
 
-  it('缺失群只提示先同步再导入，其他设置照常恢复且不逐群展示', async () => {
+  it('缺失群暂存待同步，其他设置照常恢复且不逐群展示', async () => {
     const groupPreferences = { 'missing-a': { chatMode: 'jev' }, 'missing-b': { chatMode: 'sequential' } };
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/groups-before-sync.vcpcfg' }));
     mockInvoke('parse_config_backup', () => ({ domains: { server: { apiKey: 'restored-key' } }, groupPreferences, exportedAt: '' }));
@@ -589,6 +608,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     mockInvoke('import_settings_backup', (args) => ({
       result: { status: 'saved', snapshot: applyRequest(snapshot(), args?.request as ConfigUpdate) },
       missingGroups: true,
+      missingAgents: false,
     }));
     await flushPromises();
     await action(wrapper, '导入').get('button').trigger('click');
@@ -600,6 +620,49 @@ describe('连接设置页与真实编辑会话的集成', () => {
     expect(wrapper.text()).not.toContain('missing-a');
     expect(wrapper.text()).not.toContain('missing-b');
     expect(callsFor('import_settings_backup')).toHaveLength(1);
+    expect(readStagedEntityBackup()?.groupPreferences).toEqual(groupPreferences);
+  });
+
+  it.each(['agent', 'group'] as const)('页面导入完整实体和独立数据，校准当前 %s 并暂存未同步类别', async ownerType => {
+    const agentPreferences = { owner: { mobileSystemPrompt: 'restored prompt' } };
+    const groupPreferences = { owner: { contextMessageWindowSize: 60 } };
+    const standaloneData = { modelFavorites: ['fixture-model'], tarvenRules: [] };
+    mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/entities.vcpcfg' }));
+    mockInvoke('parse_config_backup', () => ({ domains: {}, agentPreferences, groupPreferences, standaloneData, exportedAt: '' }));
+    const wrapper = renderPage();
+    await flushPromises();
+    const assistants = useAssistantStore();
+    assistants.agents = [{ id: 'owner', name: 'Old agent', model: 'fixture-model', avatarCalculatedColor: null }];
+    assistants.groups = [{ id: 'owner', name: 'Old group', members: [], mode: 'sequential', avatarCalculatedColor: null }];
+    const focus = { target: { kind: 'topic', ownerType, ownerId: 'owner', topicId: 'active-topic' },
+      focusRevision: 1, windowRevision: 1, anchorId: 'kept-anchor' };
+    mockInvoke('connect_chat_view', () => ({ documentId: 1, focus }));
+    mockInvoke('restore_chat_view', () => ({ status: 'accepted', focus }));
+    const session = useChatSessionStore();
+    await session.restoreFocus();
+    const conversation = session.currentConversationKey;
+    const window = session.acceptedWindow;
+    mockInvoke('import_settings_backup', () => ({
+      result: { status: 'saved', snapshot: useSettingsStore().snapshot }, missingGroups: false, missingAgents: true,
+    }));
+    mockInvoke('get_assistants_snapshot', () => ({
+      agents: [{ ...assistants.agents[0], name: 'Refreshed agent' }],
+      groups: [{ ...assistants.groups[0], name: 'Refreshed group' }], unreadCounts: {},
+    }));
+
+    await action(wrapper, '导入').get('button').trigger('click');
+    await flushPromises();
+    await confirmImport(wrapper);
+    await flushPromises();
+
+    expect(callsFor('import_settings_backup')).toEqual([['import_settings_backup', {
+      request: { patches: [] }, agentPreferences, groupPreferences, standaloneData,
+    }]]);
+    expect(session.currentSelectedItem?.name).toBe(`Refreshed ${ownerType}`);
+    expect(session.currentConversationKey).toBe(conversation);
+    expect(session.acceptedWindow).toBe(window);
+    expect(readStagedEntityBackup()?.agentPreferences).toEqual(agentPreferences);
+    expect(readStagedEntityBackup()?.groupPreferences).toBeUndefined();
   });
 
   it('导入应用期间冻结本页动作；失败后恢复输入并保留原草稿', async () => {

@@ -52,19 +52,19 @@ describe('配置恢复的真实领域状态与失败边界', () => {
       'group-b': { enableContextMessageWindow: false, modeSettings: { sequential: { speakerOrder: [] } } },
     };
     const backup = { domains: { jev: { enabled: true } }, groupPreferences, exportedAt: '' };
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     expect(configBackupScopes(backup)).toEqual(['JEV 设置', '群聊设置']);
     const result = await applyConfigBackup(backup, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'jev.enabled': true }, groupPreferences);
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'jev.enabled': true }, groupPreferences, {}, undefined);
     expect(result.applied).toEqual(['JEV 设置', '群聊设置']);
   });
 
   it('多个SQLite领域合为一次提交，缺失叶字段不补默认值', async () => {
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     const result = await applyConfigBackup({
       domains: { identity: { userName: '新用户名' }, server: { apiKey: 'new-key' }, voice: { guidance: { rules: '' } } }, exportedAt: '',
     }, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'identity.userName': '新用户名', 'server.apiKey': 'new-key', 'voice.guidance.rules': '' }, {});
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'identity.userName': '新用户名', 'server.apiKey': 'new-key', 'voice.guidance.rules': '' }, {}, {}, undefined);
     expect(result.applied).toEqual(['用户身份', '主服务器连接', '语音服务']);
   });
 
@@ -73,9 +73,9 @@ describe('配置恢复的真实领域状态与失败边界', () => {
       tts: { mode: 'clone' as const, cloneSampleId: 'sample-id' },
       guidance: { rules: '按角色描述，必要时生成标签' },
     };
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     const result = await applyConfigBackup({ domains: { voice: fields }, exportedAt: '' }, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'sample-id', 'voice.guidance.rules': '按角色描述，必要时生成标签' }, {});
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'sample-id', 'voice.guidance.rules': '按角色描述，必要时生成标签' }, {}, {}, undefined);
     expect(result.applied).toEqual(['语音服务']);
     expect(result.skipped).toEqual([expect.stringContaining('参考音频不包含在配置备份中')]);
   });
@@ -97,9 +97,9 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     await theme.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'dark' });
     const chat = useChatPreferencesStore();
     chat.setPresentationMode('panel');
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     const result = await applyConfigBackup({ domains: { server: { apiKey: 'new-key' } }, exportedAt: '' }, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'server.apiKey': 'new-key' }, {});
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'server.apiKey': 'new-key' }, {}, {}, undefined);
     expect(theme.currentTheme).toBe('themes-simple-bw.ts');
     expect(theme.mode).toBe('dark');
     expect(chat.presentationMode).toBe('panel');
@@ -109,14 +109,14 @@ describe('配置恢复的真实领域状态与失败边界', () => {
   it('不可用主题回退默认，合法深浅模式和其他偏好仍独立恢复', async () => {
     const theme = useThemeStore();
     await theme.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'dark' });
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     const backup = {
       domains: { conversation: { topicSummaryModel: '' } }, exportedAt: '',
       preferences: { theme: { themeKey: 'future-theme.ts', mode: 'light' as const }, chat: { messageHapticsEnabled: false } },
     };
     expect(configBackupScopes(backup)).toEqual(['话题总结模型', '主题与深浅模式', '聊天偏好']);
     const result = await applyConfigBackup(backup, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'conversation.topicSummaryModel': '' }, {});
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'conversation.topicSummaryModel': '' }, {}, {}, undefined);
     expect(theme.mode).toBe('light');
     expect(theme.currentTheme).toBe(THEME_PREFERENCE_DEFAULTS.themeKey);
     expect(useChatPreferencesStore().messageHapticsEnabled).toBe(false);
@@ -141,7 +141,7 @@ describe('配置恢复的真实领域状态与失败边界', () => {
       chat: { presentationMode: CHAT_PREFERENCE_DEFAULTS.presentationMode, smoothStreamingEnabled: false, messageHapticsEnabled: false },
     });
     expect(configBackupScopes(normalized)).toEqual(['主题与深浅模式', '聊天偏好']);
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     const result = await applyConfigBackup(normalized, applySettings);
     expect(applySettings).not.toHaveBeenCalled();
     expect(result.failed).toEqual([]);
@@ -174,7 +174,7 @@ describe('配置恢复的真实领域状态与失败边界', () => {
       if (key === 'vcp-message-haptics-enabled') throw new Error('storage full');
       originalWrite(key, value);
     });
-    const applySettings = vi.fn(async () => false);
+    const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
     const result = await applyConfigBackup({
       domains: { conversation: { topicSummaryModel: 'new-model' } }, exportedAt: '',
       preferences: { chat: { presentationMode: 'immersive', messageHapticsEnabled: false, collapseToolsWhileStreaming: true } },

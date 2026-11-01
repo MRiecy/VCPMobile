@@ -1,9 +1,5 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { useSettingsStore } from '../../../core/stores/settings';
-import { useAssistantStore } from '../../../core/stores/assistant';
-import { useNotificationStore } from '../../../core/stores/notification';
-import { buildSettingsUpdate } from '../../../core/config/fields';
 import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import VcpCoreSettingsSection from '../components/VcpCoreSettingsSection.vue';
 import SyncSettingsSection from '../components/SyncSettingsSection.vue';
@@ -11,10 +7,9 @@ import ConfigBackupSection from '../components/ConfigBackupSection.vue';
 import { CONNECTION_FIELDS, type ConnectionFields } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
 import type { SettingsSaveResult } from '../editing/useSettingsEditSession';
-import { applyConfigBackup, type BackupImportResult, type ParsedConfigBackup } from '../useConfigBackup';
+import { applyImport as importConfigBackup, type BackupImportResult, type ParsedConfigBackup } from '../useConfigBackup';
 
 const props = defineProps<{ active: boolean }>();
-const settingsStore = useSettingsStore();
 const { session, loading, error, reload } = useSettingsPageSession(CONNECTION_FIELDS, () => props.active);
 const { draft, leaving } = session;
 const actionBusy = ref(false);
@@ -73,28 +68,10 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
     const settled = await session.settlePending();
     if (!settled.ok) throw new Error(settled.error);
     if (!props.active) throw new Error('设置页面已关闭');
-    return await applyConfigBackup(backup, async (changes, groupPreferences) => {
-      const snapshot = settingsStore.snapshot;
-      if (!snapshot) throw new Error('配置尚未加载');
-      const { result, missingGroups } = await settingsStore.importBackup(buildSettingsUpdate(snapshot, changes), groupPreferences);
-      if (result.status !== 'saved') {
-        const issues = result.status === 'rejected' ? result.issues : result.conflicts;
-        throw new Error(issues.map(issue => `${issue.domain}.${issue.field}: ${issue.message}`).join('\n'));
-      }
+    return await importConfigBackup(backup, (changes) => {
       if (props.active) {
         session.acceptImport(CONNECTION_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(changes, key)));
       }
-      if (Object.keys(groupPreferences).length) {
-        try {
-          await useAssistantStore().fetchAgentsAndGroups();
-        } catch {
-          useNotificationStore().addNotification({
-            type: 'warning', title: '配置已导入',
-            message: '群聊设置已保存，请重新打开群聊查看。', toastOnly: true,
-          });
-        }
-      }
-      return missingGroups;
     });
   } finally {
     actionBusy.value = false;

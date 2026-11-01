@@ -13,7 +13,6 @@ import {
   readStagedEntityBackup,
   writeStagedEntityBackup,
 } from "../../features/settings/useConfigBackup";
-import { buildSettingsUpdate } from "../config/fields";
 import { isAndroid, isIOS } from "../utils/platform";
 import type { BatteryStatusDto } from "../types/native";
 
@@ -385,19 +384,9 @@ export async function checkAndPromptPendingConfigRestore(): Promise<boolean> {
 
   if (confirmed) {
     const settingsStore = useSettingsStore();
-    if (!settingsStore.snapshot) {
-      try {
-        await settingsStore.fetchSettings();
-      } catch (e) {
-        console.warn('[SyncSession] Failed to fetch settings before applying staged backup:', e);
-      }
-    }
-    const request = settingsStore.snapshot
-      ? buildSettingsUpdate(settingsStore.snapshot, {})
-      : { patches: [] };
-
+    // Entity-only restoration has no configuration-domain patches or revisions.
     const { result, missingGroups, missingAgents } = await settingsStore.importBackup(
-      request,
+      { patches: [] },
       staged.groupPreferences ?? {},
       staged.agentPreferences ?? {},
     );

@@ -75,6 +75,26 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
       expect(result).toBe(false);
     });
 
+    it("restores entity-only data without reading unrelated configuration domains", async () => {
+      const agentPreferences = { "agent-1": { mobileSystemPrompt: "pending" } };
+      writeStagedEntityBackup({ agentPreferences });
+      const assistants = useAssistantStore();
+      assistants.agents = [{ id: "agent-1", name: "One", model: "fixture", avatarCalculatedColor: null }];
+      vi.spyOn(useOverlayStore(), "showConfirm").mockResolvedValue(true);
+      const settings = useSettingsStore();
+      const fetchSpy = vi.spyOn(settings, "fetchSettings");
+      const importSpy = vi.spyOn(settings, "importBackup").mockResolvedValue({
+        result: { status: "saved", snapshot: makeConfigSnapshot() }, missingGroups: false, missingAgents: false,
+      });
+      vi.spyOn(assistants, "fetchAgentsAndGroups").mockResolvedValue(undefined);
+
+      expect(settings.snapshot).toBeNull();
+      expect(await checkAndPromptPendingConfigRestore()).toBe(true);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(importSpy).toHaveBeenCalledExactlyOnceWith({ patches: [] }, {}, agentPreferences);
+      expect(readStagedEntityBackup()).toBeNull();
+    });
+
     it.each(["invalid-json-content-{{", "null", '{"version":2,"timestamp":null}'])("purges malformed staged input %s before prompting", async raw => {
       localStorage.setItem(STAGED_BACKUP_STORAGE_KEY, raw);
       const result = await checkAndPromptPendingConfigRestore();
@@ -309,7 +329,7 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
   });
 
   describe("applyImport Stage 1 empty-device staging", () => {
-    it("stages entity preferences when import returns missing_groups or missing_agents", async () => {
+    it("stages entity preferences from the current Rust import result", async () => {
       const backup: ParsedConfigBackup = {
         domains: { server: { url: "https://chat.vcp.internal" } },
         agentPreferences: {
@@ -321,7 +341,11 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
         exportedAt: new Date().toISOString(),
       };
 
-      const customApply = vi.fn(async () => ({
+      const snapshot = makeConfigSnapshot();
+      mockInvoke("read_settings", () => snapshot);
+      mockInvoke("get_assistants_snapshot", () => ({ agents: [], groups: [], unreadCounts: {} }));
+      mockInvoke("import_settings_backup", () => ({
+        result: { status: "saved", snapshot },
         missingGroups: true,
         missingAgents: true,
       }));
@@ -329,7 +353,7 @@ describe("Staged Entity Backup & Two-Stage Restore Hook", () => {
       const notificationStore = useNotificationStore();
       const notifySpy = vi.spyOn(notificationStore, "addNotification");
 
-      const result = await applyImport(backup, customApply);
+      const result = await applyImport(backup);
       expect(result.applied).toContain("主服务器连接");
       expect(result.applied).toContain("群聊设置");
       expect(result.applied).toContain("智能体专属设置");

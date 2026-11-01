@@ -167,13 +167,13 @@ describe("Backup payload and application contracts", () => {
     });
 
     it("passes only provided voice fields to the settings owner", async () => {
-      const applySettings = vi.fn(async () => false);
+      const applySettings = vi.fn(async () => ({ missingGroups: false, missingAgents: false }));
       const backup = {
         domains: { voice: { asr: { stream: true } } },
         exportedAt: new Date().toISOString(),
       };
       const result = await applyConfigBackup(backup, applySettings);
-      expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.asr.stream': true }, {});
+      expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.asr.stream': true }, {}, {}, undefined);
       expect(result.applied).toContain("语音服务");
       expect(result.failed).toHaveLength(0);
     });
@@ -208,7 +208,7 @@ describe("Backup payload and application contracts", () => {
       const applySettings = vi.fn(async (_changes, groupPrefs) => {
         // Simulates that group-dev is missing in local DB
         const hasMissing = Object.keys(groupPrefs).includes("group-dev");
-        return hasMissing;
+        return { missingGroups: hasMissing, missingAgents: false };
       });
 
       const backup = {
