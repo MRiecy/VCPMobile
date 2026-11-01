@@ -10,8 +10,6 @@ pub enum NativeEvent {
     Lifecycle(NativeLifecycleEvent),
     #[serde(rename = "network")]
     Network { connected: bool },
-    #[serde(rename = "notificationClick")]
-    NotificationClick(NativeNotificationClick),
     #[serde(rename = "voiceAudio")]
     VoiceAudio(crate::voice::NativeVoiceAudioEvent),
     #[serde(rename = "voiceDocument")]
@@ -38,31 +36,6 @@ pub enum NativeVoicePlaybackEvent {
         playback_id: String,
         #[serde(rename = "messageId")]
         message_id: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeNotificationClick {
-    pub click_id: String,
-    pub sequence: u64,
-    #[serde(flatten)]
-    pub target: NotificationClickTarget,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "lowercase",
-    rename_all_fields = "camelCase"
-)]
-pub enum NotificationClickTarget {
-    App,
-    Chat {
-        owner_type: String,
-        owner_id: String,
-        topic_id: String,
-        message_id: String,
     },
 }
 
@@ -170,25 +143,6 @@ pub fn collect_service_failure_notices<R: Runtime>(app: &AppHandle<R>) -> Vec<Se
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn notification_event_preserves_the_committed_message_target() {
-        let target = serde_json::json!({
-            "clickId": "first", "sequence": 1, "kind": "chat", "ownerType": "group",
-            "ownerId": "g", "topicId": "t", "messageId": "persisted-assistant-message"
-        });
-        let NativeEvent::NotificationClick(click) = serde_json::from_value(serde_json::json!({
-            "event": "notificationClick", "payload": target,
-        }))
-        .unwrap() else {
-            panic!("unexpected event");
-        };
-        assert_eq!(serde_json::to_value(click).unwrap(), target);
-
-        let generic = serde_json::json!({"clickId": "second", "sequence": 2, "kind": "app"});
-        let click: NativeNotificationClick = serde_json::from_value(generic.clone()).unwrap();
-        assert_eq!(serde_json::to_value(click).unwrap(), generic);
-    }
 
     #[test]
     fn native_document_loss_is_delivered_without_an_audio_session() {

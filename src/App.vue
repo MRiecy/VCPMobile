@@ -156,8 +156,6 @@ const parseNotificationClickTarget = (value: unknown): NotificationClickTarget |
 let notificationNavigationGeneration = 0;
 let stopNotificationReadyWatch: WatchStopHandle | null = null;
 let appUnmounted = false;
-let lastIOSNotificationSequence = 0;
-let lastIOSNotificationClickId = "";
 const isCurrentNotificationNavigation = (generation: number) =>
   !appUnmounted && generation === notificationNavigationGeneration;
 
@@ -165,17 +163,6 @@ const routeNotificationClick = (rawDetail: unknown) => {
   if (appUnmounted) return;
   const detail = parseNotificationClickTarget(rawDetail);
   if (!detail) return;
-  if (isIOS) {
-    const response = rawDetail as Record<string, unknown>;
-    if (typeof response.clickId !== 'string' || !response.clickId || response.clickId.length > 256
-      || typeof response.sequence !== 'number' || !Number.isSafeInteger(response.sequence)
-      || response.sequence <= lastIOSNotificationSequence
-      || response.clickId === lastIOSNotificationClickId) return;
-    // Native assigns order at the actual click. A late cold-start read cannot
-    // supersede a newer live click, and both deliveries of one click are consumed once.
-    lastIOSNotificationSequence = response.sequence;
-    lastIOSNotificationClickId = response.clickId;
-  }
   const generation = ++notificationNavigationGeneration;
   stopNotificationReadyWatch?.();
   stopNotificationReadyWatch = null;
@@ -475,50 +462,30 @@ const handleExitRequest = async () => {
   }
 };
 
-let pendingNotificationRead: Promise<void> | null = null;
-let pendingNotificationRefreshQueued = false;
+let readingPendingNotification = false;
+let notificationReadQueued = false;
 let androidPendingNotificationRead = false;
-let unlistenNativeNotification: (() => void) | null = null;
-let notificationSubscription: Promise<void> | null = null;
-let notificationSubscriptionSettled = isAndroid;
 
-const readPendingNotification = (): Promise<void> => {
-  if (appUnmounted || lifecycleStore.state !== 'READY' || !notificationSubscriptionSettled
-    || (!isAndroid && !isIOS) || (isAndroid && androidPendingNotificationRead)) return Promise.resolve();
-  if (pendingNotificationRead) {
-    if (isIOS) pendingNotificationRefreshQueued = true;
-    return pendingNotificationRead;
+const readPendingNotification = async () => {
+  if (appUnmounted || lifecycleStore.state !== 'READY' || (!isAndroid && !isIOS) || androidPendingNotificationRead) return;
+  if (readingPendingNotification) {
+    // A new iOS tap may arrive after Swift took the previous one but before IPC returns.
+    notificationReadQueued = true;
+    return;
   }
   if (isAndroid) androidPendingNotificationRead = true;
-  pendingNotificationRead = invoke<unknown>('plugin:vcp-mobile|get_pending_notification')
-    .then(pending => { if (!appUnmounted) routeNotificationClick(pending); })
-    .catch(error => console.warn('[App] Failed to fetch pending notification click:', error))
-    .finally(() => {
-      pendingNotificationRead = null;
-      if (!appUnmounted && pendingNotificationRefreshQueued) {
-        pendingNotificationRefreshQueued = false;
-        void readPendingNotification();
-      }
-    });
-  return pendingNotificationRead;
-};
-
-const subscribeNativeNotifications = (): Promise<void> => {
-  if (appUnmounted || !isIOS) return Promise.resolve();
-  if (notificationSubscription) return notificationSubscription;
-  if (unlistenNativeNotification) return readPendingNotification();
-  notificationSubscription = listen<unknown>('vcp-notification-click', event => {
-    routeNotificationClick(event.payload);
-  }).then(unlisten => {
-    if (appUnmounted) unlisten();
-    else unlistenNativeNotification = unlisten;
-  }).catch(error => {
-    console.warn('[App] Failed to subscribe to native notification clicks:', error);
-  }).then(async () => {
-    notificationSubscriptionSettled = true;
-    await readPendingNotification();
-  }).finally(() => { notificationSubscription = null; });
-  return notificationSubscription;
+  readingPendingNotification = true;
+  try {
+    routeNotificationClick(await invoke<unknown>('plugin:vcp-mobile|get_pending_notification'));
+  } catch (error) {
+    console.warn('[App] Failed to fetch pending notification click:', error);
+  } finally {
+    readingPendingNotification = false;
+    if (notificationReadQueued) {
+      notificationReadQueued = false;
+      void readPendingNotification();
+    }
+  }
 };
 
 watch(
@@ -528,7 +495,7 @@ watch(
   },
 );
 watch(() => lifecycleStore.lifecycleSnapshot?.phase, (phase, previous) => {
-  if (isIOS && phase === 'active' && previous !== 'active') void subscribeNativeNotifications();
+  if (isIOS && phase === 'active' && previous !== 'active') void readPendingNotification();
 });
 
 onMounted(async () => {
@@ -539,8 +506,11 @@ onMounted(async () => {
     window.addEventListener("vcp-share-intent", handleShareIntent);
     window.addEventListener("vcp-notification-click", handleNotificationClick);
   }
-  if (isIOS) void subscribeNativeNotifications();
-  if (isIOS) window.addEventListener("vcp-share-inbox-changed", refreshShare);
+  if (isIOS) {
+    window.addEventListener("vcp-notification-pending", readPendingNotification);
+    window.addEventListener("vcp-share-inbox-changed", refreshShare);
+    void readPendingNotification();
+  }
   refreshShare();
   leftSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
   rightSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
@@ -589,12 +559,12 @@ onUnmounted(() => {
   stopNotificationReadyWatch = null;
   if (unlistenLog) unlistenLog();
   stopRouterHistory?.();
-  unlistenNativeNotification?.();
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
   window.removeEventListener("vcp-share-inbox-changed", refreshShare);
   window.removeEventListener("vcp-notification-click", handleNotificationClick);
+  window.removeEventListener("vcp-notification-pending", readPendingNotification);
   leftSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);
   rightSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);
   releaseNativeInsetsBridge();

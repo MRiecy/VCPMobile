@@ -3,7 +3,7 @@ import { reactive } from 'vue';
 import { createPinia, disposePinia } from 'pinia';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import App from '../../../App.vue';
-import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
+import { invokeMock, mockInvoke } from '../../mocks/tauri';
 import * as messageScroll from '../../../core/utils/scrollToMessage';
 import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
 
@@ -62,10 +62,22 @@ function deferred<T>() {
 const chatClick = (topicId: string) => ({
   kind: 'chat', ownerId: 'agent', ownerType: 'agent', topicId,
 });
-const appClick = (sequence: number) => ({ clickId: `click-${sequence}`, sequence, kind: 'app' });
-const replyClick = (sequence: number, messageId: string) => ({
-  ...appClick(sequence), kind: 'chat', ownerType: 'group', ownerId: 'group', topicId: 'topic', messageId,
+const replyClick = (messageId: string) => ({
+  kind: 'chat', ownerType: 'group', ownerId: 'group', topicId: 'topic', messageId,
 });
+const pendingCommand = 'plugin:vcp-mobile|get_pending_notification';
+type IOSClick = ReturnType<typeof replyClick> | { kind: 'app' };
+let pendingIOSClick: IOSClick | undefined;
+const takePendingClick = () => {
+  const click = pendingIOSClick;
+  pendingIOSClick = undefined;
+  return click ?? {};
+};
+const signalIOSClick = () => window.dispatchEvent(new Event('vcp-notification-pending'));
+const iosClick = (click: IOSClick) => {
+  pendingIOSClick = click;
+  signalIOSClick();
+};
 const androidClick = (topicId: string) => window.dispatchEvent(new CustomEvent('vcp-notification-click', { detail: chatClick(topicId) }));
 let wrapper: VueWrapper | undefined;
 let pinia: ReturnType<typeof createPinia>;
@@ -92,7 +104,8 @@ beforeEach(() => {
   context.closeTopModal.mockReset().mockReturnValue(false);
   context.shareRefresh.mockReset().mockResolvedValue(undefined);
   context.sharePoll.mockReset().mockResolvedValue(undefined);
-  mockInvoke('plugin:vcp-mobile|get_pending_notification', () => null);
+  pendingIOSClick = undefined;
+  mockInvoke(pendingCommand, takePendingClick);
   mockInvoke('get_topics', () => [{ id: 'old' }, { id: 'new' }]);
 });
 afterEach(() => {
@@ -166,9 +179,8 @@ describe('root voice call navigation', () => {
 
 describe('root notification navigation', () => {
   it('opens a cold iOS notification at its committed message rather than the newest group reply', async () => {
-    const clicked = replyClick(1, 'db-reply-a');
+    pendingIOSClick = replyClick('db-reply-a');
     context.conversation = { ownerType: 'agent', ownerId: 'other', topicId: 'other', epoch: 1 };
-    mockInvoke('plugin:vcp-mobile|get_pending_notification', () => clicked);
     mockInvoke('load_chat_history_around', () => [
       { id: 'db-reply-a', timestamp: 1 }, { id: 'db-reply-b', timestamp: 2 },
     ]);
@@ -178,7 +190,7 @@ describe('root notification navigation', () => {
     expect(scroll).not.toHaveBeenCalled();
     context.lifecycle.state = 'READY';
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', clicked);
+    signalIOSClick();
     await flushPromises();
     expect(invokeMock).toHaveBeenCalledWith('load_chat_history_around', expect.objectContaining({
       ownerId: 'group', ownerType: 'group', topicId: 'topic', anchorMsgId: 'db-reply-a',
@@ -194,9 +206,11 @@ describe('root notification navigation', () => {
     mountApp();
     context.lifecycle.state = 'READY';
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', replyClick(1, 'old'));
+    iosClick(replyClick('old'));
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', appClick(2));
+    expect(invokeMock).toHaveBeenCalledWith('load_chat_history_around', expect.objectContaining({ anchorMsgId: 'old' }));
+    iosClick({ kind: 'app' });
+    await flushPromises();
     pending.resolve([{ id: 'old' }]);
     await flushPromises();
     expect(context.selectTopic).not.toHaveBeenCalled();
@@ -210,9 +224,9 @@ describe('root notification navigation', () => {
     context.lifecycle.state = 'READY';
     mountApp();
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', { ...replyClick(1, 'old'), topicId: 'older-topic' });
+    iosClick({ ...replyClick('old'), topicId: 'older-topic' });
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', replyClick(2, 'new'));
+    iosClick(replyClick('new'));
     await flushPromises();
     oldRead.resolve([{ id: 'old' }]);
     await flushPromises();
@@ -225,7 +239,7 @@ describe('root notification navigation', () => {
     context.lifecycle.state = 'READY';
     mountApp();
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', replyClick(1, 'deleted'));
+    iosClick(replyClick('deleted'));
     await flushPromises();
     expect(context.selectTopic).not.toHaveBeenCalled();
     expect(context.notice).toHaveBeenCalledWith(expect.objectContaining({ title: '通知已过期' }));
@@ -261,24 +275,24 @@ describe('root notification navigation', () => {
     expect(context.selectTopic).toHaveBeenCalledExactlyOnceWith('agent', 'agent', 'new');
   });
 
-  it('keeps the current page for real iOS app-only clicks, including duplicate and late cold snapshots', async () => {
-    const pending = deferred<unknown>();
-    mockInvoke('plugin:vcp-mobile|get_pending_notification', () => pending.promise);
+  it('keeps the manually selected topic after a hot iOS click and a WebView remount', async () => {
+    mockInvoke('load_chat_history_around', () => [{ id: 'reply-a' }]);
+    const scroll = vi.spyOn(messageScroll, 'scrollToMessageById').mockReturnValue(true);
+    context.lifecycle.state = 'READY';
     mountApp();
     await flushPromises();
-    context.lifecycle.state = 'READY';
+    iosClick(replyClick('reply-a'));
     await flushPromises();
-    emitTauriEvent('vcp-notification-click', appClick(2));
-    emitTauriEvent('vcp-notification-click', appClick(2));
-    pending.resolve(appClick(1));
+    expect(scroll).toHaveBeenCalledExactlyOnceWith('reply-a', { behavior: 'instant' });
+
+    await context.selectTopic('agent', 'agent', 'topic-b');
+    wrapper!.unmount();
+    mountApp();
     await flushPromises();
-    // Returning to active re-reads the retained native snapshot; it is not a queue drain.
     context.lifecycle.lifecycleSnapshot = { phase: 'active' };
     await flushPromises();
-    expect(context.selectTopic).not.toHaveBeenCalled();
-    expect(context.notice).not.toHaveBeenCalled();
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'get_topics')).toHaveLength(0);
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'plugin:vcp-mobile|get_pending_notification')).toHaveLength(2);
+    expect(context.conversation?.topicId).toBe('topic-b');
+    expect(scroll).toHaveBeenCalledOnce();
   });
 
   it('ignores an Android target lookup and future native delivery after root unmount', async () => {
@@ -300,44 +314,50 @@ describe('root notification navigation', () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === 'get_topics')).toHaveLength(1);
   });
 
-  it('retries an iOS listener installation on active and reads the pending app-only response', async () => {
-    const originalListen = listenMock.getMockImplementation()!;
-    let attempts = 0;
-    listenMock.mockImplementation((event, handler) => event === 'vcp-notification-click' && ++attempts === 1
-      ? Promise.reject(new Error('listener not ready')) : originalListen(event, handler));
-    try {
-      mountApp();
-      await flushPromises();
-      context.lifecycle.state = 'READY';
-      await flushPromises();
-      mockInvoke('plugin:vcp-mobile|get_pending_notification', () => appClick(1));
-      context.lifecycle.lifecycleSnapshot = { phase: 'active' };
-      await flushPromises();
-      expect(attempts).toBe(2);
-      expect(invokeMock.mock.calls.filter(([command]) => command === 'plugin:vcp-mobile|get_pending_notification')).toHaveLength(2);
-      expect(context.selectTopic).not.toHaveBeenCalled();
-    } finally {
-      listenMock.mockImplementation(originalListen);
-    }
+  it('keeps the newer iOS click when the cold read returns after its hot signal', async () => {
+    const startupRead = deferred<unknown>();
+    const read = vi.fn(takePendingClick).mockImplementationOnce(() => startupRead.promise);
+    mockInvoke(pendingCommand, read);
+    mockInvoke('load_chat_history_around', args => [{ id: args?.anchorMsgId }]);
+    const scroll = vi.spyOn(messageScroll, 'scrollToMessageById').mockReturnValue(true);
+    context.lifecycle.state = 'READY';
+    mountApp();
+    await flushPromises();
+    expect(read).toHaveBeenCalledOnce();
+    iosClick({ ...replyClick('new'), topicId: 'new-topic' });
+    await flushPromises();
+    startupRead.resolve(replyClick('old'));
+    await flushPromises();
+    expect(context.conversation?.topicId).toBe('new-topic');
+    expect(scroll).toHaveBeenLastCalledWith('new', { behavior: 'instant' });
   });
 
-  it('releases a notification listener whose installation finishes after unmount', async () => {
-    const installed = deferred<() => void>();
-    const unlisten = vi.fn();
-    const originalListen = listenMock.getMockImplementation()!;
-    listenMock.mockImplementation((event, handler) => event === 'vcp-notification-click'
-      ? installed.promise : originalListen(event, handler));
-    try {
-      mountApp();
-      await flushPromises();
-      wrapper!.unmount();
-      wrapper = undefined;
-      installed.resolve(unlisten);
-      await flushPromises();
-      expect(unlisten).toHaveBeenCalledOnce();
-      expect(invokeMock).not.toHaveBeenCalledWith('plugin:vcp-mobile|get_pending_notification');
-    } finally {
-      listenMock.mockImplementation(originalListen);
-    }
+  it('opens a pending iOS reply when returning to active without a hot signal', async () => {
+    context.lifecycle.state = 'READY';
+    mountApp();
+    await flushPromises();
+    pendingIOSClick = replyClick('missed-signal');
+    mockInvoke('load_chat_history_around', () => [{ id: 'missed-signal' }]);
+    const scroll = vi.spyOn(messageScroll, 'scrollToMessageById').mockReturnValue(true);
+    context.lifecycle.lifecycleSnapshot = { phase: 'active' };
+    await flushPromises();
+    expect(scroll).toHaveBeenCalledExactlyOnceWith('missed-signal', { behavior: 'instant' });
+  });
+
+  it('ignores a late pending read and further iOS signals after unmount', async () => {
+    const pending = deferred<unknown>();
+    const read = vi.fn(() => pending.promise);
+    mockInvoke(pendingCommand, read);
+    context.lifecycle.state = 'READY';
+    mountApp();
+    await flushPromises();
+    wrapper!.unmount();
+    wrapper = undefined;
+    signalIOSClick();
+    pending.resolve(replyClick('old'));
+    await flushPromises();
+    expect(read).toHaveBeenCalledOnce();
+    expect(invokeMock.mock.calls.some(([command]) => command === 'load_chat_history_around')).toBe(false);
+    expect(context.notice).not.toHaveBeenCalled();
   });
 });

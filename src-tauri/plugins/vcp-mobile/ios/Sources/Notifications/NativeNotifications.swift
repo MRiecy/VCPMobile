@@ -2,6 +2,7 @@ import Foundation
 import Tauri
 import UIKit
 import UserNotifications
+import WebKit
 
 struct NativeNotificationPermission: Encodable {
     let authorization: String
@@ -18,9 +19,7 @@ struct NativeNotificationPermission: Encodable {
     }
 }
 
-struct NativeNotificationClick: Encodable {
-    let clickId: String
-    let sequence: UInt64
+private struct NativeNotificationClick: Encodable {
     let kind: String
     let ownerType: String?
     let ownerId: String?
@@ -34,18 +33,15 @@ private struct LocalNotificationArgs: Decodable {
     let reply: [String: String]?
 }
 
-/// Owns notification callbacks and the latest user intent snapshot for this
-/// process. A replacement WebView does not replace this object or its delegate.
+/// Holds the latest notification tap until a ready WebView takes it.
 final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
     private static let requestPrefix = "com.vcp.avatar.local."
-    private static let maximumSafeSequence: UInt64 = 9_007_199_254_740_991
     private let center = UNUserNotificationCenter.current()
+    private weak var webView: WKWebView?
     private var pendingClick: NativeNotificationClick?
-    private var sequence: UInt64 = 0
     private var recentResponses: [String] = []
     private var permissionRequestInFlight = false
     private var installationError: String?
-    var onClick: ((NativeNotificationClick) -> Void)?
 
     /// Tauri constructs this plugin before tao calls UIApplicationMain. Installing
     /// here is deliberately synchronous; load(webview:) is too late for launch.
@@ -172,16 +168,23 @@ final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
-    func pendingSnapshot(_ invoke: Invoke) {
+    func attach(_ webView: WKWebView) {
+        self.webView = webView
+        if pendingClick != nil { signalPendingClick() }
+    }
+
+    private func signalPendingClick() {
+        webView?.evaluateJavaScript("window.dispatchEvent(new Event('vcp-notification-pending'))", completionHandler: nil)
+    }
+
+    func takePendingClick(_ invoke: Invoke) {
         DispatchQueue.main.async { [self] in
             if let error = installationError {
                 invoke.reject(error)
                 return
             }
             if let click = pendingClick {
-                // Reading does not acknowledge receipt by a WebView that might
-                // disappear before its invoke result arrives. JS deduplicates
-                // this same identity/sequence; newer clicks replace the snapshot.
+                pendingClick = nil
                 invoke.resolve(click)
             } else {
                 invoke.resolve([String: String]())
@@ -203,22 +206,15 @@ final class NativeNotifications: NSObject, UNUserNotificationCenterDelegate {
         // distinguishes it from the duplicate Scene/delegate report of one tap.
         let identity = "\(notification.request.identifier):\(response.actionIdentifier):\(notification.date.timeIntervalSince1970.bitPattern)"
         guard !recentResponses.contains(identity) else { return }
-        guard sequence < Self.maximumSafeSequence else {
-            NSLog("[VcpMobilePlugin] Notification click sequence exhausted")
-            return
-        }
         recentResponses.append(identity)
         if recentResponses.count > 64 { recentResponses.removeFirst() }
-        sequence += 1
         let reply = notification.request.content.userInfo["reply"] as? [String: String]
-        let click = NativeNotificationClick(
-            clickId: UUID().uuidString, sequence: sequence,
+        pendingClick = NativeNotificationClick(
             kind: reply == nil ? "app" : "chat",
             ownerType: reply?["ownerType"], ownerId: reply?["ownerId"],
             topicId: reply?["topicId"], messageId: reply?["messageId"]
         )
-        pendingClick = click
-        onClick?(click)
+        signalPendingClick()
     }
 
     func userNotificationCenter(
@@ -266,6 +262,6 @@ extension VcpMobilePlugin {
     }
 
     @objc public func getPendingNotification(_ invoke: Invoke) {
-        notifications.pendingSnapshot(invoke)
+        notifications.takePendingClick(invoke)
     }
 }

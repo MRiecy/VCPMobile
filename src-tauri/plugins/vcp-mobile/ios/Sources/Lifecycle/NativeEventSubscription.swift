@@ -241,15 +241,6 @@ final class NativeEventSubscription {
         NSLog("[VcpMobilePlugin] Native event source failed: %@", error.localizedDescription)
     }
 
-    func sendNotificationClick(_ click: NativeNotificationClick) {
-        do {
-            try channel?.send(NativeEvent(event: "notificationClick", payload: click))
-        } catch {
-            // The notification owner retains the pending intent for the getter.
-            NSLog("[VcpMobilePlugin] Notification click delivery failed: %@", error.localizedDescription)
-        }
-    }
-
     var canSendVoiceAudio: Bool {
         dispatchPrecondition(condition: .onQueue(.main))
         return channel != nil

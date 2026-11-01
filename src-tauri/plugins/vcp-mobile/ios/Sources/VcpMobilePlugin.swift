@@ -14,9 +14,6 @@ final class VcpMobilePlugin: Plugin {
 
     override init() {
         super.init()
-        notifications.onClick = { [weak self] click in
-            self?.nativeEvents.sendNotificationClick(click)
-        }
         notifications.install()
         voice.eventsReady = { [weak self] in self?.nativeEvents.canSendVoiceAudio ?? false }
         voice.onEvent = { [weak self] payload in self?.nativeEvents.sendVoiceAudio(payload) ?? false }
@@ -28,6 +25,7 @@ final class VcpMobilePlugin: Plugin {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             guard self.nativeEvents.attach(webview) else { return }
+            self.notifications.attach(webview)
             self.presentation.attach(webview)
             self.webKit.attach(webview)
             self.haptics.attach(webview)
