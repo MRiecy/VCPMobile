@@ -62,6 +62,9 @@ const sameTarget = (key: VoiceCallTarget | null, target: VoiceCallTarget) =>
 const projectView = (snapshot: VoiceCallSnapshot): VoiceServiceView => {
   if (!snapshot.active) return { state: 'off', message: '', partialText: '' };
   const partialText = snapshot.partial.slice(0, 2000);
+  if (snapshot.replyState === 'error' && snapshot.error) {
+    return { state: 'error', message: snapshot.error.slice(0, 200), partialText };
+  }
   if (snapshot.replyState === 'stopping') return { state: 'thinking', message: '正在停止回复', partialText };
   if (snapshot.ttsState === 'speaking') return { state: 'speaking', message: '正在朗读', partialText };
   if (snapshot.replyState === 'recovering') return { state: 'thinking', message: '模型连接暂不可用，正在等待接续。', partialText };

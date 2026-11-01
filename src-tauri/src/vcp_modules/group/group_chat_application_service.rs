@@ -72,7 +72,6 @@ struct GroupSpeakerTurnParams<'a, R: Runtime> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GroupSpeakerOutcome {
     Settled,
-    PreparationFailed,
     Cancelled,
     Stopping,
     RecoveryPending,
@@ -82,9 +81,7 @@ enum GroupSpeakerOutcome {
 impl GroupSpeakerOutcome {
     fn status(self) -> &'static str {
         match self {
-            // A preparation failure is durably settled, but must not advance
-            // the relay to another speaker with the same unusable attachment.
-            Self::Settled | Self::PreparationFailed => "completed",
+            Self::Settled => "completed",
             Self::Cancelled => "cancelled",
             Self::Stopping => "stopping",
             Self::RecoveryPending => "recovery_pending",
@@ -94,18 +91,20 @@ impl GroupSpeakerOutcome {
 }
 
 /// Automatic relay and explicit invitations share one turn owner and history.
-/// Only a settled speaker may advance it. A durably saved attachment preparation
-/// failure ends the turn; ordinary upstream errors retain their existing policy.
+/// A speaker whose reply or error has been saved allows the next speaker to start.
 async fn run_group_speakers<R: Runtime>(
     params: &GroupSpeakerTurnParams<'_, R>,
     speakers: &[crate::vcp_modules::agent_types::AgentConfig],
     history: &mut Vec<ChatMessage>,
 ) -> Result<GroupSpeakerOutcome, String> {
+    let _foreground = ForegroundLease::acquire(
+        params.app_handle,
+        ForegroundTask::Stream,
+        &params.group_config.name,
+    )
+    .ok();
     #[cfg(target_os = "ios")]
-    let ios_reply = speakers
-        .iter()
-        .any(|agent| agent.stream_output)
-        .then(|| ReplyTask::begin(params.app_handle, &params.group_config.name));
+    let ios_reply = ReplyTask::begin(params.app_handle, &params.group_config.name);
     for speaker in speakers {
         let outcome = run_group_speaker_turn(params, speaker, history).await?;
         if outcome != GroupSpeakerOutcome::Settled {
@@ -113,9 +112,7 @@ async fn run_group_speakers<R: Runtime>(
         }
     }
     #[cfg(target_os = "ios")]
-    if let Some(task) = ios_reply {
-        task.finish(true);
-    }
+    ios_reply.finish(true);
     Ok(GroupSpeakerOutcome::Settled)
 }
 
@@ -254,8 +251,6 @@ async fn run_group_speaker_turn<R: Runtime>(
     let _chat_activity = speaker
         .stream_output
         .then(|| ChatActivityGuard::acquire(app_handle));
-    let _foreground_lease =
-        ForegroundLease::acquire(app_handle, ForegroundTask::Stream, &agent_name).ok();
 
     // 发射 thinking 事件，让前端为当前接力的 Agent 创建思考占位消息
     crate::vcp_modules::vcp_client::deliver_request_event(
@@ -333,11 +328,7 @@ async fn run_group_speaker_turn<R: Runtime>(
             );
             let stop_pending = failure.is_stop_pending();
             let recovery_pending = failure.is_recovery_pending();
-            let preparation_failure = failure.is_preparation_failure();
             let (error, partial_content) = failure.into_parts();
-            #[cfg(target_os = "ios")]
-            let stream_failure =
-                (speaker.stream_output && !preparation_failure).then(|| error.clone());
             if stop_pending {
                 // A separately stopped speaker may still own an unconfirmed helper
                 // request. Do not start another speaker until that request settles.
@@ -378,13 +369,7 @@ async fn run_group_speaker_turn<R: Runtime>(
                 Some(agent_id.clone()),
             )
             .await;
-            #[cfg(target_os = "ios")]
-            if let (Ok(Some(_)), Some(reason)) = (&finalized, stream_failure) {
-                // Once this SSE failed, the group must not start another speaker.
-                return Err(reason);
-            }
             Ok(match finalized {
-                Ok(Some(_)) if preparation_failure => GroupSpeakerOutcome::PreparationFailed,
                 Ok(Some(_)) => GroupSpeakerOutcome::Settled,
                 Ok(None) => GroupSpeakerOutcome::Discarded,
                 Err(_) => GroupSpeakerOutcome::RecoveryPending,
@@ -525,8 +510,8 @@ pub(crate) async fn process_prepared_group_chat_message(
                 app_handle.clone(),
                 group_turn,
                 session,
-                group_id,
-                topic_id,
+                topic_key,
+                group_config.name,
                 connection,
             );
             if reply_policy.is_some() {
@@ -798,13 +783,12 @@ fn spawn_jev_session(
     app: AppHandle,
     turn: ActiveGroupTurnLease,
     session: Arc<GroupSession>,
-    group_id: String,
-    topic_id: String,
+    key: TopicKey,
+    group_name: String,
     connection: ChatConnectionSnapshot,
 ) {
     tauri::async_runtime::spawn(async move {
-        let result =
-            run_jev_session(&app, &turn, &session, &group_id, &topic_id, &connection).await;
+        let result = run_jev_session(&app, &turn, &session, key, &group_name, &connection).await;
         if let Err(error) = result {
             session.fail(error);
         }
@@ -818,14 +802,13 @@ async fn run_jev_session(
     app: &AppHandle,
     turn: &ActiveGroupTurnLease,
     session: &Arc<GroupSession>,
-    group_id: &str,
-    topic_id: &str,
+    key: TopicKey,
+    group_name: &str,
     connection: &ChatConnectionSnapshot,
 ) -> Result<(), String> {
-    let key = TopicKey::new("group", group_id, topic_id);
-    let _foreground = ForegroundLease::acquire(app, ForegroundTask::Stream, "群聊裁决与回复").ok();
+    let _foreground = ForegroundLease::acquire(app, ForegroundTask::Stream, group_name).ok();
     #[cfg(target_os = "ios")]
-    let mut ios_reply = None;
+    let ios_reply = ReplyTask::begin(app, group_name);
     loop {
         session.await_inputs().await?;
         if turn.is_cancelled() || session.latest_scope_cancelled() {
@@ -836,7 +819,7 @@ async fn run_jev_session(
         let config = read_group_config(
             app.clone(),
             app.state::<GroupManagerState>(),
-            group_id.into(),
+            key.owner_id.clone(),
         )
         .await?;
         if config.effective_mode() != GroupChatMode::Jev {
@@ -863,10 +846,6 @@ async fn run_jev_session(
         if members.len() > 254 {
             return Err("JEV 群聊最多支持 254 位可用成员。".into());
         }
-        #[cfg(target_os = "ios")]
-        if ios_reply.is_none() && members.iter().any(|agent| agent.stream_output) {
-            ios_reply = Some(ReplyTask::begin(app, &config.name));
-        }
         if let Some((id, scope)) = session.next_speaker(input_revision)? {
             app.state::<ActiveGroupTurns>().publish(&key);
             let Some(speaker) = members.iter().find(|member| member.id == id) else {
@@ -890,8 +869,8 @@ async fn run_jev_session(
                 group_turn: turn,
                 group_config: &config,
                 active_member_configs: &members,
-                group_id,
-                topic_id,
+                group_id: &key.owner_id,
+                topic_id: &key.topic_id,
                 connection,
                 stream_channel: &None,
                 reply_policy: scope.as_ref().and_then(|scope| scope.policy.as_deref()),
@@ -929,11 +908,7 @@ async fn run_jev_session(
         {
             session.decision_finished();
             if session.close_if_current(runtime.revision, "safety_limit")? {
-                #[cfg(target_os = "ios")]
-                if let Some(task) = ios_reply {
-                    task.finish(true);
-                }
-                return Ok(());
+                break;
             }
             continue;
         }
@@ -1027,13 +1002,12 @@ async fn run_jev_session(
         };
         let stop = reason.is_some();
         if session.accept_decision(runtime.revision, &ids, reason)? && stop {
-            #[cfg(target_os = "ios")]
-            if let Some(task) = ios_reply {
-                task.finish(true);
-            }
-            return Ok(());
+            break;
         }
     }
+    #[cfg(target_os = "ios")]
+    ios_reply.finish(true);
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1109,14 +1083,7 @@ pub async fn control_group_session(
     turn.bind_output(&app_handle, stream_channel)?;
     let settings = read_config(app_handle.clone(), app_handle.state::<SettingsState>()).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
-    spawn_jev_session(
-        app_handle,
-        turn,
-        session,
-        payload.group_id,
-        payload.topic_id,
-        connection,
-    );
+    spawn_jev_session(app_handle, turn, session, key, config.name, connection);
     Ok(json!({"status":"accepted"}))
 }
 
@@ -1409,8 +1376,7 @@ mod group_turn_tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn stopping_first_invited_speaker_does_not_start_the_second() {
+    async fn invitation_app() -> (tauri::App<tauri::test::MockRuntime>, sqlx::SqlitePool) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1439,6 +1405,118 @@ mod group_turn_tests {
         .await
         .expect("group fixture");
 
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().app.app_directories_override = Some(
+            tauri::utils::config::AppDirectoriesOverride::Root("test-fixtures/group-relay".into()),
+        );
+        let app = tauri::test::mock_builder().build(context).unwrap();
+        app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        app.manage(crate::vcp_modules::infra::lifecycle_state::LifecycleState::new());
+        (app, pool)
+    }
+
+    #[tokio::test]
+    async fn saved_member_errors_allow_the_relay_to_continue() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+
+        let (app, pool) = invitation_app().await;
+        let upstream = Router::new().route(
+            "/",
+            post(|Json(body): Json<Value>| async move {
+                match (body["model"].as_str(), body["stream"].as_bool()) {
+                    (Some("first"), Some(true)) | (Some("second"), Some(false)) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error":"upstream failure"})),
+                    ),
+                    (Some("third"), Some(false)) => (
+                        StatusCode::OK,
+                        Json(json!({
+                            "choices":[{"message":{"content":"third reply"},"finish_reason":"stop"}]
+                        })),
+                    ),
+                    _ => (StatusCode::BAD_REQUEST, Json(Value::Null)),
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let connection = ChatConnectionSnapshot {
+            endpoint_url: format!("http://{}", listener.local_addr().unwrap()),
+            api_key: String::new(),
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let speakers: Vec<AgentConfig> = serde_json::from_value(json!([
+            {"id":"first", "model":"first", "streamOutput":true},
+            {"id":"second", "model":"second", "streamOutput":false},
+            {"id":"third", "model":"third", "streamOutput":false}
+        ]))
+        .unwrap();
+        let group =
+            serde_json::from_value(json!({"id":"group", "members":["first","second","third"]}))
+                .unwrap();
+        let turn = app
+            .state::<ActiveGroupTurns>()
+            .try_acquire(TopicKey::new("group", "group", "topic"))
+            .unwrap();
+        let requests = app.state::<ActiveRequests>();
+        let params = GroupSpeakerTurnParams {
+            app_handle: app.handle(),
+            db_pool: &pool,
+            active_requests: &requests,
+            group_turn: &turn,
+            group_config: &group,
+            active_member_configs: &speakers,
+            group_id: "group",
+            topic_id: "topic",
+            connection: &connection,
+            stream_channel: &None,
+            reply_policy: None,
+            reply_scope: None,
+        };
+        assert_eq!(
+            run_group_speakers(&params, &speakers, &mut Vec::new())
+                .await
+                .unwrap(),
+            GroupSpeakerOutcome::Settled
+        );
+        let saved: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT agent_id, finish_reason, content FROM messages WHERE role = 'assistant' ORDER BY rowid"
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(saved.len(), 3);
+        for ((id, reason, content), expected) in saved.iter().zip(["first", "second"]) {
+            assert_eq!(id, expected);
+            assert_eq!(reason, "error");
+            assert!(content.contains("500"), "{content}");
+        }
+        assert_eq!(
+            saved[2],
+            ("third".into(), "completed".into(), "third reply".into())
+        );
+        server.abort();
+
+        // A missing attachment fails preparation before HTTP for each invited member.
+        let mut history = vec![serde_json::from_value(json!({
+            "role":"user", "content":"listen", "attachments":[{
+                "type":"audio/mpeg", "name":"missing.mp3", "hash":"a".repeat(64), "status":"ready"
+            }]
+        }))
+        .unwrap()];
+        assert_eq!(
+            run_group_speakers(&params, &speakers[..2], &mut history)
+                .await
+                .unwrap(),
+            GroupSpeakerOutcome::Settled
+        );
+        let failed_members: Vec<String> = sqlx::query_scalar(
+            "SELECT agent_id FROM messages WHERE finish_reason = 'error' AND content LIKE '%附件准备失败%' ORDER BY rowid"
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(failed_members, ["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn stopping_first_invited_speaker_does_not_start_the_second() {
+        let (app, pool) = invitation_app().await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("upstream listener");
@@ -1463,11 +1541,6 @@ mod group_turn_tests {
                 .is_err()
         });
 
-        let app = tauri::test::mock_app();
-        app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
-        app.manage(ActiveRequests::default());
-        app.manage(ActiveGroupTurns::default());
-        app.manage(crate::vcp_modules::infra::lifecycle_state::LifecycleState::new());
         let turns = app.state::<ActiveGroupTurns>();
         let group_turn = turns
             .try_acquire(TopicKey::new("group", "group", "topic"))
@@ -1669,8 +1742,8 @@ pub async fn invite_group_member_to_speak(
             app_handle,
             turn,
             session,
-            payload.group_id,
-            payload.topic_id,
+            topic_key,
+            group_config.name,
             connection,
         );
         return Ok(json!({"status":"accepted"}));

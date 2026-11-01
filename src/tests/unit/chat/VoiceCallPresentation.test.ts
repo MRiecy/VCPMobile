@@ -436,6 +436,14 @@ describe('chat scene voice transitions', () => {
     pending.resolve({ configured: true });
     await flushPromises();
     expectStatus('正在聆听');
+    const replyError = '回复连接中断';
+    for (const ttsState of ['speaking', 'finished'] as const) {
+      snapshot.revision += 1;
+      emitTauriEvent('vcp-voice-call', { ...snapshot, replyState: 'error', ttsState, error: replyError });
+      await nextTick();
+      expectStatus(replyError);
+      expect(status.get('p').classes()).toContain('is-error');
+    }
     await view.get('[aria-label="关闭麦克风"]').trigger('click');
     snapshot.micState = 'closed';
     snapshot.revision += 1;

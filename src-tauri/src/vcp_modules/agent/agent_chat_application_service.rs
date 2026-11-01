@@ -36,7 +36,7 @@ pub(crate) struct PreparedAgentRequest {
 
 impl PreparedAgentRequest {
     pub(crate) fn acquire(
-        app: &AppHandle,
+        app: &AppHandle<impl tauri::Runtime>,
         requests: &ActiveRequests,
         agent_id: &str,
         topic_id: &str,
@@ -134,7 +134,7 @@ pub async fn internal_process_agent_chat_message(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn process_prepared_agent_chat_message(
-    app_handle: AppHandle,
+    app_handle: AppHandle<impl tauri::Runtime>,
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     request: PreparedAgentRequest,
@@ -348,7 +348,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
                 &db_state.pool,
                 &request_key,
                 partial_content.unwrap_or_default(),
-                error,
+                error.clone(),
                 stream_channel,
                 Some(agent_id.clone()),
             )
@@ -357,6 +357,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
             {
                 return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
             }
+            return Err(error);
         }
     }
 

@@ -251,7 +251,6 @@ pub struct VcpRequestFailure {
     partial_content: Option<String>,
     recovery_pending: bool,
     stop_pending: bool,
-    preparation_failure: bool,
 }
 
 impl VcpRequestFailure {
@@ -261,7 +260,6 @@ impl VcpRequestFailure {
             partial_content: Some(partial_content),
             recovery_pending: false,
             stop_pending: false,
-            preparation_failure: false,
         }
     }
 
@@ -272,7 +270,6 @@ impl VcpRequestFailure {
             partial_content,
             recovery_pending: true,
             stop_pending: false,
-            preparation_failure: false,
         }
     }
 
@@ -285,16 +282,9 @@ impl VcpRequestFailure {
     }
 
     fn preparation(message: String) -> Self {
-        Self {
-            preparation_failure: true,
-            ..Self::from(format!(
-                "附件准备失败，本次请求未发送。原消息与附件仍保留，可重试或移除问题附件。\n{message}"
-            ))
-        }
-    }
-
-    pub(crate) fn is_preparation_failure(&self) -> bool {
-        self.preparation_failure
+        Self::from(format!(
+            "附件准备失败，本次请求未发送。原消息与附件仍保留，可重试或移除问题附件。\n{message}"
+        ))
     }
 
     #[cfg(target_os = "android")]
@@ -304,7 +294,6 @@ impl VcpRequestFailure {
             partial_content,
             recovery_pending: true,
             stop_pending: true,
-            preparation_failure: false,
         }
     }
 
@@ -328,7 +317,6 @@ impl From<String> for VcpRequestFailure {
             partial_content: None,
             recovery_pending: false,
             stop_pending: false,
-            preparation_failure: false,
         }
     }
 }
@@ -1303,11 +1291,7 @@ impl Drop for ActiveGroupTurnLease {
         if let Some((_, turn)) = self.turns.remove(&self.key) {
             if let Ok(session) = turn.session.lock() {
                 if let Some(session) = session.as_ref() {
-                    session.close(if self.cancellation_token.is_cancelled() {
-                        Some("cancelled_by_user".into())
-                    } else {
-                        None
-                    });
+                    session.close(None);
                 }
             }
             let event = group_turn_event(&self.key, &turn, false);
@@ -4925,6 +4909,7 @@ mod offline_completed_tests {
         let requests = app.state::<ActiveRequests>();
         let key = TopicKey::new("group", "group-a", "topic-a");
         let turn = turns.try_acquire(key.clone()).unwrap();
+        turn.start_session("continue", true).unwrap();
         let (original, mut original_events) = channel();
         turn.bind_output(app.handle(), original).unwrap();
         assert_eq!(original_events.try_recv().unwrap()["chunk"]["active"], true);
@@ -4937,6 +4922,7 @@ mod offline_completed_tests {
         drop(turn);
         let inactive = events.try_recv().unwrap();
         assert_eq!(inactive["chunk"]["active"], false);
+        assert_eq!(inactive["chunk"]["stopReason"], "cancelled_by_user");
         assert_eq!(active["context"]["turnId"], inactive["context"]["turnId"]);
         assert!(
             inactive["consumerRevision"].as_u64().unwrap()
@@ -4947,6 +4933,41 @@ mod offline_completed_tests {
             .attach_output(&requests, &key, channel().0)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn jev_lease_drop_preserves_a_decided_stop_or_error_when_cancelled() {
+        let app = tauri::test::mock_app();
+        app.manage(ActiveRequests::default());
+        let turns = ActiveGroupTurns::default();
+        let key = TopicKey::new("group", "group-a", "topic-a");
+        for (reason, error) in [
+            ("error", Some("JEV HTTP 401")),
+            ("end_option_selected", None),
+        ] {
+            let turn = turns.try_acquire(key.clone()).unwrap();
+            let session = turn.start_session("continue", true).unwrap();
+            let (output, mut events) = channel();
+            turn.bind_output(app.handle(), output).unwrap();
+            assert_eq!(events.try_recv().unwrap()["chunk"]["active"], true);
+            if let Some(error) = error {
+                session.fail(error.into());
+            } else {
+                let decision = session.decision_context(0).unwrap().unwrap();
+                assert!(session
+                    .accept_decision(decision.revision, &[], Some(reason.into()))
+                    .unwrap());
+            }
+            turn.cancel();
+            drop(turn);
+            let event = events.try_recv().unwrap();
+            assert_eq!(event["type"], "group_turn");
+            assert_eq!(event["chunk"]["active"], false);
+            assert_eq!(event["chunk"]["phase"], "idle");
+            assert_eq!(event["chunk"]["stopReason"], reason);
+            assert_eq!(event["chunk"]["error"], json!(error));
+            assert!(events.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

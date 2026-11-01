@@ -331,7 +331,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let app = tauri::test::mock_app();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().app.app_directories_override =
+            Some(tauri::utils::config::AppDirectoriesOverride::Root(
+                "test-fixtures/voice-submission".into(),
+            ));
+        let app = tauri::test::mock_builder().build(context).unwrap();
         app.manage(DbState::new(pool, std::path::PathBuf::new()));
         let target = TopicKey::new("agent", "voice-agent", "voice-topic");
         let message = ChatMessage {
@@ -343,6 +348,78 @@ mod tests {
             ..Default::default()
         };
         (app, target, message)
+    }
+
+    #[tokio::test]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn interrupted_agent_reply_persists_partial_text_and_returns_the_transport_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (app, target, message) = fixture().await;
+        let db = app.state::<DbState>();
+        for migration in [
+            include_str!("../../../migrations/0102_stream_stop_intent.sql"),
+            include_str!("../../../migrations/0105_agent_voice_config.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&db.pool).await.unwrap();
+        }
+        app.manage(AgentConfigState::new());
+        app.manage(ActiveRequests::default());
+        app.manage(crate::vcp_modules::infra::lifecycle_state::LifecycleState::new());
+        let request = PreparedAgentRequest::acquire(
+            app.handle(),
+            &app.state::<ActiveRequests>(),
+            &target.owner_id,
+            &target.topic_id,
+            &message.id,
+            None,
+            CancellationToken::new(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert!(socket.read(&mut [0; 4096]).await.unwrap() > 0);
+            let frame = "data: {\"choices\":[{\"delta\":{\"content\":\"partial reply\"}}]}\n\n";
+            // Close without the last HTTP chunk, after sending a complete SSE frame.
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{frame}\r\n",
+                frame.len(),
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let policy = VoiceReplyPolicy::from_settings(&Default::default());
+        let error = process_prepared_agent_chat_message(
+            app.handle().clone(),
+            app.state(),
+            app.state(),
+            request,
+            AgentChatPayload {
+                agent_id: target.owner_id,
+                topic_id: target.topic_id,
+                user_message: message,
+            },
+            crate::vcp_modules::vcp_client::ChatConnectionSnapshot {
+                endpoint_url,
+                api_key: String::new(),
+            },
+            None,
+            true,
+            Some(Arc::new(policy)),
+        )
+        .await
+        .expect_err("a persisted error must reach the voice call owner");
+        assert!(error.starts_with("SSE stream read failed:"), "{error}");
+        let (content, finish_reason): (String, String) =
+            sqlx::query_as("SELECT content, finish_reason FROM messages WHERE role = 'assistant'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(finish_reason, "error");
+        assert_eq!(content, format!("partial reply\n\n> VCP流式错误: {error}"));
+        server.await.unwrap();
     }
 
     #[tokio::test]

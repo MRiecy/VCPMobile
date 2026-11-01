@@ -242,7 +242,7 @@ pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
 
 音频使用 VCP 桌面端及服务器多模态处理器已有的媒体 Data URI 契约；不是标准 OpenAI `input_audio`，不据此承诺所有直连模型均接收音频。编码、容器和 MIME 由原生结果与文件核对，不再把所有非 AAC 标成 MP3。
 
-音视频资源 worker 持有原生调用的接收端，执行登记、处理、取消、最终回调及清理。请求 CancellationToken 控制停止；准备结束后再次检查取消，未取消才发送网络请求。已保存用户消息和附件保留；准备失败通过原有 durable finalizer 显示，群聊停止本轮后续发言。预算、缓存版本及临时资源细节见 [双端实施记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/05-双端音视频附件处理.md)。
+音视频资源 worker 持有原生调用的接收端，执行登记、处理、取消、最终回调及清理。请求 CancellationToken 控制停止，准备结束后再次检查取消，未取消才发送网络请求。已保存的用户消息和附件保留。群聊成员的附件准备或模型请求失败时，Rust 将错误写入该成员的消息，再继续调度下一位成员。预算、缓存版本及临时资源细节见[双端实施记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/05-双端音视频附件处理.md)。
 
 ### 3.3 Chat 端点路由（阶段 1–2）
 

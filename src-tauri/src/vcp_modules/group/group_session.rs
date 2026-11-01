@@ -478,16 +478,13 @@ impl GroupSession {
     }
 
     pub(crate) fn fail(&self, error: String) {
-        if let Ok(mut state) = self.state.lock() {
-            state.error = Some(error);
-        }
-        self.close(Some("error".into()));
+        self.finish(Err(error));
     }
 
     pub(crate) fn close_if_current(&self, revision: u64, reason: &str) -> Result<bool, String> {
         {
             let mut state = self.state.lock().map_err(|e| e.to_string())?;
-            if state.revision != revision || !state.pending_inputs.is_empty() {
+            if state.closed || state.revision != revision || !state.pending_inputs.is_empty() {
                 return Ok(false);
             }
             state.closed = true;
@@ -535,15 +532,28 @@ impl GroupSession {
     }
 
     pub(crate) fn close(&self, reason: Option<String>) {
+        self.finish(Ok(reason));
+    }
+
+    fn finish(&self, outcome: Result<Option<String>, String>) {
         let (scopes, result) = if let Ok(mut state) = self.state.lock() {
-            state.closed = true;
+            if !state.closed {
+                state.closed = true;
+                state.stop_reason = match outcome {
+                    Err(error) => {
+                        state.error = Some(error);
+                        Some("error".into())
+                    }
+                    Ok(None) if self.cancellation.is_cancelled() => {
+                        Some("cancelled_by_user".into())
+                    }
+                    Ok(reason) => reason,
+                };
+            }
             state.phase = "idle";
             state.queue.clear();
             state.current = None;
             state.advance_revision();
-            if reason.is_some() {
-                state.stop_reason = reason;
-            }
             let result = if let Some(error) = &state.error {
                 Err(error.clone())
             } else {

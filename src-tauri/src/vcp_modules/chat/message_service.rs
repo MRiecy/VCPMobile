@@ -59,7 +59,7 @@ fn project_shell_agent(
 }
 
 async fn project_history_attachment(
-    app: &AppHandle,
+    app: &AppHandle<impl tauri::Runtime>,
     db: &DbState,
     row: &sqlx::sqlite::SqliteRow,
     include_extracted_text: bool,
@@ -639,7 +639,7 @@ mod plain_text_history_tests {
 /// 为 Agent 和 Group 组装大模型上下文提供专用的轻量历史查询。
 /// 只查询消息纯文本和附件（在需要时提取文本），完全跳过 render_content 反序列化和 UI shell 预计算。
 pub async fn load_chat_text_history_for_context(
-    app_handle: &AppHandle,
+    app_handle: &AppHandle<impl tauri::Runtime>,
     key: &TopicKey,
     limit: Option<usize>,
     offset: Option<usize>,
