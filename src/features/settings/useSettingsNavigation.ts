@@ -102,11 +102,21 @@ export function useSettingsNavigation(options: {
     displayedVisit.value = visit;
   };
 
-  const openPage = (id: SettingsPageId) => {
-    if (!options.isOpen.value || activeVisit.value || id === 'developer') return;
+  const navigateTo = (id: SettingsPageId) => {
+    if (!options.isOpen.value || id === 'developer') return;
+    if (activeVisit.value?.id === id) return;
+    const wasInSubpage = Boolean(activeVisit.value);
+    developerOpen = false;
     showPage(id);
-    registerModal(SETTINGS_SUBPAGE_MODAL_ID, requestLeave, options.surface, undefined,
-      () => !developerOpen && !leavePromise && !pageHandle.value?.beforeLeave);
+    if (!wasInSubpage) {
+      registerModal(SETTINGS_SUBPAGE_MODAL_ID, requestLeave, options.surface, undefined,
+        () => !developerOpen && !leavePromise && !pageHandle.value?.beforeLeave);
+    }
+  };
+
+  const openPage = (id: SettingsPageId) => {
+    if (activeVisit.value) return;
+    navigateTo(id);
   };
 
   const openDeveloperPage = () => {
@@ -172,6 +182,7 @@ export function useSettingsNavigation(options: {
     loading: computed(() => !!activeVisit.value && !pageHandle.value && !pageError.value),
     loaded,
     openPage,
+    navigateTo,
     openDeveloperPage,
     requestLeave,
     failPage,

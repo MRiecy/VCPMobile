@@ -47,6 +47,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
   const diaryOpenTarget = ref<DiaryOpenTarget | null>(null);
+  const requestedSettingsSubPage = ref<string | null>(null);
 
   // --- Page Stack (Virtual Navigation Stack) ---
   const pageStack = ref<PageStackItem[]>([]);
@@ -179,12 +180,21 @@ export const useOverlayStore = defineStore('overlay', () => {
   };
 
   // --- Legacy API wrappers (backward compatible) ---
-  const openSettings = () => {
+  const openSettings = (subPageId?: string) => {
+    if (subPageId) requestedSettingsSubPage.value = subPageId;
+    if (isSettingsOpen.value) return;
     pushPage('settings');
   };
 
   const closeSettings = () => {
+    requestedSettingsSubPage.value = null;
     popPage();
+  };
+
+  const consumeRequestedSettingsSubPage = () => {
+    const page = requestedSettingsSubPage.value;
+    requestedSettingsSubPage.value = null;
+    return page;
   };
 
   const openAgentSettings = (id: string) => {
@@ -448,6 +458,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     diaryOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
+    requestedSettingsSubPage,
+    consumeRequestedSettingsSubPage,
     closeSettings,
     openAgentSettings,
     closeAgentSettings,

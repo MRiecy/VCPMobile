@@ -236,4 +236,25 @@ describe('settings page navigation with the real modal history', () => {
     expect(nav.activeVisit.value?.id).toBe('advanced');
     expect(modals.modalStackLength()).toBe(1);
   });
+
+  it('navigates directly to a subpage and switches between subpages seamlessly', async () => {
+    nav.navigateTo('guide');
+    expect(nav.activeVisit.value?.id).toBe('guide');
+    expect(modals.modalStackLength()).toBe(1);
+
+    // Switch directly from guide to connection without returning to root
+    nav.navigateTo('connection');
+    expect(nav.activeVisit.value?.id).toBe('connection');
+    expect(modals.modalStackLength()).toBe(1);
+
+    // Calling navigateTo on the same page is a no-op
+    const currentVisit = nav.activeVisit.value;
+    nav.navigateTo('connection');
+    expect(nav.activeVisit.value).toBe(currentVisit);
+
+    // Leaving returns to settings root
+    expect(nav.requestLeave()).toBe(true);
+    expect(nav.activeVisit.value).toBeNull();
+    expect(modals.modalStackLength()).toBe(0);
+  });
 });

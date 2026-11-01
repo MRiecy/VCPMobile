@@ -1,9 +1,13 @@
 import { defineGuide, hasTarget } from "../registry";
+import { useOverlayStore } from "../../../core/stores/overlay";
 
 export const configBackupWorkflowGuide = defineGuide({
   id: "config-backup-workflow",
   title: "配置备份与换机恢复",
   description: "首次进入服务器连接页时，指导如何通过 .vcpcfg 文件快速恢复配置，并在同步后复原专属人设与群聊模式。",
+  prepare: () => {
+    useOverlayStore().openSettings("connection");
+  },
   trigger: {
     predicates: [
       {
@@ -25,6 +29,8 @@ export const configBackupWorkflowGuide = defineGuide({
         "• 常用模型收藏与 Tarven 提示词注入规则\n\n" +
         "*若无备份文件，直接在上方填写服务器信息即可。智能体专属人设此时会自动暂存，待同步后生效。*",
       placement: "top",
+      waitFor: () => hasTarget("settings-config-import-action"),
+      waitTimeoutMs: 6000,
     },
     {
       target: "settings-config-import-action",
@@ -36,6 +42,8 @@ export const configBackupWorkflowGuide = defineGuide({
         "• 完整历史聊天记录与多媒体附件\n" +
         "• 角色头像二进制数据",
       placement: "top",
+      waitFor: () => hasTarget("settings-config-import-action"),
+      waitTimeoutMs: 6000,
     },
     {
       target: "settings-config-import-action",
@@ -47,6 +55,8 @@ export const configBackupWorkflowGuide = defineGuide({
         "• 模型采样温度发送控制开关\n" +
         "• 群聊运行模式（顺序发言、自然发言、JEV 领航等）与上下文消息窗口",
       placement: "top",
+      waitFor: () => hasTarget("settings-config-import-action"),
+      waitTimeoutMs: 6000,
     },
   ],
 });

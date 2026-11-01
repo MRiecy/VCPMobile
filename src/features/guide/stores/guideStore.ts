@@ -142,7 +142,7 @@ export const useGuideStore = defineStore('guide', () => {
     const def = getGuide(id);
     if (!def) return;
     const overlayStore = useOverlayStore();
-    if (overlayStore.isSettingsOpen) overlayStore.closeSettings();
+    if (!def.prepare && overlayStore.isSettingsOpen) overlayStore.closeSettings();
     try {
       def.prepare?.();
     } catch (e) {

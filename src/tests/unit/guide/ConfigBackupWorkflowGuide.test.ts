@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { getGuide, registerTarget, unregisterTarget } from "../../../features/guide/registry";
 import { configBackupWorkflowGuide } from "../../../features/guide/guides/config-backup-workflow";
+import { useOverlayStore } from "../../../core/stores/overlay";
 
 describe("Config Backup Workflow Guide Definition & Predicates", () => {
   beforeEach(() => {
@@ -21,6 +22,21 @@ describe("Config Backup Workflow Guide Definition & Predicates", () => {
     expect(registered?.steps[0].target).toBe("settings-config-import-action");
     expect(registered?.steps[1].target).toBe("settings-config-import-action");
     expect(registered?.steps[2].target).toBe("settings-config-import-action");
+    expect(registered?.steps[0].waitTimeoutMs).toBe(6000);
+    expect(registered?.steps[1].waitTimeoutMs).toBe(6000);
+    expect(registered?.steps[2].waitTimeoutMs).toBe(6000);
+    expect(registered?.steps[0].waitFor?.()).toBe(false);
+  });
+
+  it("calls prepare to open connection settings page", () => {
+    const overlayStore = useOverlayStore();
+    expect(overlayStore.isSettingsOpen).toBe(false);
+    expect(overlayStore.requestedSettingsSubPage).toBeNull();
+
+    configBackupWorkflowGuide.prepare?.();
+
+    expect(overlayStore.isSettingsOpen).toBe(true);
+    expect(overlayStore.requestedSettingsSubPage).toBe("connection");
   });
 
   it("evaluates connection-page-mounted predicate accurately", () => {

@@ -10,6 +10,8 @@ import { settingsPages } from "./catalog";
 import { useSettingsNavigation } from "./useSettingsNavigation";
 import { useDeveloperSettingsStore } from './developer/store';
 import { useSettingsStore } from '../../core/stores/settings';
+import { useOverlayStore } from '../../core/stores/overlay';
+import type { SettingsPageId } from './contracts';
 
 const props = withDefaults(
   defineProps<{
@@ -29,7 +31,7 @@ const emit = defineEmits<{
 const subpageSurface = ref<HTMLElement | null>(null);
 const {
   activeVisit, displayedVisit, pageError, navigationError, attempt, loading, loaded,
-  openPage, openDeveloperPage, requestLeave, failPage, retryPage, finishPageLeave,
+  openPage, navigateTo, openDeveloperPage, requestLeave, failPage, retryPage, finishPageLeave,
 } = useSettingsNavigation({
   isOpen: computed(() => props.isOpen),
   surface: () => subpageSurface.value,
@@ -39,6 +41,18 @@ const {
 const developerSettings = useDeveloperSettingsStore();
 const rootPages = settingsPages.filter((page) => !page.parent);
 const openDeveloper = () => { if (developerSettings.enabled) openDeveloperPage(); };
+
+const overlayStore = useOverlayStore();
+watch(
+  [() => props.isOpen, () => overlayStore.requestedSettingsSubPage],
+  ([open, targetSubPage]) => {
+    if (open && targetSubPage) {
+      navigateTo(targetSubPage as SettingsPageId);
+      overlayStore.consumeRequestedSettingsSubPage();
+    }
+  },
+  { immediate: true },
+);
 
 const displayedPage = computed(() => settingsPages.find((page) => page.id === displayedVisit.value?.id));
 const subPageTitle = computed(() => settingsPages.find((page) => page.id === activeVisit.value?.id)?.title || "");
