@@ -573,14 +573,17 @@ internal class SseSessionCoordinator(
             return
         }
         val choice = payload.optJSONArray("choices")?.optJSONObject(0) ?: return
-        val content = choice.optJSONObject("delta")?.opt("content") as? String ?: ""
+        val delta = choice.optJSONObject("delta")
         val reason = (choice.opt("finish_reason") as? String)?.takeIf { it.isNotEmpty() }
-        if (content.isEmpty() && reason == null) return
+        if (reason == null && (delta == null || delta.length() == 0)) return
+        val content = delta?.opt("content") as? String ?: ""
         var failedConnection: ClientConnection? = null
         synchronized(session) {
             if (!isCurrentSession(session) || session.isCompleted) return
+            // A nonempty delta without a reason starts or continues an unfinished round.
+            session.lastFinishReason = reason
+            if (content.isEmpty() && reason == null) return
             session.fullContent.append(content)
-            if (reason != null) session.lastFinishReason = reason
             session.activeConnection?.let { connection ->
                 if (!connection.enqueueFrames { emit ->
                     var offset = 0

@@ -340,6 +340,29 @@ class SseProxyProtocolTest {
     }
 
     @Test
+    fun cleanCloseAfterANewRoundUsesOnlyThatRoundsFinishReason() {
+        val session = session()
+        val (stream, output) = connection()
+        session.replaceConnection(stream)
+        val source = requireNotNull(session.eventSource)
+        fun event(data: String) = upstreamListener.onEvent(source, null, null, data)
+
+        event("""{"choices":[{"delta":{"content":"first"},"finish_reason":"stop"}]}""")
+        event("""{"choices":[{"delta":{}}]}""")
+        assertEquals("stop", session.lastFinishReason)
+        event("""{"choices":[{"delta":{"role":"assistant"}}]}""")
+        assertNull(session.lastFinishReason)
+        event("""{"choices":[{"delta":{"content":"second"}}]}""")
+        upstreamListener.onClosed(source)
+
+        val events = frames(stream, output)
+        assertEquals(listOf("data", "data", "terminal"), events.map { it.getString("eventType") })
+        assertEquals("completed", events.last().getString("finishReason"))
+        assertTrue(events.last().isNull("error"))
+        assertEquals("firstsecond", session.fullContent.toString())
+    }
+
+    @Test
     fun moreThanTwentyThousandUpstreamChunksRemainOneCompleteBody() {
         val session = session()
         val delta = """{"choices":[{"delta":{"content":"字"}}]}"""

@@ -2553,12 +2553,7 @@ async fn handle_streaming_request<R: Runtime>(
                             }
                         }
                         Some(Err(error)) => return Err(format!("SSE stream read failed: {error}")),
-                        None => return match last_finish_reason.as_deref() {
-                            None | Some("tool_calls" | "function_call") => {
-                                Err("SSE stream ended before the reply was complete".into())
-                            }
-                            Some(_) => Ok(()),
-                        },
+                        None => return Ok(()),
                     }
                     #[cfg(target_os = "android")]
                     match next {
@@ -2599,9 +2594,6 @@ async fn handle_streaming_request<R: Runtime>(
                                     let content = event["content"].as_str()
                                         .ok_or_else(|| "Helper data frame is missing content".to_string())?;
                                     pending_chunk.push_str(content);
-                                    if let Some(reason) = event["finishReason"].as_str() {
-                                        last_finish_reason = Some(reason.to_string());
-                                    }
                                 }
                                 "snapshot_start" => {
                                     if !is_resume || snapshot_in_progress || !aurora_buffer.full_text.is_empty() || !pending_chunk.is_empty() {
@@ -2627,11 +2619,9 @@ async fn handle_streaming_request<R: Runtime>(
                                     snapshot_received = true;
                                     flush_aurora_window(&mut aurora_buffer, &mut pending_chunk);
                                     output.send_aurora(&mut aurora_buffer, &message_id, &context, None, true);
-                                    if let Some(reason) = event["finishReason"].as_str() {
-                                        last_finish_reason = Some(reason.to_string());
-                                    }
                                     if completed {
                                         helper_terminal_received = true;
+                                        last_finish_reason = event["finishReason"].as_str().map(str::to_owned);
                                         if let Some(error) = event["error"].as_str() {
                                             return Err(error.to_string());
                                         }
@@ -2644,9 +2634,7 @@ async fn handle_streaming_request<R: Runtime>(
                                         return Err("Helper terminal arrived before a complete snapshot".to_string());
                                     }
                                     helper_terminal_received = true;
-                                    if let Some(reason) = event["finishReason"].as_str() {
-                                        last_finish_reason = Some(reason.to_string());
-                                    }
+                                    last_finish_reason = event["finishReason"].as_str().map(str::to_owned);
                                     if let Some(error) = event["error"].as_str() {
                                         return Err(error.to_string());
                                     }
@@ -2683,7 +2671,8 @@ async fn handle_streaming_request<R: Runtime>(
             };
             // The helper may have published its completed result after the
             // five-second ACK grace. EOF is not a new generation failure.
-            let message = match read_completed_transport(app, &transport_request_id, &output).await {
+            let message = match read_completed_transport(app, &transport_request_id, &output).await
+            {
                 Ok(Some(result)) => return result,
                 Ok(None) => message,
                 Err(error) => error.to_string(),
@@ -5284,8 +5273,8 @@ mod active_request_tests {
             assert!(received > 0, "client closed before sending a request");
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"first\"},\n",
-                "data: \"finish_reason\":\"tool_calls\"}]}\n\n",
-                "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: \"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"tail\"},\"finish_reason\":\"tool_calls\"}]}\n\n",
             );
             socket.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
@@ -5314,7 +5303,7 @@ mod active_request_tests {
         .await
         .unwrap();
         assert_eq!(result.full_content, "firsttail");
-        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
+        assert_eq!(result.finish_reason.as_deref(), Some("tool_calls"));
         assert!(!result.is_aborted);
         let mut delivered = String::new();
         while let Ok(event) = events.try_recv() {
@@ -5329,7 +5318,7 @@ mod active_request_tests {
 
     #[tokio::test]
     #[cfg(not(target_os = "android"))]
-    async fn sse_eof_during_a_new_round_is_not_a_completed_reply() {
+    async fn sse_clean_eof_completes_a_new_round_without_its_own_finish_reason() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -5339,7 +5328,7 @@ mod active_request_tests {
             assert!(socket.read(&mut request).await.unwrap() > 0);
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: {\"choices\":[{\"delta\":{\"content\":\"unfinished\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"second round\"}}]}\n\n",
             );
             socket.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
@@ -5347,7 +5336,7 @@ mod active_request_tests {
             ).as_bytes()).await.unwrap();
         });
         let app = tauri::test::mock_app();
-        let failure = handle_streaming_request(
+        let result = handle_streaming_request(
             app.handle(),
             Client::new(),
             &endpoint,
@@ -5363,10 +5352,10 @@ mod active_request_tests {
             None,
         )
         .await
-        .unwrap_err();
-        let (error, partial) = failure.into_parts();
-        assert_eq!(error, "SSE stream ended before the reply was complete");
-        assert_eq!(partial.as_deref(), Some("unfinished"));
+        .unwrap();
+        assert_eq!(result.full_content, "second round");
+        assert_eq!(result.finish_reason.as_deref(), Some("completed"));
+        assert!(!result.is_aborted);
         server.await.unwrap();
     }
 
