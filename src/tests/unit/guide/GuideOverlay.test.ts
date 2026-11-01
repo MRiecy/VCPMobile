@@ -339,4 +339,44 @@ describe('GuideOverlay', () => {
 
     wrapper.unmount();
   });
+
+  it('renders multi-line content with preserved formatting and clamps card maxHeight to available space', async () => {
+    vi.useFakeTimers();
+    defineGuide({
+      id: 'ov-multiline',
+      title: '多行排版测试',
+      description: '多行排版测试',
+      steps: [
+        {
+          target: 'overlay-target',
+          title: '配置导入指引',
+          content: '第一行说明\n\n系统将恢复：\n• 条目一\n• 条目二\n\n*注意：说明文字*',
+          placement: 'top',
+        },
+      ],
+    });
+    const store = useGuideStore();
+    const target = createTarget('overlay-target');
+    target.setAttribute('data-target', 'overlay');
+
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-multiline');
+    await nextTick();
+    vi.advanceTimersByTime(140);
+    await nextTick();
+
+    const card = wrapper.get('.guide-card');
+    const content = wrapper.get('.guide-card-content');
+    expect(content.text()).toContain('第一行说明');
+    expect(content.text()).toContain('• 条目一');
+    expect(content.text()).toContain('• 条目二');
+    expect((content.element as HTMLElement).textContent).toBe(
+      '第一行说明\n\n系统将恢复：\n• 条目一\n• 条目二\n\n*注意：说明文字*',
+    );
+    const cardEl = card.element as HTMLElement;
+    expect(cardEl.style.maxHeight).toBeDefined();
+    expect(Number.parseFloat(cardEl.style.maxHeight)).toBeGreaterThanOrEqual(100);
+
+    wrapper.unmount();
+  });
 });

@@ -260,20 +260,29 @@ const positionCard = (r: SpotRect | null) => {
 
   let top: number;
   let left: number;
+  let maxH: number;
   if (chosen === 'bottom') {
     top = r.bottom + CARD_GAP;
     left = clampX(r.left + r.width / 2 - cardW / 2, cardW, insets);
+    maxH = Math.max(120, vh - insets.bottom - SAFE_MARGIN - top);
   } else if (chosen === 'top') {
     top = Math.max(insets.top + SAFE_MARGIN, r.top - CARD_GAP - cardH);
     left = clampX(r.left + r.width / 2 - cardW / 2, cardW, insets);
+    maxH = Math.max(120, r.top - CARD_GAP - (insets.top + SAFE_MARGIN));
   } else if (chosen === 'left') {
     left = Math.max(insets.left + SAFE_MARGIN, r.left - CARD_GAP - cardW);
     top = clampY(r.top + r.height / 2 - cardH / 2, cardH, insets);
+    maxH = Math.max(120, vh - insets.top - insets.bottom - SAFE_MARGIN * 2);
   } else {
     left = r.right + CARD_GAP;
     top = clampY(r.top + r.height / 2 - cardH / 2, cardH, insets);
+    maxH = Math.max(120, vh - insets.top - insets.bottom - SAFE_MARGIN * 2);
   }
-  cardStyle.value = { top: `${top}px`, left: `${left}px` };
+  cardStyle.value = {
+    top: `${top}px`,
+    left: `${left}px`,
+    maxHeight: `${maxH}px`,
+  };
 };
 
 const skipStep = (token: number) => {
@@ -366,6 +375,10 @@ const beginStep = () => {
   clearTimers();
   targetEl = null;
   lastSample = null;
+  if (cardStyle.value.maxHeight) {
+    const { maxHeight: _, ...rest } = cardStyle.value;
+    cardStyle.value = rest;
+  }
   // 保留旧 spotRect：步间推进不闪黑纱，新目标就绪后经 CSS 过渡滑移聚焦。
   targetObserver?.disconnect();
   targetObserver = null;
@@ -394,6 +407,10 @@ const beginStep = () => {
 };
 
 const restartMeasure = () => {
+  if (cardStyle.value.maxHeight) {
+    const { maxHeight: _, ...rest } = cardStyle.value;
+    cardStyle.value = rest;
+  }
   if (isNotice.value) {
     positionCard(null);
     return;
@@ -632,6 +649,9 @@ onBeforeUnmount(() => {
 
 .guide-card {
   position: absolute;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
   width: min(320px, calc(100vw - var(--vcp-safe-left, 0px) - var(--vcp-safe-right, 0px) - 16px));
   background: var(--vcp-panel-bg-97, var(--secondary-bg));
   border: 1px solid var(--border-color);
@@ -640,6 +660,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.16);
   color: var(--primary-text);
   animation: guide-card-in 0.2s ease-out both;
+  overflow: hidden;
 }
 
 /* 完成首次定位后启用位置过渡（与聚光同步滑移，避免 -9999px 飞入） */
@@ -649,26 +670,17 @@ onBeforeUnmount(() => {
     left 0.26s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.guide-card--notice {
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-  width: min(440px, calc(100% - var(--vcp-safe-left, 0px) - var(--vcp-safe-right, 0px) - 16px));
-  overflow: hidden;
-}
-
-.guide-card--notice .guide-card-head,
-.guide-card--notice .guide-card-actions {
+.guide-card-head,
+.guide-card-actions {
   flex-shrink: 0;
 }
 
+.guide-card--notice {
+  width: min(440px, calc(100% - var(--vcp-safe-left, 0px) - var(--vcp-safe-right, 0px) - 16px));
+}
+
 .guide-card--notice .guide-card-content {
-  min-height: 0;
   font-size: 14px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  touch-action: pan-y;
-  white-space: pre-line;
 }
 
 .guide-card--notice .guide-card-title {
@@ -714,6 +726,12 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.6;
   opacity: 0.85;
+  white-space: pre-line;
+  word-break: break-word;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
 }
 
 .guide-card-actions {
