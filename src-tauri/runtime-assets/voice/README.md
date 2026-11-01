@@ -40,7 +40,7 @@ python3 -m pip install -r src-tauri/runtime-assets/voice/requirements-build.txt
 python3 src-tauri/runtime-assets/voice/build_runtime.py ios --cache-dir /tmp/vcpmobile-silero-runtime --jobs 6
 ```
 
-Apple 归档工作流先构建裁剪运行库，再由 SwiftPM 消费 `Runtime/` 和 `OrtObjC/`。原始模型派生产物、配置、许可证和构建入口在此目录维护。SwiftPM 的 C++17 与 `SPM_BUILD` 沿用官方绑定要求。成功后生成 `ios/build-report.json`，记录实际 arm64 静态库与 XCFramework 大小和哈希。见 [iOS 构建说明](../../../docs/IOS_BUILD.md)。
+Apple 归档工作流先构建裁剪运行库，再由 SwiftPM 消费 `Runtime/` 和 `OrtObjC/`。原始模型派生产物、配置、许可证和构建入口在此目录维护。绑定使用 C++17，并显式从自建 `ios-arm64/onnxruntime.framework/Headers` 读取平铺头文件，不定义面向官方 pod 包目录布局的 `SPM_BUILD`。Xcode 26 下的 `swift-rs` 将 iOS target 传给编译器，但 SwiftPM 仍按 host triple 规划，不能依赖 binaryTarget 自动提供 iOS framework 搜索路径；核心静态库仍由 Cargo 显式链接。成功后生成 `ios/build-report.json`，记录实际 arm64 静态库与 XCFramework 大小和哈希。见 [iOS 构建说明](../../../docs/IOS_BUILD.md)。
 
 已有锁定源码/构建目录可传 `--source-dir`、`--build-dir` 复用。`apple-inputs` 只复制 Apple 源码与资源，供 Windows 源码审计，**不产生 Apple 编译/链接证据**。
 

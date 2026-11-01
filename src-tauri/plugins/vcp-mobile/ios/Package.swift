@@ -36,7 +36,13 @@ let package = Package(
             path: "OrtObjC",
             exclude: ["LICENSE"],
             publicHeadersPath: "include",
-            cxxSettings: [.define("SPM_BUILD")]
+            // swift-rs on Xcode 26 passes the iOS target to the compilers, but
+            // SwiftPM still plans for the host triple and skips the iOS binary
+            // slice. Use the custom framework's flat headers directly; SPM_BUILD
+            // selects the upstream pod archive's onnxruntime/ header layout.
+            cxxSettings: [
+                .headerSearchPath("../Runtime/onnxruntime.xcframework/ios-arm64/onnxruntime.framework/Headers")
+            ]
         )
     ],
     cxxLanguageStandard: .cxx17
