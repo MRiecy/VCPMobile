@@ -184,6 +184,7 @@ const confirmImport = async () => {
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
     <SettingsActionWithStatus
+      v-guide="'settings-config-import-action'"
       title="导入配置"
       description="恢复 .vcpcfg.json 配置备份，未包含的选项保持当前值"
       button-variant="secondary"

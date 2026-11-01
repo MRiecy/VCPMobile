@@ -1,52 +1,52 @@
-import { defineGuide } from "../registry";
-import { getActivePinia } from "pinia";
-import { useSettingsStore } from "../../../core/stores/settings";
-import { useAssistantStore } from "../../../core/stores/assistant";
+import { defineGuide, hasTarget } from "../registry";
 
 export const configBackupWorkflowGuide = defineGuide({
   id: "config-backup-workflow",
-  title: "配置全量备份与两阶段恢复",
-  description: "学习如何通过配置备份快速初始化连接，并在同步后恢复助手独立音色与群聊设置。",
+  title: "配置备份与换机恢复",
+  description: "首次进入服务器连接页时，指导如何通过 .vcpcfg 文件快速恢复配置，并在同步后复原专属人设与群聊模式。",
   trigger: {
     predicates: [
       {
-        name: "hasServerUrl",
-        check: () => {
-          if (!getActivePinia()) return false;
-          return Boolean(useSettingsStore().settings?.server?.url);
-        },
-      },
-      {
-        name: "noAssistantsYet",
-        check: () => {
-          if (!getActivePinia()) return false;
-          const store = useAssistantStore();
-          return store.agents.length === 0 && store.groups.length === 0;
-        },
+        name: "connection-page-mounted",
+        check: () => hasTarget("settings-config-import-action"),
       },
     ],
-    settleMs: 1000,
+    settleMs: 600,
   },
   steps: [
     {
-      target: "settings-config-backup-section",
-      title: "第一步：恢复全局配置",
-      content: "点击「恢复配置」导入 .vcpcfg.json，恢复服务器地址、主题与语音偏好。",
-      placement: "bottom",
-      demo: "tap",
+      target: "settings-config-import-action",
+      title: "阶段一：导入配置备份",
+      content:
+        "若您已有 .vcpcfg.json 配置备份，可点击此处「导入」。\n\n" +
+        "系统将快速恢复：\n" +
+        "• 服务器连接地址、API 密钥与身份设置\n" +
+        "• 语音服务、主题排版与置顶偏好\n" +
+        "• 常用模型收藏与 Tarven 提示词注入规则\n\n" +
+        "*若无备份文件，直接在上方填写服务器信息即可。智能体专属人设此时会自动暂存，待同步后生效。*",
+      placement: "top",
     },
     {
-      target: "sidebar-sync-button",
-      title: "第二步：执行数据同步",
-      content: "在数据同步面板中拉取电脑端 VChat 的智能体、群聊与聊天记录。",
-      placement: "right",
-      demo: "tap",
+      target: "settings-config-import-action",
+      title: "阶段二：执行数据同步",
+      content:
+        "完成基础配置后，需在主界面右侧工具面板中执行「数据同步」。\n\n" +
+        "同步子系统将拉取：\n" +
+        "• 智能体角色列表与群组成员关系\n" +
+        "• 完整历史聊天记录与多媒体附件\n" +
+        "• 角色头像二进制数据",
+      placement: "top",
     },
     {
-      target: null,
-      title: "第三步：还原助手专属设置",
-      content: "同步完成后，系统将自动弹窗。点击一键补全即可复原移动端专用提示词与群组模式！",
-      placement: "bottom",
+      target: "settings-config-import-action",
+      title: "阶段三：恢复助手专属设置",
+      content:
+        "数据同步完成后，系统将自动检测暂存的本地偏好，并弹出「发现待生效的实体配置」确认窗口。\n\n" +
+        "点击确定即可一键恢复：\n" +
+        "• 智能体移动端专属系统提示词与发音音色\n" +
+        "• 模型采样温度发送控制开关\n" +
+        "• 群聊运行模式（顺序发言、自然发言、JEV 领航等）与上下文消息窗口",
+      placement: "top",
     },
   ],
 });
