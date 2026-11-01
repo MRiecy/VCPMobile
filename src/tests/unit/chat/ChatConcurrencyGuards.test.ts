@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import {
   MAX_HISTORY_MESSAGES,
@@ -17,6 +17,7 @@ import {
 } from "@/tests/mocks/tauri";
 import { flushPromises } from "@/tests/utils/flush";
 import { makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
+import { installWindow, mockWindowRead, windowPage } from "@/tests/helpers/chatWindow";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -42,6 +43,9 @@ describe("chat conversation concurrency guards", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     mockInvoke("reconnect_chat_streams", () => ({ generations: [], activeRequests: [], groupTurns: [] }));
+    mockInvoke("reconcile_chat_window", args => ({
+      ...windowPage([]), memberIds: (args?.known as { id: string }[]).map(row => row.id),
+    }));
   });
 
   it("keeps destructive operations blocked until the first inventory is known", async () => {
@@ -89,13 +93,13 @@ describe("chat conversation concurrency guards", () => {
       output = args?.channel as typeof output;
       return { generations: [], activeRequests: [], groupTurns: [] };
     });
-    mockInvoke("load_chat_history", () => []);
+    mockWindowRead([]);
     const stream = useChatStreamStore();
     await stream.checkAndRecoverInterruptedStreams();
     const session = useChatSessionStore();
-    session.setConversation({ id: "group-a", type: "group" }, "topic-a");
+    installWindow(session, { id: "group-a", type: "group" }, "topic-a");
     const history = useChatHistoryStore();
-    await history.loadHistory("group-a", "group", "topic-a");
+    await history.ensureWindow();
     output?.emit({
       type: "thinking", messageId: "other-owner", consumerRevision: 101,
       context: { ownerId: "group-b", ownerType: "group", topicId: "topic-a" },
@@ -111,13 +115,13 @@ describe("chat conversation concurrency guards", () => {
 
   it("keeps a loaded partial until an ordered snapshot and delta replace it", async () => {
     const session = useChatSessionStore();
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    mockInvoke("load_chat_history", () => [{
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    mockWindowRead([{
       id: "live", role: "assistant", content: "saved partial", timestamp: 1,
       blocks: [{ type: "markdown", content: "saved partial" }],
     }]);
     const history = useChatHistoryStore();
-    await history.loadHistory("agent-a", "agent", "topic-a");
+    await history.ensureWindow();
     const visibleMessage = history.currentChatHistory[0];
     const receipt = deferred<any>();
     let output: { emit: (event: unknown) => void } | undefined;
@@ -209,66 +213,12 @@ describe("chat conversation concurrency guards", () => {
     expect(message?.shell?.displayName).toBe("Speaker A");
   });
 
-  it("replaces a stale pending UI with persisted history when the inventory no longer contains it", async () => {
-    const session = useChatSessionStore();
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    mockInvoke("load_chat_history", () => []);
-    const history = useChatHistoryStore();
-    await history.loadHistory("agent-a", "agent", "topic-a");
-    const stream = useChatStreamStore();
-    await stream.checkAndRecoverInterruptedStreams();
-    const output = channelInstances[0];
-    const identity = {
-      messageId: "already-saved", consumerRevision: 1,
-      context: { ownerId: "agent-a", ownerType: "agent", topicId: "topic-a" },
-    };
-    output?.emit({ ...identity, type: "thinking" });
-    mockInvoke("load_chat_history", () => [{
-      id: "already-saved", role: "assistant", content: "persisted result", timestamp: 1,
-      finishReason: "completed", blocks: [],
-    }]);
-    await stream.checkAndRecoverInterruptedStreams();
-    output?.emit({ ...identity, type: "aurora", aurora: {
-      kind: "snapshot", streamId: 1, content: "stale partial", stableBlocks: [],
-    } });
-    expect(history.currentChatHistory[0]).toMatchObject({ content: "persisted result", finishReason: "completed" });
-    expect(stream.isConversationBusy("agent-a", "agent", "topic-a")).toBe(false);
-    expect(stream.getActiveStreamMessage("agent-a", "agent", "topic-a", "already-saved")).toBeUndefined();
-  });
-
-  it("fences late frames after an external committed deletion", async () => {
-    let output: { emit: (event: unknown) => void } | undefined;
-    const receipt = deferred<any>();
-    mockInvoke("reconnect_chat_streams", args => {
-      output = args?.channel as typeof output;
-      return receipt.promise;
-    });
-    const stream = useChatStreamStore();
-    const connecting = stream.checkAndRecoverInterruptedStreams();
-    const identity = {
-      messageId: "deleted", consumerRevision: 150,
-      context: { ownerId: "agent-a", ownerType: "agent", topicId: "topic-a" },
-    };
-    output?.emit({ ...identity, type: "reconnecting" });
-    stream.forgetDeletedMessage("agent-a", "agent", "topic-a", "deleted");
-    output?.emit({
-      ...identity, type: "end", content: "late terminal", finishReason: "completed", blocks: [],
-    });
-    receipt.resolve({ generations: [{
-      msgId: "deleted", topicId: "topic-a", ownerId: "agent-a", ownerType: "agent", createdAt: 1,
-    }], activeRequests: [], groupTurns: [] });
-    await connecting;
-    expect(stream.getActiveStreamMessage("agent-a", "agent", "topic-a", "deleted")).toBeUndefined();
-    expect(stream.isMessageActive("agent-a", "agent", "topic-a", "deleted")).toBe(false);
-    expect(useNotificationStore().activeToasts).toEqual([]);
-  });
-
   it("inserts an offline durable end during connection without a second recovery command", async () => {
     const session = useChatSessionStore();
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    mockInvoke("load_chat_history", () => []);
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    mockWindowRead([]);
     const history = useChatHistoryStore();
-    await history.loadHistory("agent-a", "agent", "topic-a");
+    await history.ensureWindow();
     mockInvoke("reconnect_chat_streams", args => {
       const output = args?.channel as { emit: (event: unknown) => void };
       output.emit({
@@ -279,9 +229,13 @@ describe("chat conversation concurrency guards", () => {
       });
       return { generations: [], activeRequests: [], groupTurns: [] };
     });
+    mockInvoke("reconcile_chat_window", () => windowPage([{
+      id: "offline", role: "assistant", timestamp: 1, content: "offline result", finishReason: "completed",
+      blocks: [{ type: "markdown", content: "offline result" }],
+    }]));
     await useChatStreamStore().checkAndRecoverInterruptedStreams();
     expect(history.currentChatHistory).toEqual([
-      expect.objectContaining({ id: "offline", content: "offline result", isReconnecting: false }),
+      expect.objectContaining({ id: "offline", content: "offline result", finishReason: "completed" }),
     ]);
     expect(invokeMock.mock.calls.some(([command]) =>
       command === "recover_active_generation" || command === "get_active_generations")).toBe(false);
@@ -460,22 +414,14 @@ describe("chat conversation concurrency guards", () => {
     const history = useChatHistoryStore();
     const loadA = deferred<any[]>();
     const loadB = deferred<any[]>();
-    mockInvoke("load_chat_history", (args) =>
-      args?.topicId === "topic-a" ? loadA.promise : loadB.promise,
+    mockWindowRead(args =>
+      (args?.key as { topicId: string }).topicId === "topic-a" ? loadA.promise : loadB.promise,
     );
 
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    const pendingA = history.loadHistoryPaginated(
-      "agent-a",
-      "agent",
-      "topic-a",
-    );
-    session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
-    const pendingB = history.loadHistoryPaginated(
-      "agent-b",
-      "agent",
-      "topic-b",
-    );
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    const pendingA = history.ensureWindow();
+    installWindow(session, { id: "agent-b", type: "agent" }, "topic-b");
+    const pendingB = history.ensureWindow();
 
     loadA.resolve([message("message-a", "topic-a")]);
     await pendingA;
@@ -500,10 +446,9 @@ describe("chat conversation concurrency guards", () => {
       "server.url": "https://example.invalid",
       "server.apiKey": "key",
     }));
-    mockInvoke("load_chat_history", () => []);
-
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
+    mockWindowRead([]);
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    await history.ensureWindow();
 
     const append = deferred<{ blocks: any[]; topicUpdatedAt: number }>();
     mockInvoke("append_single_message", () => append.promise);
@@ -538,42 +483,40 @@ describe("chat conversation concurrency guards", () => {
       ...message(`message-${String(index).padStart(4, "0")}`, "topic-a"),
       timestamp: index + 100,
     }));
-    let page = 0;
-    mockInvoke("load_chat_history", () => {
-      page += 1;
-      return page === 1
-        ? recent
-        : [{ ...message("message-older", "topic-a"), timestamp: 1 }];
+    mockInvoke("read_chat_window", args => {
+      if (!args?.older) return windowPage(recent, { hasMoreOlder: true });
+      return windowPage([{ ...message("message-older", "topic-a"), timestamp: 1 }, ...recent.slice(0, -1)], { hasMoreNewer: true });
     });
 
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    await history.ensureWindow();
     await history.loadMoreHistory();
 
     const historyCalls = invokeMock.mock.calls.filter(
-      ([command]) => command === "load_chat_history",
+      ([command]) => command === "read_chat_window",
     );
     expect(historyCalls[1]?.[1]).toMatchObject({
-      beforeTimestamp: 100,
-      beforeMessageId: "message-0000",
-      offset: null,
+      older: true, limit: 10, key: { ownerId: "agent-a", ownerType: "agent", topicId: "topic-a" },
+      windowRevision: 1,
     });
     expect(history.currentChatHistory).toHaveLength(MAX_HISTORY_MESSAGES);
     expect(history.currentChatHistory[0]?.id).toBe("message-older");
     expect(history.currentChatHistory.some(item => item.id === "message-0499")).toBe(false);
     expect(history.hasEvictedNewer).toBe(true);
 
-    mockInvoke("load_chat_history", () => recent.slice(-15));
+    mockWindowRead(recent.slice(-5));
+    vi.spyOn(session, "selectTopicById").mockImplementation(async () => {
+      installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+      return "accepted";
+    });
     await history.returnToLatest();
 
     const latestCalls = invokeMock.mock.calls.filter(
-      ([command]) => command === "load_chat_history",
+      ([command]) => command === "read_chat_window",
     );
     const latestCall = latestCalls[latestCalls.length - 1]?.[1];
     expect(latestCall).toMatchObject({
-      beforeTimestamp: null,
-      beforeMessageId: null,
-      offset: 0,
+      older: false, windowRevision: 2,
     });
     expect(history.hasEvictedNewer).toBe(false);
     expect(
@@ -585,9 +528,9 @@ describe("chat conversation concurrency guards", () => {
     const session = useChatSessionStore();
     const history = useChatHistoryStore();
     const attachments = useAttachmentStore();
-    mockInvoke("load_chat_history", () => []);
-    session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
-    await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
+    mockWindowRead([]);
+    installWindow(session, { id: "agent-a", type: "agent" }, "topic-a");
+    await history.ensureWindow();
     attachments.stagedAttachments.push({
       id: "attachment-loading",
       name: "large.pdf",

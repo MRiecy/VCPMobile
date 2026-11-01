@@ -38,14 +38,8 @@ export function useDataReload() {
       );
     }
 
-    // 5. 如果当前在某个话题中，重新加载消息以获取最新 AST
-    if (sessionStore.currentTopicId && sessionStore.currentSelectedItem) {
-      await chatHistoryStore.loadHistoryPaginated(
-        sessionStore.currentSelectedItem.id,
-        sessionStore.currentSelectedItem.type,
-        sessionStore.currentTopicId,
-      );
-    }
+    // Rebuilding render artifacts and synchronizing rows preserve the accepted window.
+    await chatHistoryStore.reconcileWindow(true);
   };
 
   return { performFullReload };

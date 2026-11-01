@@ -6,7 +6,7 @@ import type { ConversationKey } from '../../../core/stores/chatSessionStore';
 
 const state = vi.hoisted(() => ({
   current: null as ConversationKey | null,
-  merge: vi.fn(), history: vi.fn(), recover: vi.fn(), count: vi.fn(), updated: vi.fn(),
+  merge: vi.fn(), recover: vi.fn(), count: vi.fn(), updated: vi.fn(),
 }));
 vi.mock('../../../core/stores/chatSessionStore', () => ({
   useChatSessionStore: () => ({
@@ -15,7 +15,7 @@ vi.mock('../../../core/stores/chatSessionStore', () => ({
   }),
 }));
 vi.mock('../../../core/stores/chatHistoryStore', () => ({
-  useChatHistoryStore: () => ({ mergePersistedVoiceMessage: state.merge, reconcileVoiceHistory: state.history }),
+  useChatHistoryStore: () => ({ mergePersistedVoiceMessage: state.merge }),
 }));
 vi.mock('../../../core/stores/topicListManager', () => ({
   useTopicStore: () => ({ setTopicMsgCount: state.count, setTopicUpdatedAt: state.updated }),
@@ -30,8 +30,7 @@ let sync: ReturnType<typeof createVoiceHistorySync>;
 
 beforeEach(() => {
   state.current = { ...target, epoch: 1 };
-  for (const mock of [state.merge, state.history, state.recover, state.count, state.updated]) mock.mockReset();
-  state.history.mockResolvedValue(undefined);
+  for (const mock of [state.merge, state.recover, state.count, state.updated]) mock.mockReset();
   state.recover.mockResolvedValue(null);
   mockInvoke('get_topics', () => [{ id: 'topic', msgCount: 8, updatedAt: 20 }]);
   sync = createVoiceHistorySync();
@@ -39,13 +38,12 @@ beforeEach(() => {
 afterEach(() => sync.dispose());
 
 describe('voice committed-message projection', () => {
-  it('recovers a background commit through authoritative history without sending or narrating again', async () => {
+  it('recovers the call without issuing a second history query alongside shared output recovery', async () => {
     state.recover.mockResolvedValue({ target, lastPersistedMessageId: message.id });
     await sync.reconcile();
     expect(state.merge).not.toHaveBeenCalled();
-    expect(state.history).toHaveBeenCalledWith(state.current);
-    expect(state.count).toHaveBeenCalledWith('agent', 'agent', 'topic', 8);
-    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(['get_topics']);
+    expect(state.recover).toHaveBeenCalledOnce();
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it('does not apply a delayed activity result to a new conversation epoch', async () => {

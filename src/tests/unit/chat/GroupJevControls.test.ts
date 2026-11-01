@@ -16,6 +16,7 @@ import { mockInvoke, invokeMock, type MockChannel } from '@/tests/mocks/tauri';
 import { mountWithPinia } from '@/tests/utils/mount';
 import { flushPromises } from '@/tests/utils/flush';
 import { makeConfigSnapshot, makeSettings } from '@/tests/helpers/config';
+import { installWindow, mockWindowRead, windowPage } from '@/tests/helpers/chatWindow';
 
 let wrapper: VueWrapper | undefined;
 let output: MockChannel<unknown> | undefined;
@@ -34,10 +35,10 @@ async function mountGroup(component: Component = GroupInviteBar) {
     const assistant = useAssistantStore();
     assistant.agents = [{ id: 'a1', name: 'Nova', model: 'm' }, { id: 'a2', name: 'Luna', model: 'm' }] as any;
     assistant.groups = [{ id: 'g1', name: '自然群聊', members: ['a1', 'a2'], mode: 'jev' }] as any;
-    useChatSessionStore().setConversation({ id: 'g1', type: 'group' }, 't1');
+    installWindow(useChatSessionStore(), { id: 'g1', type: 'group' }, 't1');
     useSettingsStore().snapshot = makeConfigSnapshot(makeSettings());
   });
-  await useChatHistoryStore().loadHistory('g1', 'group', 't1');
+  await useChatHistoryStore().ensureWindow();
   return wrapper;
 }
 
@@ -51,7 +52,8 @@ function emitTurn(snapshot: GroupTurnSnapshotDto, active = true, turnId = turn.t
 
 beforeEach(() => {
   output = undefined;
-  mockInvoke('load_chat_history', () => []);
+  mockWindowRead([]);
+  mockInvoke('reconcile_chat_window', () => windowPage([]));
   mockInvoke('reconnect_chat_streams', args => {
     output = args?.channel as MockChannel<unknown>;
     return { generations: [], activeRequests: [], groupTurns: [] };

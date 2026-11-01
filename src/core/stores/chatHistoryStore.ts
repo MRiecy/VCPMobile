@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
-import { nextTick, ref } from "vue";
+import { ref, watch } from "vue";
+import { useChatWindow } from "./chatWindow";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { useChatSessionStore } from "./chatSessionStore";
 import { useChatStreamStore } from "./chatStreamStore";
@@ -28,16 +29,9 @@ import type {
 } from "../types/chat";
 import type {
   ConversationKey,
-  ConversationOwnerType,
 } from "./chatSessionStore";
 
-export interface HistoryPageResult {
-  addedCount: number;
-  error?: unknown;
-  aborted?: boolean;
-}
-
-type AnchorLoadResult = "loaded" | "missing" | "aborted";
+export { MAX_HISTORY_MESSAGES, type HistoryPageResult } from './chatWindow';
 
 export interface MessageActionKey {
   conversation: ConversationKey;
@@ -49,27 +43,6 @@ interface EditingMessageIntent {
   initialContent: string;
 }
 
-export const MAX_HISTORY_MESSAGES = 500;
-
-const compareMessages = (a: ChatMessage, b: ChatMessage) => {
-  if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
-  // 与 SQLite 默认 BINARY collation 对齐，避免同毫秒消息在 keyset 游标处错位。
-  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-};
-
-const mergeHistoryWindow = (
-  existing: ChatMessage[],
-  incoming: ChatMessage[],
-  loadingOlder: boolean,
-) => {
-  const byId = new Map(existing.map(message => [message.id, message]));
-  incoming.forEach(message => byId.set(message.id, message));
-  const merged = Array.from(byId.values()).sort(compareMessages);
-  if (merged.length <= MAX_HISTORY_MESSAGES) return merged;
-  return loadingOlder
-    ? merged.slice(0, MAX_HISTORY_MESSAGES)
-    : merged.slice(-MAX_HISTORY_MESSAGES);
-};
 
 const sameConversation = (a: ConversationKey | null, b: ConversationKey | null) =>
   Boolean(
@@ -82,29 +55,17 @@ const sameConversation = (a: ConversationKey | null, b: ConversationKey | null) 
   );
 
 export const useChatHistoryStore = defineStore("chatHistory", () => {
-  const currentChatHistory = ref<ChatMessage[]>([]);
-  const loading = ref(false);
-
-  // 分页加载状态
-  const hasMoreHistory = ref(true);    // 是否还有更多旧消息
-  const isLoadingHistory = ref(false); // 防止并发重复触发
-  const hasEvictedNewer = ref(false);  // 深翻历史触发窗口裁剪后，最新端需要显式重载
-  const loadedConversationKey = ref<ConversationKey | null>(null);
-
-  // 启动预加载缓存：PRELOADING 阶段提前拉取首屏历史，ChatView mount 后直接消费
-  const preloadedHistory = ref<{ key: ConversationKey; messages: ChatMessage[] } | null>(null);
-  let preloadConsumed = false;
+  const window = useChatWindow();
+  const { currentChatHistory, hasEvictedNewer, canCommitConversation,
+    projectLiveMessage, reconcileWindow, noteMessageChange, returnToLatest } = window;
 
   // “编辑重发”意图必须绑定完整会话身份，避免异步读取后误落到其他话题。
   const editingMessage = ref<EditingMessageIntent | null>(null);
   const isSubmitting = ref(false);
 
-  // 用于防止并发加载与话题切换导致竞态的消息拉取中止控制器 (AbortController)
-  let currentLoadAbortController: AbortController | null = null;
-  let currentLoadId = 0;
-  let currentAnchorLoadId = 0;
 
   const sessionStore = useChatSessionStore();
+  watch(() => sessionStore.sessionEpoch, () => { editingMessage.value = null; }, { flush: 'sync' });
   const streamStore = useChatStreamStore();
   const attachmentStore = useAttachmentStore();
   const assistantStore = useAssistantStore();
@@ -116,24 +77,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
   const errorMessage = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
-  const isMissingTopicError = (error: unknown) =>
-    errorMessage(error) === "topic does not belong to the selected owner";
-  const notifyHistoryLoadFailure = () => {
-    notificationStore.addNotification({
-      type: "error",
-      title: "历史加载失败",
-      message: "暂时无法读取聊天记录，请稍后重试",
-      toastOnly: true,
-    });
-  };
-
   const captureLoadedConversation = (): ConversationKey | null => {
     const key = sessionStore.currentConversationKey;
-    return sameConversation(loadedConversationKey.value, key) && key ? { ...key } : null;
+    return key && canCommitConversation(key) ? { ...key } : null;
   };
-
-  const canCommitConversation = (key: ConversationKey) =>
-    sessionStore.isConversationCurrent(key) && sameConversation(loadedConversationKey.value, key);
 
   const captureMessageActionKey = (messageId: string): MessageActionKey | null => {
     const conversation = captureLoadedConversation();
@@ -143,36 +90,23 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const isMessageActionCurrent = (key: MessageActionKey) =>
     canCommitConversation(key.conversation);
 
-  /**
-   * 启动预加载：在 PRELOADING 阶段提前拉取首屏聊天历史
-   * 让 DB + IPC 开销与 Vue 组件挂载并行，ChatView mount 后直接命中缓存
-   */
-  const preloadHistory = async (
-    ownerId: string,
-    ownerType: ConversationOwnerType,
-    topicId: string,
-    limit: number = 5,
-  ) => {
-    const key = sessionStore.currentConversationKey;
-    if (
-      !key ||
-      key.ownerId !== ownerId ||
-      key.ownerType !== ownerType ||
-      key.topicId !== topicId
-    ) {
-      return;
-    }
+  // Reading another section of the same conversation must preserve its composer.
+  const resetHistoryForConversation = () => {
+    window.resetHistoryForConversation();
+    editingMessage.value = null;
+  };
+
+  const openLoadedReference = async (id: string) => {
+    const key = captureLoadedConversation();
+    if (!key || !currentChatHistory.value.some(row => row.id === id)) return;
+    const intent = sessionStore.beginNavigation();
     try {
-      const messages = await invoke<ChatMessage[]>('load_chat_history', {
-        ownerId, ownerType, topicId, limit, offset: 0,
-        beforeTimestamp: null, beforeMessageId: null,
+      const result = await sessionStore.selectTopicById(key.ownerId, key.ownerType, key.topicId, intent, id);
+      if (sessionStore.isNavigationCurrent(intent)) sessionStore.notifyNavigationResult(result);
+    } catch (error) {
+      if (sessionStore.isNavigationCurrent(intent)) notificationStore.addNotification({
+        type: 'error', title: '无法打开引用消息', message: errorMessage(error), toastOnly: true,
       });
-      if (!sessionStore.isConversationCurrent(key)) return;
-      preloadedHistory.value = { key, messages };
-      console.log(`[ChatHistoryStore] Preloaded ${messages.length} messages for topic ${topicId}`);
-    } catch (e) {
-      console.error('[ChatHistoryStore] Preload failed:', e);
-      preloadedHistory.value = null;
     }
   };
 
@@ -229,256 +163,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  /**
-   * 加载聊天历史
-   */
-  const loadHistory = async (
-    ownerId: string,
-    ownerType: ConversationOwnerType,
-    topicId: string,
-    limit: number = 15,
-    loadingOlder = false,
-  ): Promise<HistoryPageResult> => {
-    const key = sessionStore.currentConversationKey;
-    if (
-      !key ||
-      key.ownerId !== ownerId ||
-      key.ownerType !== ownerType ||
-      key.topicId !== topicId
-    ) {
-      return { addedCount: 0, aborted: true };
-    }
-    const loadId = ++currentLoadId;
-    const oldest = loadingOlder ? currentChatHistory.value[0] : undefined;
-    if (loadingOlder && !oldest) return { addedCount: 0, aborted: true };
-    console.log(
-      `[ChatHistoryStore] Loading ${loadingOlder ? "older" : "latest"} history for ${ownerId}, topic: ${topicId}, limit: ${limit}`,
-    );
-    if (currentLoadAbortController) {
-      currentLoadAbortController.abort();
-    }
-    const controller = new AbortController();
-    currentLoadAbortController = controller;
-    const { signal } = controller;
-    loading.value = true;
-    isLoadingHistory.value = true;
-
-    try {
-      let messages: ChatMessage[];
-      if (
-        !loadingOlder &&
-        !preloadConsumed &&
-        preloadedHistory.value &&
-        sameConversation(preloadedHistory.value.key, key)
-      ) {
-        messages = preloadedHistory.value.messages;
-        preloadedHistory.value = null;
-        preloadConsumed = true;
-      } else {
-        preloadConsumed = true;
-        messages = await invoke<ChatMessage[]>('load_chat_history', {
-          ownerId, ownerType, topicId, limit,
-          // 后端分页使用稳定游标；offset=0 只标识最新窗口读取。
-          offset: loadingOlder ? null : 0,
-          beforeTimestamp: oldest?.timestamp ?? null,
-          beforeMessageId: oldest?.id ?? null,
-        });
-      }
-
-      if (
-        signal.aborted ||
-        loadId !== currentLoadId ||
-        !sessionStore.isConversationCurrent(key)
-      ) {
-        return { addedCount: 0, aborted: true };
-      }
-
-      const hydrated = messages.map(
-        msg => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, msg.id) || msg,
-      );
-      let addedCount = hydrated.length;
-      if (!loadingOlder) {
-        currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
-        hasEvictedNewer.value = false;
-      } else {
-        const existingIds = new Set(currentChatHistory.value.map(message => message.id));
-        const unique = hydrated.filter(message => !existingIds.has(message.id));
-        if (currentChatHistory.value.length + unique.length > MAX_HISTORY_MESSAGES) {
-          hasEvictedNewer.value = true;
-        }
-        currentChatHistory.value = mergeHistoryWindow(
-          currentChatHistory.value,
-          unique,
-          true,
-        );
-        addedCount = unique.length;
-      }
-      loadedConversationKey.value = key;
-      hasMoreHistory.value = messages.length >= limit;
-      hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
-      return { addedCount };
-    } catch (e) {
-      console.error("[ChatHistoryStore] Failed to load history:", e);
-      if (
-        signal.aborted ||
-        loadId !== currentLoadId ||
-        !sessionStore.isConversationCurrent(key)
-      ) {
-        return { addedCount: 0, aborted: true };
-      }
-      if (isMissingTopicError(e)) {
-        return { addedCount: 0, aborted: true };
-      }
-      notifyHistoryLoadFailure();
-      return { addedCount: 0, error: e };
-    } finally {
-      if (
-        currentLoadAbortController === controller &&
-        loadId === currentLoadId &&
-        sessionStore.isConversationCurrent(key)
-      ) {
-        currentLoadAbortController = null;
-        loading.value = false;
-        isLoadingHistory.value = false;
-      }
-    }
-  };
-
-  const resetHistoryForConversation = () => {
-    currentLoadId += 1;
-    currentLoadAbortController?.abort();
-    currentLoadAbortController = null;
-    currentChatHistory.value = [];
-    loadedConversationKey.value = null;
-    hasMoreHistory.value = true;
-    hasEvictedNewer.value = false;
-    loading.value = false;
-    isLoadingHistory.value = false;
-    editingMessage.value = null;
-  };
-
-  const loadHistoryPaginated = async (
-    ownerId: string,
-    ownerType: ConversationOwnerType,
-    topicId: string,
-  ) => {
-    resetHistoryForConversation();
-    return loadHistory(ownerId, ownerType, topicId, 5);
-  };
-
-  const loadMoreHistory = async (): Promise<HistoryPageResult> => {
-    const key = sessionStore.currentConversationKey;
-    if (
-      !key ||
-      !sameConversation(loadedConversationKey.value, key) ||
-      !hasMoreHistory.value ||
-      isLoadingHistory.value
-    ) {
-      return { addedCount: 0, aborted: true };
-    }
-    return loadHistory(
-      key.ownerId,
-      key.ownerType,
-      key.topicId,
-      10,
-      true,
-    );
-  };
-
-  const returnToLatest = async (): Promise<HistoryPageResult> => {
-    if (!hasEvictedNewer.value) return { addedCount: 0 };
-    const key = sessionStore.currentConversationKey;
-    if (!key || !sameConversation(loadedConversationKey.value, key)) {
-      return { addedCount: 0, aborted: true };
-    }
-    return loadHistory(key.ownerId, key.ownerType, key.topicId, 15);
-  };
-
-  /**
-   * 锚点窗口加载（全局搜索跳转定位）：以 anchorMessageId 为中心，
-   * 用"前 beforeN + 锚点 + 后 afterN"的消息窗口整体替换当前历史。
-   * 读取成功前不切换会话；独立序号保证连续点击时只有最后一次可以提交。
-   */
-  const loadHistoryAround = async (
-    ownerId: string,
-    ownerType: ConversationOwnerType,
-    topicId: string,
-    anchorMessageId: string,
-    { beforeN = 12, afterN = 8, beforeNavigate }: {
-      beforeN?: number; afterN?: number; beforeNavigate?: () => boolean;
-    } = {},
-  ): Promise<AnchorLoadResult> => {
-    const sourceEpoch = sessionStore.sessionEpoch;
-    const anchorLoadId = ++currentAnchorLoadId;
-    let messages: ChatMessage[];
-    try {
-      messages = await invoke<ChatMessage[]>('load_chat_history_around', {
-        ownerId,
-        ownerType,
-        topicId,
-        anchorMsgId: anchorMessageId,
-        beforeN,
-        afterN,
-      });
-    } catch (e) {
-      console.error("[ChatHistoryStore] Failed to load history around anchor:", e);
-      if (
-        anchorLoadId !== currentAnchorLoadId ||
-        sessionStore.sessionEpoch !== sourceEpoch
-      ) {
-        return "aborted";
-      }
-      if (isMissingTopicError(e)) {
-        return "missing";
-      }
-      throw e;
-    }
-
-    if (
-      anchorLoadId !== currentAnchorLoadId ||
-      sessionStore.sessionEpoch !== sourceEpoch
-    ) {
-      return "aborted";
-    }
-
-    const anchorIndex = messages.findIndex((message) => message.id === anchorMessageId);
-    if (anchorIndex === -1) return "missing";
-    if (beforeNavigate && !beforeNavigate()) return "aborted";
-
-    const hydrated = messages.map(
-      message => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, message.id) || message,
-    );
-    const current = sessionStore.currentConversationKey;
-    if (
-      !current ||
-      current.ownerId !== ownerId ||
-      current.ownerType !== ownerType ||
-      current.topicId !== topicId
-    ) {
-      await sessionStore.selectTopicById(ownerId, ownerType, topicId);
-      await nextTick();
-    }
-    if (anchorLoadId !== currentAnchorLoadId) return "aborted";
-
-    const targetKey = sessionStore.currentConversationKey;
-    if (
-      !targetKey ||
-      targetKey.ownerId !== ownerId ||
-      targetKey.ownerType !== ownerType ||
-      targetKey.topicId !== topicId
-    ) {
-      return "aborted";
-    }
-
-    resetHistoryForConversation();
-    currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
-    loadedConversationKey.value = targetKey;
-    // 锚点上方未取满 beforeN 说明已触顶；下方未取满 afterN 说明已在最新端
-    hasMoreHistory.value = anchorIndex >= beforeN;
-    hasEvictedNewer.value = messages.length - anchorIndex - 1 >= afterN;
-    hydrated.forEach(message => attachmentStore.resolveMessageAssets(message));
-    return "loaded";
-  };
 
   /**
    * 构造群聊/单聊共用的流式事件 Channel 接线
@@ -494,20 +178,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         && canCommitConversation(target);
       return streamStore.processStreamEvent(event, {
         onMessageCreated: (msg) => {
-          if (canCommitEvent() && !currentChatHistory.value.some(m => m.id === msg.id)) {
-            if (hasEvictedNewer.value) return;
-            if (event.context?.originUserMessageId?.startsWith('msg_voice_')
-              && currentChatHistory.value.length >= MAX_HISTORY_MESSAGES) {
-              hasEvictedNewer.value = true;
-              return;
-            }
-            currentChatHistory.value.push(msg);
-            currentChatHistory.value = mergeHistoryWindow(
-              currentChatHistory.value,
-              [],
-              false,
-            );
-          }
+          if (target && canCommitEvent()) projectLiveMessage(target, msg);
         },
         onStreamFinished: () => {
           if (canCommitEvent()) {
@@ -609,13 +280,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         },
       });
 
-      const targetIndex = currentChatHistory.value.findIndex(m => m.id === userMsg.id);
-      if (canCommitConversation(key) && targetIndex !== -1) {
-        currentChatHistory.value[targetIndex] = {
-          ...currentChatHistory.value[targetIndex],
-          blocks: persisted.blocks,
-        };
-      }
+      projectLiveMessage(key, { ...userMsg, blocks: persisted.blocks });
       topicUpdatedAt = persisted.topicUpdatedAt;
       topicStore.setTopicUpdatedAt(
         key.ownerId,
@@ -742,9 +407,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         generation: shareStore.activeDraft.generation,
         deliveryId: shareStore.activeDraft.deliveryId,
       } : undefined;
-      if (hasEvictedNewer.value && !editingMessage.value) {
+      if ((window.anchored.value || window.pinned.value || hasEvictedNewer.value) && !editingMessage.value) {
         const latest = await returnToLatest();
-        if (latest.error || latest.aborted || hasEvictedNewer.value) return;
+        if (latest.error || latest.aborted || window.anchored.value || window.pinned.value || hasEvictedNewer.value) return;
       }
       if (!canCommitConversation(key) || editingMessage.value !== intentAtSend
         || shareStore.activeDraft?.deliveryId !== shareAtSend?.deliveryId) return;
@@ -837,11 +502,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       };
 
       if (canCommitConversation(key)) {
-        currentChatHistory.value = mergeHistoryWindow(
-          currentChatHistory.value,
-          [userMsg],
-          false,
-        );
+        projectLiveMessage(key, userMsg);
       }
       topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
       const topicUpdatedAt = await triggerGeneration(userMsg, key, shareIdentity, {
@@ -871,50 +532,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /** Project an already committed Rust message without touching the composer. */
   const mergePersistedVoiceMessage = (key: ConversationKey, message: ChatMessage, topicUpdatedAt: number) => {
     topicStore.setTopicUpdatedAt(key.ownerId, key.ownerType, key.topicId, topicUpdatedAt);
-    if (!canCommitConversation(key)) return;
-    const index = currentChatHistory.value.findIndex(item => item.id === message.id);
     const hydrated = { ...message, shell: streamStore.computeShell({
       role: message.role, agentId: message.agentId, name: message.name ?? undefined,
     }) };
-    if (index !== -1) {
-      currentChatHistory.value[index] = hydrated;
-    } else if (!hasEvictedNewer.value) {
-      // Keep existing rows and the scroll anchor. Once the bounded window is
-      // full, the existing latest-message control becomes the explicit reload.
-      if (currentChatHistory.value.length >= MAX_HISTORY_MESSAGES) {
-        hasEvictedNewer.value = true;
-        return;
-      }
-      currentChatHistory.value = mergeHistoryWindow(currentChatHistory.value, [hydrated], false);
-    }
-  };
-
-  /** Reconcile Rust-owned voice work while preserving the visible history anchor. */
-  const reconcileVoiceHistory = async (key: ConversationKey): Promise<void> => {
-    if (!canCommitConversation(key)) return;
-    const loadId = currentLoadId;
-    const messages = await invoke<ChatMessage[]>('load_chat_history', {
-      ownerId: key.ownerId, ownerType: key.ownerType, topicId: key.topicId,
-      limit: MAX_HISTORY_MESSAGES, offset: 0, beforeTimestamp: null, beforeMessageId: null,
-    });
-    if (loadId !== currentLoadId || !canCommitConversation(key)) return;
-    const incoming = new Map(messages.map(message => [message.id,
-      streamStore.getActiveStreamMessage(key.ownerId, key.ownerType, key.topicId, message.id) || message]));
-    const existing = currentChatHistory.value;
-    const existingIds = new Set(existing.map(message => message.id));
-    const overlap = existing.some(message => incoming.has(message.id));
-    const oldest = existing[0];
-    const additions = Array.from(incoming.values()).filter(message => !existingIds.has(message.id)
-      && (!oldest || compareMessages(message, oldest) >= 0));
-    const gap = existing.length > 0 && messages.length >= MAX_HISTORY_MESSAGES && !overlap;
-    const overflow = existing.length + additions.length > MAX_HISTORY_MESSAGES;
-    // Deep-history windows receive corrections to present IDs only. New rows
-    // remain available through the existing latest-message affordance.
-    if (gap || overflow) hasEvictedNewer.value = true;
-    const updated = existing.map(message => incoming.get(message.id) || message);
-    currentChatHistory.value = hasEvictedNewer.value
-      ? updated : mergeHistoryWindow(updated, additions, false);
-    currentChatHistory.value.forEach(message => attachmentStore.resolveMessageAssets(message));
+    projectLiveMessage(key, hydrated);
   };
 
   /**
@@ -938,7 +559,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         topicId: key.topicId,
         msgIds: [messageId],
       });
-      streamStore.forgetDeletedMessage(key.ownerId, key.ownerType, key.topicId, messageId);
+      noteMessageChange(key, messageId);
+      streamStore.retireStreamProjection(key.ownerId, key.ownerType, key.topicId, messageId);
       if (canCommitConversation(key)) {
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
         if (currentIndex !== -1) currentChatHistory.value.splice(currentIndex, 1);
@@ -955,6 +577,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         key.topicId,
         activity.updatedAt,
       );
+      if (canCommitConversation(key) && !window.isLoadingHistory.value && sessionStore.acceptedWindow?.anchorId === messageId) {
+        await refreshAfterMutation();
+      }
     } catch (e) {
       notificationStore.addNotification({
         type: "error",
@@ -983,6 +608,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       attachmentOrder,
       hash,
     });
+    noteMessageChange(key, messageId);
     topicStore.setTopicUpdatedAt(
       key.ownerId,
       key.ownerType,
@@ -1025,6 +651,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           blocks: undefined,
         },
       });
+      noteMessageChange(key, messageId);
       topicStore.setTopicUpdatedAt(
         key.ownerId,
         key.ownerType,
@@ -1099,9 +726,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         targetResponseMsgId: targetMessageId,
         streamChannel
       });
-      if (!didOptimisticTruncate && canCommitConversation(key)) {
-        await loadHistory(key.ownerId, key.ownerType, key.topicId, 15);
-      }
       topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, result.msgCount);
     } catch (e) {
       console.error("[ChatHistoryStore] Regeneration failed:", e);
@@ -1112,16 +736,17 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         toastOnly: true,
         duration: 6000,
       });
-      if (canCommitConversation(key)) {
-        await loadHistory(key.ownerId, key.ownerType, key.topicId, 15);
-        if (canCommitConversation(key)) {
-          await topicStore.loadTopicList(key.ownerId, key.ownerType).catch((reloadError) => {
-            console.error("[ChatHistoryStore] Failed to reconcile topic count:", reloadError);
-          });
-        }
-      }
     } finally {
       releaseOperation();
+      if (canCommitConversation(key)) await refreshAfterMutation();
+    }
+  };
+
+  // A failed refresh is separate from the result of the SQLite mutation.
+  const refreshAfterMutation = async () => {
+    try { await reconcileWindow(true); }
+    catch (error) {
+      notificationStore.addNotification({ type: 'error', title: '聊天记录核对失败', message: errorMessage(error), toastOnly: true });
     }
   };
 
@@ -1199,26 +824,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   return {
-    currentChatHistory,
-    loading,
-    hasMoreHistory,
-    isLoadingHistory,
-    hasEvictedNewer,
-    loadedConversationKey,
-    editingMessage,
-    preloadedHistory,
-    preloadHistory,
-    loadHistory,
-    loadHistoryPaginated,
-    loadMoreHistory,
-    loadHistoryAround,
-    returnToLatest,
+    ...window,
+    loading: window.isLoadingHistory,
     resetHistoryForConversation,
+    openLoadedReference,
+    editingMessage,
     sendMessage,
     isSubmitting,
     controlGroupSession,
     mergePersistedVoiceMessage,
-    reconcileVoiceHistory,
     deleteMessage,
     deleteAttachment,
     triggerGeneration,

@@ -19,8 +19,8 @@ import { ArrowDown, ListChecks, SlidersHorizontal } from "@lucide/vue";
 import VoiceCallControls from "./voice/VoiceCallControls.vue";
 import { useVoiceCallStore } from "./voice/voiceCallStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
-import { scrollToMessageById } from "../../core/utils/scrollToMessage";
 import { useChatScroll } from "../../core/composables/useChatScroll";
+import { scrollToMessageById } from "../../core/utils/scrollToMessage";
 import { openPresentationMenu } from "./presentationMenu";
 
 const emit = defineEmits<{
@@ -57,22 +57,12 @@ let footerObserver: ResizeObserver | null = null;
 
 // 流式状态
 const isStreamingActive = computed(() => streamStore.activeStreamingIds.size > 0);
-const isConversationReady = computed(() => {
-  const current = sessionStore.currentConversationKey;
-  const loaded = historyStore.loadedConversationKey;
-  return Boolean(
-    current &&
-      loaded &&
-      current.ownerId === loaded.ownerId &&
-      current.ownerType === loaded.ownerType &&
-      current.topicId === loaded.topicId &&
-      current.epoch === loaded.epoch,
-  );
-});
+const isConversationReady = computed(() => historyStore.ready);
 
 // 滚动管理 composable（封装 IO 双哨兵 + RAF 轮询 + 消息新增自动滚动）
 const {
   showScrollToBottom,
+  followingLatest,
   scrollToBottom,
   startAutoScroll,
   stopAutoScroll,
@@ -85,8 +75,10 @@ const {
   messageCount: computed(() => historyStore.currentChatHistory.length),
   hasMoreHistory: computed(() => historyStore.hasMoreHistory),
   isLoadingHistory: computed(() => historyStore.isLoadingHistory),
-  onLoadMore: () => historyStore.loadMoreHistory(),
+  anchored: computed(() => historyStore.anchored || historyStore.pinned),
+  onLoadMore: pin => historyStore.loadMoreHistory(pin),
 });
+watch(followingLatest, following => { historyStore.followingLatest = following; }, { immediate: true });
 
 const isPresentationMenuOpen = computed(
   () => overlayStore.contextMenuConfig?.title === "消息呈现",
@@ -115,7 +107,7 @@ const startVoiceCall = () => {
 };
 
 const scrollToLatest = async (smooth = true) => {
-  if (historyStore.hasEvictedNewer && !historyStore.editingMessage) {
+  if ((historyStore.anchored || historyStore.pinned || historyStore.hasEvictedNewer) && !historyStore.editingMessage) {
     const result = await historyStore.returnToLatest();
     if (result.error || result.aborted || historyStore.hasEvictedNewer) return;
     await nextTick();
@@ -123,36 +115,35 @@ const scrollToLatest = async (smooth = true) => {
   scrollToBottom(smooth);
 };
 
-// 监听话题切换与智能体变更，触发历史加载与防御性状态清空
+// The same accepted window drives mount, navigation and WebView recovery.
 watch(
   [() => sessionStore.currentConversationKey, () => sessionStore.acceptedWindow?.windowRevision],
-  async ([key, revision]) => {
+  async ([key, revision], previous, onCleanup) => {
+    let current = true;
+    onCleanup(() => { current = false; });
     showScrollToBottom.value = false;
     resetChatScroll();
-    if (key) {
-      console.log(`[ChatView] Topic changed to ${key.topicId}, loading history...`);
-      topicStore.markTopicAsRead(key.ownerId, key.ownerType, key.topicId);
-      const anchor = sessionStore.acceptedWindow?.anchorId;
-      if (anchor) {
-        const result = await historyStore.loadHistoryAround(key.ownerId, key.ownerType, key.topicId, anchor);
-        await nextTick();
-        if (result === "loaded" && sessionStore.acceptedWindow?.windowRevision === revision) {
-          scrollToMessageById(anchor, { behavior: "instant" });
-        }
-        return;
-      }
-      await historyStore.loadHistoryPaginated(
-        key.ownerId,
-        key.ownerType,
-        key.topicId,
-      );
-    } else {
-      console.log('[ChatView] Clearing chat history (Selected item or Topic became null).');
+    if (!key) {
       historyStore.resetHistoryForConversation();
     }
+    if (!key || revision === undefined) return;
+    const result = await historyStore.ensureWindow();
+    await nextTick();
+    if (!current || result.aborted || result.error || !sessionStore.isConversationCurrent(key)) return;
+    const anchor = sessionStore.acceptedWindow?.anchorId;
+    const target = historyStore.anchorRemoved ? historyStore.replacementAnchorId : anchor;
+    if (target) scrollToMessageById(target, { behavior: 'instant' });
+    if (previous?.[0]?.epoch !== key.epoch) topicStore.markTopicAsRead(key.ownerId, key.ownerType, key.topicId);
   },
   { immediate: true }
 );
+
+watch(() => historyStore.replacementAnchorId, (replacement, previous) => {
+  // A live deletion can remove the original anchor after the initial positioning.
+  if (replacement && previous !== undefined && historyStore.ready) {
+    scrollToMessageById(replacement, { behavior: 'instant', flash: false });
+  }
+}, { flush: 'post' });
 
 // Follow the actual history owner, including a replacement load in the same
 // conversation. An old aborted Promise cannot declare the new page ready.
@@ -209,15 +200,6 @@ watch(keyboardHeight, (height) => {
     `${height}px`,
   );
 
-  // 只有当焦点确实处于主界面的输入框中时，键盘高度变化才执行置底
-  const isMainInputFocused = document.activeElement?.classList.contains("vcp-textarea");
-  if (!isMainInputFocused) {
-    return;
-  }
-
-  if (height > 0 && historyStore.currentChatHistory.length > 0) {
-    void scrollToLatest(true);
-  }
 });
 
 onMounted(async () => {
@@ -391,7 +373,7 @@ onUnmounted(() => {
 
     <!-- 一键置底按钮 -->
     <Transition name="fade-slide-up">
-      <button v-if="showScrollToBottom || historyStore.hasEvictedNewer" @click="scrollToLatest(true)"
+      <button v-if="showScrollToBottom || historyStore.pinned || historyStore.anchored || historyStore.hasEvictedNewer" @click="scrollToLatest(true)"
         class="absolute right-4 w-10 h-10 bg-white/80 dark:bg-gray-800/80 rounded-full shadow-lg border border-black/10 dark:border-white/10 flex items-center justify-center text-primary-text z-local active:scale-90 transition-[bottom,transform,opacity] duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
         :style="{ bottom: `${footerHeight + 12}px` }"
       >
@@ -409,7 +391,6 @@ onUnmounted(() => {
         :suspended="voiceCall.active"
         @send="historyStore.sendMessage" 
         @start-call="startVoiceCall"
-        @focus-input="scrollToLatest(true)"
       />
       </div>
       </Transition>

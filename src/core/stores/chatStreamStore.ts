@@ -2,7 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed, reactive, onScopeDispose } from "vue";
 import { invoke, type Channel } from "@tauri-apps/api/core";
 
-import { useChatSessionStore } from "./chatSessionStore";
+import { useChatSessionStore, type ConversationKey, type ConversationOwnerType } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
@@ -10,7 +10,6 @@ import { useChatHistoryStore } from "./chatHistoryStore";
 import { useNotificationStore } from "./notification";
 import { useChatPreferencesStore } from "../../features/chat/preferences/store";
 import { triggerMessageHaptic } from "../utils/nativeHaptics";
-import { useVoiceCallStore } from "../../features/chat/voice/voiceCallStore";
 import type {
   ActiveGenerationDto,
   AuroraUpdate,
@@ -29,12 +28,12 @@ import type {
   TailRenderMode,
   TailTextOp,
 } from "../types/chat";
-import type { ConversationOwnerType } from "./chatSessionStore";
 
 interface StreamTerminalTombstone {
   terminalAt: number;
 }
 
+type TopicIdentity = Pick<ConversationKey, "ownerType" | "ownerId" | "topicId">;
 type TailContentOp = Extract<TailTextOp, { op: "append" | "replace" }>;
 
 function buildTailBlockFromOp(
@@ -1076,8 +1075,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     cleanupTimers.add(cleanupTimer);
   };
 
-  // 只在后端删除已提交后调用；同一消息的迟到事件、快照和恢复回调全部失效。
-  const forgetDeletedMessage = (
+  // SQLite 已证实消息结算或删除；同一交付者的迟到帧不能复活这个占位。
+  const retireStreamProjection = (
     ownerId: string,
     ownerType: ConversationOwnerType,
     topicId: string,
@@ -1087,6 +1086,18 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     recordStreamTerminalTombstone(messageKey);
     if (streamingMessageKey.value === messageKey) streamingMessageKey.value = null;
     removeSessionStream(ownerId, ownerType, topicId, messageId, true);
+  };
+
+  const acceptPersistedMessage = (key: TopicIdentity, message: ChatMessage): ChatMessage => {
+    if (message.role !== "assistant") return message;
+    const { ownerId, ownerType, topicId } = key;
+    if (message.finishReason) {
+      if (!hasStreamTerminalTombstone(streamMessageMapKey(ownerId, ownerType, topicId, message.id))) {
+        retireStreamProjection(ownerId, ownerType, topicId, message.id);
+      }
+      return message;
+    }
+    return getActiveStreamMessage(ownerId, ownerType, topicId, message.id) ?? message;
   };
 
   /**
@@ -1189,8 +1200,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       clearRAFUpdate(messageKey, false);
     }
     streamConsumerRevisions.set(messageKey, event.consumerRevision);
-    if (type === "end") {
-      recordStreamTerminalTombstone(messageKey);
+    if (type === "end") recordStreamTerminalTombstone(messageKey);
+    if (type === "end" || type === "thinking") {
+      useChatHistoryStore().noteMessageChange({ ownerId, ownerType, topicId }, actualMessageId);
     }
 
     let msg = activeStreamMessages.get(messageKey);
@@ -1229,23 +1241,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
 
     if (isNewStream) {
-      const isRecoveryStatus = type === "reconnecting" || type === "connected" || type === "stopping";
-      if (!isRecoveryStatus) topicStore.incrementTopicMsgCount(ownerId, ownerType, topicId);
-      const currentKey = sessionStore.currentConversationKey;
-      if (!isRecoveryStatus && (
-        !currentKey ||
-        currentKey.ownerId !== ownerId ||
-        currentKey.ownerType !== ownerType ||
-        currentKey.topicId !== topicId
-      )) {
-        void topicStore
-          .incrementTopicUnreadCount(ownerId, ownerType, topicId)
-          .catch(() => {});
-      }
-      if (isRecoveryStatus && ownerType === "agent" && (
-        currentKey?.ownerId !== ownerId || currentKey.ownerType !== ownerType || currentKey.topicId !== topicId
-      )) {
-        void topicStore.setTopicUnread(ownerId, ownerType, topicId, true).catch(() => {});
+      // thinking follows admission of a new reply. A snapshot, terminal replay
+      // or reattached request may be new to this WebView only.
+      if (type === "thinking" && !ctx.replayed) {
+        topicStore.incrementTopicMsgCount(ownerId, ownerType, topicId);
+        const currentKey = sessionStore.currentConversationKey;
+        if (currentKey?.ownerId !== ownerId || currentKey.ownerType !== ownerType || currentKey.topicId !== topicId) {
+          void topicStore.incrementTopicUnreadCount(ownerId, ownerType, topicId).catch(() => {});
+        }
       }
 
       // 回调：通知 UI 列表插入新消息
@@ -1448,9 +1451,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           // 解析失败时保留已有展示；只有完整结果到达才释放旧尾部。
           if (blocks) replaceRenderProjection(msg!, blocks);
           removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
-          if (callbacks?.onStreamFinished) {
-            callbacks.onStreamFinished(actualMessageId, topicId);
-          }
+          if (!ctx.replayed) callbacks?.onStreamFinished?.(actualMessageId, topicId);
           if (playCompletionFeedback && chatPreferences.messageHapticsEnabled) triggerMessageHaptic('complete');
         };
 
@@ -1634,12 +1635,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }
         activityInventoryKnown.value = true;
         connectionError.value = null;
-        const pendingKeys = new Set<string>();
         for (const generation of receipt.generations) {
           if (generation.ownerType !== "agent" && generation.ownerType !== "group") continue;
           const { ownerId, ownerType, topicId, msgId } = generation;
           const messageKey = streamMessageMapKey(ownerId, ownerType, topicId, msgId);
-          pendingKeys.add(messageKey);
+          previousActiveKeys.delete(messageKey);
           // 事件可先于收据抵达；收据从不覆盖新快照、待重试状态或持久终态。
           if (hasStreamTerminalTombstone(messageKey)) continue;
           hydratePendingReceipt(generation, ownerType, eventMessages.has(messageKey));
@@ -1673,34 +1673,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (requests.size === 0) activeRequests.delete(key);
         }
 
-        // end 可能在 WebView 离线期间已经提交。只清理本次连接前已有且不在收据中的状态，
-        // 不把收据缺席解释为业务失败；当前界面的权威正文由历史重新取得。
-        let reloadCurrentHistory = false;
-        for (const messageKey of previousActiveKeys) {
-          if (pendingKeys.has(messageKey) || eventMessages.has(messageKey)
-            || hasStreamTerminalTombstone(messageKey)) continue;
-          const [conversationKey, messageId] = JSON.parse(messageKey) as [string, string];
-          const [ownerType, ownerId, topicId] = JSON.parse(conversationKey) as [ConversationOwnerType, string, string];
-          const message = activeStreamMessages.get(messageKey);
-          if (message) {
-            clearRAFUpdate(messageKey, true);
-            message.isThinking = false;
-            message.isReconnecting = false;
-            message.streamRecoveryState = undefined;
-            message.isStopping = false;
-          }
-          // 清退旧交付身份，避免迟到帧重新插入已不 pending 的气泡；不推断业务 finishReason。
-          recordStreamTerminalTombstone(messageKey);
-          removeSessionStream(ownerId, ownerType, topicId, messageId, true);
-          const current = sessionStore.currentConversationKey;
-          if (current?.ownerId === ownerId && current.ownerType === ownerType
-            && current.topicId === topicId) reloadCurrentHistory = true;
-        }
-        const current = sessionStore.currentConversationKey;
-        if (reloadCurrentHistory && current) {
-          const history = useChatHistoryStore();
-          if (useVoiceCallStore().active) await history.reconcileVoiceHistory(current);
-          else await history.loadHistory(current.ownerId, current.ownerType, current.topicId);
+        try {
+          if (previousActiveKeys.size) await useChatHistoryStore().reconcileWindow();
+        } catch (error) {
+          if (!disposed) useNotificationStore().addNotification({
+            id: "chat-window-recovery", type: "error", title: "聊天记录核对失败",
+            message: error instanceof Error ? error.message : String(error), toastOnly: true,
+          });
         }
       } catch (error) {
         if (disposed || epoch !== connectionEpoch) return;
@@ -1753,11 +1732,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     if (generation.createdAt > 0) message.timestamp = generation.createdAt;
     message.shell = computeShell({ role: message.role, agentId: message.agentId, name: message.name ?? undefined });
     activeStreamMessages.set(messageKey, message);
-    if (isLoaded && !history.hasEvictedNewer && !history.currentChatHistory.some(item => item.id === msgId)) {
-      history.currentChatHistory.push(message);
-      history.currentChatHistory.sort((left, right) =>
-        left.timestamp - right.timestamp || left.id.localeCompare(right.id));
-    }
+    if (isLoaded) history.projectLiveMessage(loaded, message);
     // 只有没有事件状态的冷占位才表示等待接管；已有消息状态由生产者继续控制。
     if (!preserveEventState && !streamConsumerRevisions.has(messageKey)) {
       message.isReconnecting = !generation.stopRequested;
@@ -1789,7 +1764,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     computeShell,
     addSessionStream,
     removeSessionStream,
-    forgetDeletedMessage,
+    retireStreamProjection,
+    acceptPersistedMessage,
     requestAuroraSnapshot,
     processStreamEvent,
     stopMessage,

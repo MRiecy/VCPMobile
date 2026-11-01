@@ -13,7 +13,7 @@ const { send, findImage, openExternal, scrollToMessage } = vi.hoisted(() => ({
   openExternal: vi.fn(async () => {}),
   scrollToMessage: vi.fn(),
 }));
-vi.mock('@/core/stores/chatHistoryStore', () => ({ useChatHistoryStore: () => ({ sendMessage: send }) }));
+vi.mock('@/core/stores/chatHistoryStore', () => ({ useChatHistoryStore: () => ({ sendMessage: send, openLoadedReference: scrollToMessage }) }));
 vi.mock('@/core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: vi.fn() }) }));
 vi.mock('@/core/utils/renderedImage', () => ({ findRenderedImagePayload: findImage }));
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: openExternal }));

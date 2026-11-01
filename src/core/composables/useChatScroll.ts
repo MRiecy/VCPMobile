@@ -1,4 +1,4 @@
-import { ref, watch, nextTick, type Ref, type ComputedRef } from "vue";
+import { computed, ref, watch, nextTick, type Ref, type ComputedRef } from "vue";
 import { MESSAGE_ANCHOR_EVENT } from "../utils/scrollToMessage";
 
 interface UseChatScrollOptions {
@@ -10,8 +10,9 @@ interface UseChatScrollOptions {
   hasMoreHistory: Ref<boolean>;
   /** 是否正在加载历史 */
   isLoadingHistory: Ref<boolean>;
+  anchored?: Readonly<Ref<boolean>>;
   /** 加载更多历史的回调 */
-  onLoadMore: () => Promise<{
+  onLoadMore: (pinOlder?: boolean) => Promise<{
     addedCount: number;
     error?: unknown;
     aborted?: boolean;
@@ -50,6 +51,9 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   const showScrollToBottom = ref(false);
   const scrollScene = ref<ScrollScene>("initial");
+  const followingLatest = computed(() => !options.anchored?.value
+    && (scrollScene.value === 'following' || scrollScene.value === 'initial'));
+  let readingAnchor: ViewportAnchor | null = null;
 
   // 高性能测量与安全保护罩状态
   let lastScrollHeight = 0;
@@ -103,15 +107,20 @@ export function useChatScroll(options: UseChatScrollOptions) {
     if (!list) return null;
 
     const fallbackScrollTop = list.scrollTop;
-    const stickToBottom = isNearBottom(list);
+    const stickToBottom = !options.anchored?.value && isNearBottom(list);
     if (stickToBottom) return { stickToBottom: true, fallbackScrollTop };
 
     const listRect = list.getBoundingClientRect();
-    const messages = Array.from(list.querySelectorAll<HTMLElement>("[data-message-id]"));
-    const visible = messages.find((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.bottom > listRect.top && rect.top < listRect.bottom;
-    });
+    const messages = list.querySelectorAll<HTMLElement>("[data-message-id]");
+    let first = 0;
+    let last = messages.length;
+    while (first < last) {
+      const middle = Math.floor((first + last) / 2);
+      if (messages[middle].getBoundingClientRect().bottom <= listRect.top) first = middle + 1;
+      else last = middle;
+    }
+    const candidate = messages[first];
+    const visible = candidate && candidate.getBoundingClientRect().top < listRect.bottom ? candidate : null;
 
     const messageId = visible?.getAttribute("data-message-id");
     if (!visible || !messageId) {
@@ -138,9 +147,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     }
 
     const target = anchor.messageId
-      ? Array.from(list.querySelectorAll<HTMLElement>("[data-message-id]")).find(
-          (element) => element.getAttribute("data-message-id") === anchor.messageId,
-        )
+      ? list.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(anchor.messageId)}"]`)
       : undefined;
 
     if (target && anchor.viewportOffset !== undefined) {
@@ -154,7 +161,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     const nearBottom = isNearBottom(list);
     showScrollToBottom.value = !nearBottom;
     if (scrollScene.value !== "loading-top") {
-      scrollScene.value = nearBottom ? "following" : "free";
+      scrollScene.value = nearBottom && !options.anchored?.value ? "following" : "free";
     }
   };
 
@@ -214,7 +221,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     loadAnchor = null;
   };
 
-  const requestLoadMore = async () => {
+  const requestLoadMore = async (pinOlder = true) => {
     if (
       loadInFlight ||
       scrollScene.value === "loading-top" ||
@@ -231,7 +238,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     loadInFlight = true;
     scrollScene.value = "loading-top";
     try {
-      await onLoadMore();
+      await onLoadMore(pinOlder);
     } finally {
       await nextTick();
       if (generation === loadRequestGeneration) {
@@ -240,8 +247,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
           scrollScene.value = "free";
         } else {
           loadAnchor = null;
-          scrollToBottom(false);
-          scrollScene.value = "following";
+          if (!options.anchored?.value) scrollToBottom(false);
+          scrollScene.value = options.anchored?.value ? "free" : "following";
         }
         loadInFlight = false;
       }
@@ -265,7 +272,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
       console.log(
         `[useChatScroll] Auto loading more because height (${list.scrollHeight}) <= clientHeight (${list.clientHeight}) + 10`,
       );
-      void requestLoadMore();
+      void requestLoadMore(false);
     }
   };
 
@@ -298,13 +305,17 @@ export function useChatScroll(options: UseChatScrollOptions) {
     ) return;
     lastScrollHeight = currentScrollHeight;
     lastClientHeight = currentClientHeight;
+    if (scrollScene.value === 'free' && readingAnchor?.messageId) {
+      restoreViewportAnchor(readingAnchor);
+      readingAnchor = captureViewportAnchor();
+    }
 
     // 场景1：首屏加载完成（initial → following/free）
     if (scrollScene.value === "initial") {
       if (!isLoadingHistory.value) {
         if (messageCount.value > 0) {
-          scrollToBottom(false);
-          scrollScene.value = "following";
+          if (!options.anchored?.value) scrollToBottom(false);
+          scrollScene.value = options.anchored?.value ? "free" : "following";
           // 状态迁移后，触发防抖续载判定，防抖时间内的高频高度增长（如头像加载）会重定位滚动位置并推迟加载
           triggerAutoLoadMoreWithDebounce();
         } else {
@@ -389,9 +400,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
       scrollThrottleId = null;
       const list = messageListRef.value;
       if (!list) return;
+      if (scrollScene.value === 'free') readingAnchor = captureViewportAnchor();
 
       // 如果首屏渲染尚未彻底完成稳定（高度还在持续图片加载增长），屏蔽自由滚动，防止状态机提前叛逃
-      if (isInitialRendering.value) {
+      if (isInitialRendering.value && !options.anchored?.value) {
         showScrollToBottom.value = false;
         scrollScene.value = "following";
         return;
@@ -404,6 +416,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
       // 或下一批内容到达造成的几何偏离，都不得将它误判为 free。
       if (
         nearBottom
+        && !options.anchored?.value
         && scrollScene.value === "free"
         && !isUserDetaching
       ) {
@@ -440,6 +453,10 @@ export function useChatScroll(options: UseChatScrollOptions) {
     reset();
     isInitialRendering.value = false;
     scrollScene.value = "free";
+    const generation = layoutChangeGeneration;
+    void waitForLayoutFrame().then(() => {
+      if (generation === layoutChangeGeneration && scrollScene.value === 'free') readingAnchor = captureViewportAnchor();
+    });
   };
 
   const onTouchStart = (e: TouchEvent) => {
@@ -476,7 +493,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
     const list = messageListRef.value;
     if (!list) return;
-    if (scrollScene.value === "free" && isNearBottom(list)) {
+    if (scrollScene.value === "free" && isNearBottom(list) && !options.anchored?.value) {
       scrollScene.value = "following";
       showScrollToBottom.value = false;
     } else if (scrollScene.value === "free") {
@@ -533,8 +550,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
     await nextTick();
     if (scrollScene.value !== "initial") return;
     if (messageCount.value > 0) {
-      scrollToBottom(false);
-      scrollScene.value = "following";
+      if (!options.anchored?.value) scrollToBottom(false);
+      scrollScene.value = options.anchored?.value ? "free" : "following";
       triggerAutoLoadMoreWithDebounce();
     } else {
       scrollScene.value = "free";
@@ -557,6 +574,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   // --- 兼容旧 API（调用方 ChatView.vue 无需改动）---
   const reset = () => {
+    readingAnchor = null;
     loadRequestGeneration += 1;
     layoutChangeGeneration += 1;
     loadInFlight = false;
@@ -625,6 +643,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
   };
 
   return {
+    followingLatest,
     showScrollToBottom,
     scrollToBottom,
     startAutoScroll,

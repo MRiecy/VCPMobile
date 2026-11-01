@@ -76,12 +76,8 @@ export function createVoiceHistorySync() {
   const reconcile = async () => {
     await ready;
     if (disposed) return;
-    const snapshot = await voice.recover();
-    if (disposed || !snapshot) return;
-    const key = currentKey(snapshot.target);
-    if (!key || !snapshot.lastPersistedMessageId) return;
-    await history.reconcileVoiceHistory(key);
-    if (!disposed && session.isConversationCurrent(key)) await refreshActivity(snapshot.target);
+    // History recovery is shared with text and group messages, after output reconnects.
+    await voice.recover();
   };
 
   const dispose = () => {

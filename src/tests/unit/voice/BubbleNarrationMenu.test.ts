@@ -10,6 +10,7 @@ import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import type { ChatMessage } from '../../../core/types/chat';
 import { invokeMock, mockInvoke } from '../../mocks/tauri';
+import { installWindow, mockWindowRead, windowPage } from '../../helpers/chatWindow';
 
 const context = vi.hoisted(() => ({ voice: {} as { active: boolean } }));
 vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStore: () => context.voice }));
@@ -36,9 +37,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 async function render(messages: ChatMessage[], target = messages[0]) {
-  mockInvoke('load_chat_history', () => messages);
+  installWindow(useChatSessionStore(), { id: 'agent', type: 'agent' }, 'topic');
+  mockWindowRead(messages);
   const history = useChatHistoryStore();
-  await history.loadHistoryPaginated('agent', 'agent', 'topic');
+  await history.ensureWindow();
   const wrapper = mount(MessageRenderer, {
     props: { message: target },
     global: { plugins: [pinia],
@@ -122,6 +124,7 @@ describe('bubble narration message menu', () => {
     const owner = useBubbleNarration();
     await owner.startBubbleNarration(history.captureMessageActionKey('b')!, 'B');
     mockInvoke('regenerate_topic_response', () => ({ generation: {}, msgCount: 1 }));
+    mockInvoke('reconcile_chat_window', () => windowPage([messages[0]]));
     await history.regenerateResponse(history.captureMessageActionKey('a')!);
     expect(calls('stop_tts')).toHaveLength(1);
     expect(calls('regenerate_topic_response')).toHaveLength(1);

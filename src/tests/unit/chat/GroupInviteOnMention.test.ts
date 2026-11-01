@@ -9,6 +9,7 @@ import { clearInvokeMocks, invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
 import { flushPromises } from "@/tests/utils/flush";
 import { makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
+import { installWindow, mockWindowRead } from "@/tests/helpers/chatWindow";
 
 /**
  * invite_only 群组「提及即邀约」链路的 store 级回归测试：
@@ -36,10 +37,10 @@ const setupInviteOnlyGroup = async () => {
   }));
 
   const session = useChatSessionStore();
-  session.setConversation({ id: "g1", type: "group" }, "t1");
+  installWindow(session, { id: "g1", type: "group" }, "t1");
 
   const history = useChatHistoryStore();
-  await history.loadHistoryPaginated("g1", "group", "t1");
+  await history.ensureWindow();
   return history;
 };
 
@@ -52,7 +53,7 @@ describe("invite_only 提及即邀约", () => {
     invitedAgentIds.length = 0;
 
     mockInvoke("reconnect_chat_streams", () => ({ generations: [], groupTurns: [], activeRequests: [] }));
-    mockInvoke("load_chat_history", () => []);
+    mockWindowRead([]);
     mockInvoke("append_single_message", () => ({ blocks: [], topicUpdatedAt: 1 }));
     mockInvoke("handle_group_chat_message", () => ({
       status: "no_ai_response",

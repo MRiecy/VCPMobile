@@ -178,6 +178,44 @@ function createLayoutScroll(list: HTMLElement) {
 }
 
 describe("useChatScroll streaming follow intent", () => {
+  it("keeps an anchored message at the same offset when media above it grows near the tail", async () => {
+    const resize = installControllableResizeObserver();
+    const list = document.createElement("div");
+    const row = document.createElement("article");
+    row.dataset.messageId = "last";
+    list.append(row);
+    let height = 1000;
+    let rowOffset = 640;
+    Object.defineProperties(list, {
+      scrollTop: { writable: true, value: 650 },
+      scrollHeight: { get: () => height },
+      clientHeight: { value: 300 },
+    });
+    list.scrollTo = vi.fn();
+    list.getBoundingClientRect = () => new DOMRect(0, 0, 300, 300);
+    row.getBoundingClientRect = () => new DOMRect(0, rowOffset - list.scrollTop, 300, 200);
+    const element = ref<HTMLElement | null>(null);
+    const scroll = useChatScroll({ messageListRef: element, messageCount: computed(() => 1),
+      hasMoreHistory: ref(false), isLoadingHistory: ref(false), anchored: ref(true),
+      onLoadMore: vi.fn(async () => ({ addedCount: 0 })) });
+    try {
+      element.value = list;
+      await nextTick();
+      row.dispatchEvent(new Event("vcp-message-anchor", { bubbles: true }));
+      list.dispatchEvent(new Event("scroll"));
+      await flushFrames();
+      rowOffset += 80;
+      height += 80;
+      resize.trigger();
+      await flushFrames();
+      expect(list.scrollTop).toBe(730);
+      expect(scroll.followingLatest.value).toBe(false);
+      expect(list.scrollTo).not.toHaveBeenCalled();
+    } finally {
+      scroll.dispose();
+      resize.restore();
+    }
+  });
   it("keeps an explicitly opened reply in view as the first history layout settles", async () => {
     const resizeObserver = installControllableResizeObserver();
     const list = document.createElement("div");

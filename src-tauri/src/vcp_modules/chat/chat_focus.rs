@@ -87,6 +87,7 @@ impl DeleteScope {
 
 #[derive(Default)]
 pub(crate) struct Navigation {
+    pub(super) window_reads: super::chat_window::WindowReads,
     snapshot: FocusSnapshot,
     issued: u64,
     document: u64,

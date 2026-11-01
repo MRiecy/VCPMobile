@@ -14,6 +14,14 @@ use sqlx::Row;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 
+pub(super) const ROW_SELECT: &str =
+    "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.updated_at, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
+     FROM messages m
+     LEFT JOIN render_cache r
+       ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
+      AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+     LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id";
+
 // =================================================================
 // vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
 // =================================================================
@@ -141,39 +149,17 @@ pub async fn load_chat_history_internal(
         );
     }
 
-    let query_str = if limit.is_some() && before_timestamp.is_some() {
-        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
-         FROM messages m
-         LEFT JOIN render_cache r
-           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
-          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
-         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
-           AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))
-         ORDER BY m.timestamp DESC, m.msg_id DESC
-         LIMIT ?"
-    } else if limit.is_some() {
-        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
-         FROM messages m
-         LEFT JOIN render_cache r
-           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
-          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
-         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
-         ORDER BY m.timestamp DESC, m.msg_id DESC
-         LIMIT ?"
-    } else {
-        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
-         FROM messages m
-         LEFT JOIN render_cache r
-           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
-          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
-         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
-         ORDER BY m.timestamp DESC, m.msg_id DESC"
-    };
-
-    let mut q = sqlx::query(query_str)
+    let mut query = format!(
+        "{ROW_SELECT} WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL"
+    );
+    if limit.is_some() && before_timestamp.is_some() {
+        query.push_str(" AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))");
+    }
+    query.push_str(" ORDER BY m.timestamp DESC, m.msg_id DESC");
+    if limit.is_some() {
+        query.push_str(" LIMIT ?");
+    }
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -214,26 +200,36 @@ async fn convert_history_rows(
     include_content: bool,
     include_extracted_text: bool,
 ) -> Result<Vec<ChatMessage>, String> {
-    let db_state = app_handle.state::<DbState>();
-    // 收集所有 msg_id，用于批量查询附件
-    let mut msg_ids = Vec::new();
-    for row in &rows {
-        use sqlx::Row;
-        let msg_id: String = row.get("msg_id");
-        msg_ids.push(msg_id);
-    }
+    let ids: Vec<&str> = rows.iter().map(|row| row.get("msg_id")).collect();
+    let attachments = history_attachment_rows(pool, key, &ids, include_extracted_text).await?;
+    project_history_rows(
+        app_handle,
+        pool,
+        key,
+        rows,
+        attachments,
+        include_content,
+        include_extracted_text,
+    )
+    .await
+}
 
-    // 批量查询所有附件（利用 message_attachments 索引表）
-    let mut att_map: std::collections::HashMap<String, Vec<Attachment>> =
-        std::collections::HashMap::new();
-    if !msg_ids.is_empty() {
-        let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let extracted_text_column = if include_extracted_text {
-            "a.extracted_text"
-        } else {
-            "NULL"
-        };
-        let att_query = format!(
+pub(super) async fn history_attachment_rows<'e>(
+    executor: impl sqlx::SqliteExecutor<'e>,
+    key: &TopicKey,
+    msg_ids: &[&str],
+    include_extracted_text: bool,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, String> {
+    if msg_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let extracted_text_column = if include_extracted_text {
+        "a.extracted_text"
+    } else {
+        "NULL"
+    };
+    let att_query = format!(
             "SELECT a.hash, a.mime_type, a.size, a.internal_path, {} as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
                     ma.msg_id, ma.attachment_order, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
@@ -243,22 +239,36 @@ async fn convert_history_rows(
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(att_query))
-            .bind(&key.owner_type)
-            .bind(&key.owner_id)
-            .bind(&key.topic_id);
-        for id in &msg_ids {
-            q = q.bind(id);
-        }
-        let att_rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(att_query))
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
+    for &id in msg_ids {
+        q = q.bind(id.to_owned());
+    }
+    q.fetch_all(executor).await.map_err(|e| e.to_string())
+}
 
-        for ar in att_rows {
-            let msg_id: String = ar.get("msg_id");
-            let attachment =
-                project_history_attachment(app_handle, &db_state, &ar, include_extracted_text)
-                    .await;
-            att_map.entry(msg_id).or_default().push(attachment);
-        }
+pub(super) async fn project_history_rows(
+    app_handle: &AppHandle<impl tauri::Runtime>,
+    pool: &sqlx::SqlitePool,
+    key: &TopicKey,
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+    attachment_rows: Vec<sqlx::sqlite::SqliteRow>,
+    include_content: bool,
+    include_extracted_text: bool,
+) -> Result<Vec<ChatMessage>, String> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let db_state = app_handle.state::<DbState>();
+    let mut att_map: std::collections::HashMap<String, Vec<Attachment>> =
+        std::collections::HashMap::new();
+    for ar in attachment_rows {
+        let msg_id: String = ar.get("msg_id");
+        let attachment =
+            project_history_attachment(app_handle, &db_state, &ar, include_extracted_text).await;
+        att_map.entry(msg_id).or_default().push(attachment);
     }
 
     // 预计算外壳属性所需的全局数据（避免调用 get_agents 触发昂贵的多余 topics 联表查询）
@@ -359,7 +369,7 @@ async fn convert_history_rows(
             name,
             content,
             timestamp: timestamp as u64,
-            updated_at: None,
+            updated_at: u64::try_from(row.get::<i64, _>("updated_at")).ok(),
             is_thinking,
             agent_id: row.get("agent_id"),
             group_id: row.get("group_id"),
@@ -430,14 +440,6 @@ pub async fn load_chat_history_around_internal(
     let Some(anchor_ts) = anchor_ts else {
         return Ok(Vec::new());
     };
-
-    const ROW_SELECT: &str =
-        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
-         FROM messages m
-         LEFT JOIN render_cache r
-           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
-          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id";
 
     let mut rows: Vec<sqlx::sqlite::SqliteRow> = Vec::new();
 

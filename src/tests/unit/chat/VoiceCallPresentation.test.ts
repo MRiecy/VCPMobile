@@ -31,7 +31,7 @@ vi.mock('@/core/composables/useKeyboardInsets', async () => {
 vi.mock('@/core/composables/useChatScroll', async () => {
   const { ref } = await import('vue');
   return { useChatScroll: () => ({
-    showScrollToBottom: ref(false), scrollToBottom: vi.fn(), startAutoScroll: vi.fn(), stopAutoScroll: vi.fn(),
+    showScrollToBottom: ref(false), followingLatest: ref(true), scrollToBottom: vi.fn(), startAutoScroll: vi.fn(), stopAutoScroll: vi.fn(),
     checkAndLoadMore: vi.fn(), preserveViewportAcrossLayoutChange: vi.fn(async (change: () => void) => change()),
     reset: vi.fn(), dispose: vi.fn(),
   }) };
@@ -73,8 +73,9 @@ function mountComposer(component: Component = InputEnhancer) {
       { documentId: 1, focusRevision: 1, windowRevision: 1, anchorId: null });
     const history = useChatHistoryStore();
     history.loadedConversationKey = session.currentConversationKey;
+    history.loadedWindowRevision = session.acceptedWindow!.windowRevision;
     history.currentChatHistory = [{ id: 'existing-message', role: 'assistant', content: '已有消息', timestamp: 1, blocks: [] }];
-    vi.spyOn(history, 'loadHistoryPaginated').mockResolvedValue({ addedCount: 0 });
+    vi.spyOn(history, 'ensureWindow').mockResolvedValue({ addedCount: 0 });
     vi.spyOn(useTopicStore(), 'markTopicAsRead').mockResolvedValue(undefined);
     vi.spyOn(useShareStore(), 'editDraft').mockImplementation(() => {});
   });

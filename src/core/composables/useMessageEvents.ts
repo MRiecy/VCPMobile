@@ -2,7 +2,6 @@ import { onMounted, onUnmounted, type Ref } from "vue";
 import { openUrl as openExternal } from "@tauri-apps/plugin-opener";
 import { useChatHistoryStore } from "../stores/chatHistoryStore";
 import { openRenderedImageViewer } from "./useRenderedImageViewer";
-import { scrollToMessageById } from "../utils/scrollToMessage";
 import { findRenderedImagePayload } from '../utils/renderedImage';
 import { useNotificationStore } from '../stores/notification';
 import { MERMAID_CONTENT_SELECTOR } from '../utils/astRenderer';
@@ -103,7 +102,7 @@ export function useMessageEvents(
       e.preventDefault();
       const msgId = messageRef.getAttribute('href')?.replace('#msg-', '');
       if (msgId) {
-        scrollToMessageById(msgId);
+        await historyStore.openLoadedReference(msgId);
       }
       return;
     }

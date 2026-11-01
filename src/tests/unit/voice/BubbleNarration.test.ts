@@ -4,6 +4,7 @@ import { reactive } from 'vue';
 import { flushPromises } from '@vue/test-utils';
 import { useBubbleNarration } from '../../../features/chat/voice/useBubbleNarration';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
+import { installWindow, mockWindowRead } from '../../helpers/chatWindow';
 import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
 import { useChatHistoryStore, type MessageActionKey } from '../../../core/stores/chatHistoryStore';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
@@ -145,12 +146,13 @@ describe('application bubble narration owner', () => {
   });
 
   it.each(['edit', 'delete'] as const)('actual %s waits for source playback release', async action => {
-    mockInvoke('load_chat_history', () => [{ id: 'a', role: 'assistant', content: '原文', timestamp: 1 }]);
+    installWindow(useChatSessionStore(), { id: 'agent', type: 'agent' }, 'topic');
+    mockWindowRead([{ id: 'a', role: 'assistant', content: '原文', timestamp: 1 }]);
     mockInvoke('reconnect_chat_streams', () => ({ generations: [], activeRequests: [], groupTurns: [] }));
     mockInvoke('delete_messages', () => ({ msgCount: 0, updatedAt: 2 }));
     mockInvoke('patch_single_message', () => ({ blocks: [], topicUpdatedAt: 2 }));
     const history = useChatHistoryStore();
-    await history.loadHistoryPaginated('agent', 'agent', 'topic');
+    await history.ensureWindow();
     await useChatStreamStore().checkAndRecoverInterruptedStreams();
     const owner = useBubbleNarration();
     await owner.startBubbleNarration(key('a'), '原文');

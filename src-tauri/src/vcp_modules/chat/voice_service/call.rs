@@ -6,6 +6,7 @@ use super::{
 };
 use crate::vcp_modules::{
     chat::chat_focus::{DeleteScope, FocusSnapshot, FocusTarget, Navigation, CALL_IN_PROGRESS},
+    chat::chat_window::{RetainedWindow, StartedRead, WindowId},
     chat::voice_submission::prepare_voice_submission,
     chat_manager::ChatMessage,
     message_service::MessageWriteResultDto,
@@ -307,8 +308,33 @@ impl VoiceCallState {
         self.registry()?.navigation.document_focus(document)
     }
 
+    #[cfg(test)]
     pub(crate) fn current_document_focus(&self, document: u64) -> Result<FocusSnapshot, String> {
         self.registry()?.navigation.current_document_focus(document)
+    }
+
+    pub(in crate::vcp_modules::chat) fn start_window_read(
+        &self,
+        document: u64,
+        id: &WindowId,
+    ) -> Result<StartedRead, String> {
+        self.registry()?.navigation.start_window_read(document, id)
+    }
+
+    pub(in crate::vcp_modules::chat) fn finish_window_read(
+        &self,
+        document: u64,
+        ticket: u64,
+        window: RetainedWindow,
+    ) -> Result<(), String> {
+        let window = Arc::new(window);
+        // Release the old page's member strings after releasing the admission lock.
+        let previous = self
+            .registry()?
+            .navigation
+            .finish_window_read(document, ticket, &window)?;
+        drop(previous);
+        Ok(())
     }
 
     pub(crate) fn begin_restore(
