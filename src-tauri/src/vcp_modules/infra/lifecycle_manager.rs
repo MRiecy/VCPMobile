@@ -316,15 +316,12 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                                 // or probe an existing connection after a path change.
                                 event_handle.state::<LifecycleState>().ws_activity.network_available();
                             }
-                            #[cfg(target_os = "ios")]
-                            {
-                                // Vue reuses its existing READY/active/in-flight recovery gate.
-                                // This is an observed path fact, not a guarantee of Internet reachability.
-                                let _ = event_handle.emit(
-                                    "vcp-network-changed",
-                                    serde_json::json!({ "connected": connected }),
-                                );
-                            }
+                            // Both mobile platforms feed Vue's existing READY/active/in-flight recovery gate.
+                            // This is an observed path fact, not a guarantee of Internet reachability.
+                            let _ = event_handle.emit(
+                                "vcp-network-changed",
+                                serde_json::json!({ "connected": connected }),
+                            );
                             #[cfg(target_os = "android")]
                             if connected {
                                 let app = event_handle.clone();

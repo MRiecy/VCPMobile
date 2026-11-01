@@ -28,10 +28,11 @@ vi.mock('../../../core/stores/ragObserver', () => ({
 vi.mock('../../../features/chat/voice/voiceHistorySync', () => ({
   createVoiceHistorySync: () => ({ reconcile: voiceRecover, dispose: voiceDispose }),
 }));
+const platform = vi.hoisted(() => ({ value: 'ios' as 'android' | 'ios' }));
 vi.mock('../../../core/utils/platform', () => ({
-  nativePlatform: 'ios',
-  isAndroid: false,
-  isIOS: true,
+  get nativePlatform() { return platform.value; },
+  get isAndroid() { return platform.value === 'android'; },
+  get isIOS() { return platform.value === 'ios'; },
 }));
 
 describe('native network recovery', () => {
@@ -44,6 +45,7 @@ describe('native network recovery', () => {
   });
 
   beforeEach(() => {
+    platform.value = 'ios';
     recover.mockReset().mockResolvedValue(undefined);
     voiceRecover.mockReset().mockResolvedValue(undefined);
     voiceDispose.mockReset();
@@ -66,7 +68,8 @@ describe('native network recovery', () => {
     wrapper = undefined;
   });
 
-  it('coalesces native and browser online in the existing recovery owner', async () => {
+  it.each(['android', 'ios'] as const)('coalesces native and browser online in the existing recovery owner on %s', async nativePlatform => {
+    platform.value = nativePlatform;
     let finish: () => void = () => {};
     recover.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
     wrapper = mount(consumer);

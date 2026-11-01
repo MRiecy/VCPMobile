@@ -1516,6 +1516,54 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn local_owner_deletion_rejects_an_active_call_before_database_access() {
+        use crate::vcp_modules::agent_service::{delete_agent_internal, AgentConfigState};
+        use crate::vcp_modules::group_service::{delete_group_internal, GroupManagerState};
+
+        for owner_type in ["agent", "group"] {
+            let app = tauri::test::mock_app();
+            app.manage(VoiceCallState::default());
+            // Deliberately omit DbState: both command business paths must reject
+            // the deletion before accessing SQLite, including during call setup.
+            let target = TopicKey::new(owner_type, "owner", "topic");
+            let (document, revision) = open_topic(app.handle(), &target);
+            let active = reserve_conversation(
+                app.handle().clone(),
+                "call".into(),
+                target,
+                document,
+                revision,
+            )
+            .unwrap();
+            let state = app.state::<VoiceCallState>();
+            let focus = state.current_document_focus(document).unwrap();
+            let snapshot = serde_json::to_value(
+                get_voice_conversation_snapshot(app.handle().clone()).unwrap(),
+            )
+            .unwrap();
+
+            let result = if owner_type == "agent" {
+                delete_agent_internal(app.handle(), &AgentConfigState::new(), "owner", None).await
+            } else {
+                delete_group_internal(app.handle(), &GroupManagerState::new(), "owner", None).await
+            };
+
+            assert_eq!(result, Err(CALL_IN_PROGRESS.into()), "{owner_type}");
+            assert!(Arc::ptr_eq(&call(app.handle(), "call").unwrap(), &active));
+            assert!(!active.input.cancel.is_cancelled());
+            assert_eq!(state.current_document_focus(document).unwrap(), focus);
+            assert_eq!(
+                serde_json::to_value(
+                    get_voice_conversation_snapshot(app.handle().clone()).unwrap()
+                )
+                .unwrap(),
+                snapshot,
+                "{owner_type} deletion must leave the call unchanged",
+            );
+        }
+    }
+
     #[test]
     fn capture_snapshot_survives_view_loss_and_late_completions_without_ending_the_call() {
         let app = tauri::test::mock_app();
