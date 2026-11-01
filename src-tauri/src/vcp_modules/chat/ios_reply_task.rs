@@ -1,60 +1,7 @@
-//! iOS execution grants belong to one user turn, even when a group changes speaker.
-//! Only live cancellation handles are retained; the HTTP request and its data stay in Rust.
-use crate::vcp_modules::vcp_client::{VcpRequestFailure, VcpResponse};
-use dashmap::DashMap;
-use std::sync::LazyLock;
+//! Best-effort iOS progress display for one user turn, including changes of group speaker.
+use std::future::Future;
 use std::time::{Duration, Instant};
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
-
-const EXPIRED: &str = "系统已结束本次后台回复任务";
-
-// Keep user stop and the OS expiration distinguishable while waking the same
-// request/turn tree (including attachment preparation or a group decision).
-struct ExecutionGrant {
-    tag: String,
-    expired: CancellationToken,
-}
-
-static GRANTS: LazyLock<DashMap<String, (CancellationToken, CancellationToken)>> =
-    LazyLock::new(DashMap::new);
-
-impl ExecutionGrant {
-    fn new(cancel: CancellationToken) -> Self {
-        let tag = Uuid::new_v4().to_string();
-        let expired = CancellationToken::new();
-        GRANTS.insert(tag.clone(), (expired.clone(), cancel));
-        Self { tag, expired }
-    }
-
-    fn transport_result(
-        &self,
-        result: Result<VcpResponse, VcpRequestFailure>,
-    ) -> Result<VcpResponse, VcpRequestFailure> {
-        match result {
-            Ok(reply) if reply.is_aborted && self.expired.is_cancelled() => {
-                Err(VcpRequestFailure::streaming(EXPIRED, reply.full_content))
-            }
-            result => result,
-        }
-    }
-}
-
-impl Drop for ExecutionGrant {
-    fn drop(&mut self) {
-        GRANTS.remove(&self.tag);
-    }
-}
-
-pub(crate) fn expire(tag: &str) {
-    if let Some(grant) = GRANTS.get(tag) {
-        let (expired, cancel) = grant.value();
-        if !cancel.is_cancelled() {
-            expired.cancel();
-            cancel.cancel();
-        }
-    }
-}
+use tokio::sync::watch;
 
 #[derive(Default)]
 pub(crate) struct ReceivedCharacters {
@@ -81,178 +28,162 @@ impl ReceivedCharacters {
     }
 }
 
-#[cfg(target_os = "ios")]
-mod native {
-    use super::*;
-    use tauri::{AppHandle, Runtime};
-    use tauri_plugin_vcp_mobile::stream::ios_chat;
-    use tokio::sync::watch;
+#[derive(Clone)]
+enum DisplayUpdate {
+    Progress { speaker: String, characters: u64 },
+    Finished(bool),
+}
 
-    pub(crate) struct ReplyTask<R: Runtime> {
-        app: AppHandle<R>,
-        grant: ExecutionGrant,
-        display: Option<watch::Sender<(String, u64)>>,
-        pub(crate) success: bool,
-    }
+pub(crate) struct ReplyTask {
+    display: watch::Sender<DisplayUpdate>,
+    pub(crate) success: bool,
+}
 
-    impl<R: Runtime> ReplyTask<R> {
-        pub(crate) fn begin(
-            app: &AppHandle<R>,
-            title: &str,
-            speaker: &str,
-            cancel: CancellationToken,
-        ) -> Self {
-            let grant = ExecutionGrant::new(cancel);
-            // Never hold up the HTTP reader waiting for UIKit to redraw. A slow
-            // bridge needs only the latest speaker and count, in order, for this tag.
-            let display = ios_chat::begin(app, &grant.tag, title, speaker).then(|| {
-                let (sender, mut receiver) = watch::channel((speaker.to_owned(), 0));
-                let app = app.clone();
-                let tag = grant.tag.clone();
-                tauri::async_runtime::spawn(async move {
-                    while receiver.changed().await.is_ok() {
-                        let (speaker, count) = receiver.borrow_and_update().clone();
-                        ios_chat::update(&app, &tag, &speaker, count).await;
-                    }
-                });
-                sender
-            });
+impl ReplyTask {
+    fn channel(speaker: &str) -> (Self, watch::Receiver<DisplayUpdate>) {
+        let (display, receiver) = watch::channel(DisplayUpdate::Progress {
+            speaker: speaker.to_owned(),
+            characters: 0,
+        });
+        (
             Self {
-                app: app.clone(),
-                grant,
                 display,
                 success: false,
-            }
-        }
-
-        pub(crate) fn is_running(&self) -> bool {
-            self.display.is_some() && !self.grant.expired.is_cancelled()
-        }
-
-        pub(crate) fn update(&self, speaker: &str, received: u64) {
-            if let Some(display) = &self.display {
-                display.send_if_modified(|(current, count)| {
-                    if current.as_str() == speaker && *count == received {
-                        return false;
-                    }
-                    speaker.clone_into(current);
-                    *count = received;
-                    true
-                });
-            }
-        }
-
-        pub(crate) fn check_expiration(&self) -> Result<(), String> {
-            if self.grant.expired.is_cancelled() {
-                Err(EXPIRED.to_string())
-            } else {
-                Ok(())
-            }
-        }
-
-        pub(crate) fn transport_result(
-            &self,
-            result: Result<VcpResponse, VcpRequestFailure>,
-        ) -> Result<VcpResponse, VcpRequestFailure> {
-            self.grant.transport_result(result)
-        }
+            },
+            receiver,
+        )
     }
 
-    impl<R: Runtime> Drop for ReplyTask<R> {
-        fn drop(&mut self) {
-            if !self.is_running() {
-                return;
+    #[cfg(target_os = "ios")]
+    pub(crate) fn begin<R: tauri::Runtime>(
+        app: &tauri::AppHandle<R>,
+        title: &str,
+        speaker: &str,
+    ) -> Self {
+        use tauri_plugin_vcp_mobile::stream::ios_chat;
+        let (task, receiver) = Self::channel(speaker);
+        let app = app.clone();
+        let title = title.to_owned();
+        let speaker = speaker.to_owned();
+        tauri::async_runtime::spawn(async move {
+            let tag = uuid::Uuid::new_v4().to_string();
+            let app = &app;
+            let tag = tag.as_str();
+            let outcome = observe(
+                receiver,
+                ios_chat::begin(app, tag, &title, &speaker),
+                |speaker, count| async move { ios_chat::update(app, tag, &speaker, count).await },
+            )
+            .await;
+            if let Some(success) = outcome {
+                ios_chat::finish(app, tag, success).await;
             }
-            let app = self.app.clone();
-            let tag = self.grant.tag.clone();
-            let success = self.success;
-            tauri::async_runtime::spawn_blocking(move || ios_chat::finish(&app, &tag, success));
-        }
+        });
+        task
     }
 
-    pub(crate) struct Finalization<R: Runtime> {
-        app: AppHandle<R>,
-        tag: String,
+    pub(crate) fn is_observing(&self) -> bool {
+        !self.display.is_closed()
     }
 
-    impl<R: Runtime> Finalization<R> {
-        pub(crate) fn begin(app: &AppHandle<R>) -> Option<Self> {
-            let tag = Uuid::new_v4().to_string();
-            ios_chat::begin_finalization(app, &tag).then(|| Self {
-                app: app.clone(),
-                tag,
-            })
-        }
-    }
-
-    impl<R: Runtime> Drop for Finalization<R> {
-        fn drop(&mut self) {
-            let app = self.app.clone();
-            let tag = self.tag.clone();
-            tauri::async_runtime::spawn_blocking(move || ios_chat::end_finalization(&app, &tag));
-        }
+    pub(crate) fn update(&self, speaker: &str, characters: u64) {
+        let _ = self.display.send(DisplayUpdate::Progress {
+            speaker: speaker.to_owned(),
+            characters,
+        });
     }
 }
 
-#[cfg(target_os = "ios")]
-pub(crate) use native::{Finalization, ReplyTask};
+impl Drop for ReplyTask {
+    fn drop(&mut self) {
+        let _ = self.display.send(DisplayUpdate::Finished(self.success));
+    }
+}
+
+// The observer alone calls Swift. Dropping the sole sender replaces any pending
+// progress with the final result, even while native begin or update is awaiting a reply.
+async fn observe<F: Future<Output = bool>>(
+    mut receiver: watch::Receiver<DisplayUpdate>,
+    begin: impl Future<Output = bool>,
+    mut update: impl FnMut(String, u64) -> F,
+) -> Option<bool> {
+    if receiver.has_changed().is_err() || !begin.await {
+        return None;
+    }
+    while receiver.changed().await.is_ok() {
+        let latest = receiver.borrow_and_update().clone();
+        match latest {
+            DisplayUpdate::Finished(success) => return Some(success),
+            DisplayUpdate::Progress {
+                speaker,
+                characters,
+            } => {
+                if !update(speaker, characters).await {
+                    return Some(false);
+                }
+            }
+        }
+    }
+    Some(false)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
 
-    #[test]
-    fn expiry_targets_only_the_matching_live_turn_and_wakes_its_speaker() {
-        let group = CancellationToken::new();
-        let speaker = group.child_token();
-        let old = ExecutionGrant::new(group);
-        let newer = ExecutionGrant::new(CancellationToken::new());
-        expire(&old.tag);
-        assert!(speaker.is_cancelled() && old.expired.is_cancelled());
-        assert!(!newer.expired.is_cancelled());
-        let old_tag = old.tag.clone();
-        drop(old);
-        expire(&old_tag);
-        assert!(!newer.expired.is_cancelled());
+    #[tokio::test]
+    async fn completed_turn_skips_display_submission_if_the_observer_has_not_started() {
+        let (task, receiver) = ReplyTask::channel("agent");
+        drop(task);
+        let outcome = observe(receiver, async { panic!("late begin") }, |_, _| async {
+            panic!("late update")
+        })
+        .await;
+        assert_eq!(outcome, None);
     }
 
-    #[test]
-    fn a_user_stop_does_not_become_an_expiration() {
-        let stop = CancellationToken::new();
-        let task = ExecutionGrant::new(stop.clone());
-        stop.cancel();
-        expire(&task.tag);
-        assert!(!task.expired.is_cancelled());
-        assert!(
-            task.transport_result(Ok(VcpResponse::cancelled()))
-                .unwrap()
-                .is_aborted
-        );
+    #[tokio::test]
+    async fn finish_supersedes_progress_while_begin_awaits_the_scheduler() {
+        for accepted in [true, false] {
+            let (mut task, receiver) = ReplyTask::channel("first");
+            let (started, wait_for_start) = oneshot::channel();
+            let (release, wait_for_release) = oneshot::channel();
+            let begin = async {
+                started.send(()).unwrap();
+                wait_for_release.await.unwrap();
+                accepted
+            };
+            let (outcome, ()) = tokio::join!(
+                observe(receiver, begin, |_, _| async {
+                    panic!("obsolete progress")
+                }),
+                async {
+                    wait_for_start.await.unwrap();
+                    task.update("second", 7);
+                    task.success = true;
+                    drop(task);
+                    release.send(()).unwrap();
+                }
+            );
+            assert_eq!(outcome, accepted.then_some(true));
+        }
     }
 
-    #[test]
-    fn expired_sse_preserves_current_partial_and_completed_http_is_not_reclassified() {
-        let task = ExecutionGrant::new(CancellationToken::new());
-        expire(&task.tag);
-        let interrupted = VcpResponse {
-            full_content: "已有正文".into(),
-            ..VcpResponse::cancelled()
-        };
-        let failure = task.transport_result(Ok(interrupted)).unwrap_err();
-        assert!(!failure.is_recovery_pending());
-        assert_eq!(
-            failure.into_parts(),
-            (EXPIRED.into(), Some("已有正文".into()))
-        );
-        let completed = VcpResponse {
-            full_content: "全部".into(),
-            is_aborted: false,
-            finish_reason: Some("stop".into()),
-        };
-        assert_eq!(
-            task.transport_result(Ok(completed)).unwrap().full_content,
-            "全部"
-        );
+    #[tokio::test]
+    async fn an_expired_display_receives_only_the_latest_progress_and_stops_observing() {
+        let (task, receiver) = ReplyTask::channel("first");
+        task.update("first", 15);
+        task.update("second", 2);
+        let mut updates = Vec::new();
+        let outcome = observe(receiver, async { true }, |speaker, count| {
+            updates.push((speaker, count));
+            std::future::ready(false)
+        })
+        .await;
+        assert_eq!(updates, [("second".to_string(), 2)]);
+        assert_eq!(outcome, Some(false));
+        assert!(!task.is_observing());
     }
 
     #[test]

@@ -27,10 +27,6 @@ private struct NetworkPayload: Encodable {
     let connected: Bool
 }
 
-private struct ChatBackgroundTaskExpired: Encodable {
-    let tag: String
-}
-
 private struct NativeEvent<Payload: Encodable>: Encodable {
     let event: String
     let payload: Payload
@@ -94,18 +90,6 @@ final class NativeEventSubscription {
         dispatchPrecondition(condition: .onQueue(.main))
         invalidateSubscription()
         channel = newChannel
-        // Expiration runs on the task owner's queue. Capture this subscription's
-        // immutable Channel so the synchronous cancellation doesn't wait for UIKit.
-        NativeChatBackgroundTasks.shared.setExpirationHandler { tag in
-            do {
-                try newChannel.send(NativeEvent(
-                    event: "chatBackgroundTaskExpired",
-                    payload: ChatBackgroundTaskExpired(tag: tag)
-                ))
-            } catch {
-                NSLog("[VcpMobilePlugin] Chat task expiration delivery failed: %@", error.localizedDescription)
-            }
-        }
         let subscriptionGeneration = generation
         installLifecycleObservers(generation: subscriptionGeneration)
         // Observers and this snapshot are installed in one main-queue turn.
@@ -309,7 +293,6 @@ final class NativeEventSubscription {
 
     private func invalidateSubscription() {
         dispatchPrecondition(condition: .onQueue(.main))
-        NativeChatBackgroundTasks.shared.setExpirationHandler(nil)
         generation = UUID()
         for token in observers {
             NotificationCenter.default.removeObserver(token)

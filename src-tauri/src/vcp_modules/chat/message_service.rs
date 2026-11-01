@@ -1695,8 +1695,6 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     replayed: bool,
 ) -> Result<Option<FinalizedStreamMessage>, String> {
-    #[cfg(target_os = "ios")]
-    let _finalization = crate::vcp_modules::chat::ios_reply_task::Finalization::begin(&app_handle);
     let owner_id = message_key.topic.owner_id.as_str();
     let owner_type = message_key.topic.owner_type.as_str();
     let topic_id = message_key.topic.topic_id.as_str();
@@ -1773,20 +1771,14 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
                 if !replayed && !matches!(terminal_reason.as_str(), "error" | "cancelled_by_user") {
                     // The transaction won the terminal transition, so this reply exists
                     // in the exact history window referenced by its notification.
-                    if let Err(error) = tauri_plugin_vcp_mobile::system::notify_committed_reply(
+                    tauri_plugin_vcp_mobile::system::notify_committed_reply(
                         &app_handle,
                         owner_type,
                         owner_id,
                         topic_id,
                         message_id,
                         agent_name.as_deref().unwrap_or("智能体"),
-                    )
-                    .await
-                    {
-                        log::warn!(
-                            "[iOS Chat] Could not deliver completed reply notification: {error}"
-                        );
-                    }
+                    );
                 }
                 (Some(blocks), start_timestamp, Some(updated_at))
             }

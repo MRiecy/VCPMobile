@@ -12,9 +12,6 @@ pub enum NativeEvent {
     Network { connected: bool },
     #[serde(rename = "notificationClick")]
     NotificationClick(NativeNotificationClick),
-    #[cfg(target_os = "ios")]
-    #[serde(rename = "chatBackgroundTaskExpired")]
-    ChatBackgroundTaskExpired { tag: String },
     #[serde(rename = "voiceAudio")]
     VoiceAudio(crate::voice::NativeVoiceAudioEvent),
     #[serde(rename = "voiceDocument")]

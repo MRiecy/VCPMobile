@@ -1211,11 +1211,6 @@ pub(crate) struct ActiveGroupTurnLease {
 }
 
 impl ActiveGroupTurnLease {
-    #[cfg(target_os = "ios")]
-    pub(crate) fn ios_task_cancellation(&self) -> CancellationToken {
-        self.cancellation_token.clone()
-    }
-
     pub(crate) fn start_session(
         &self,
         trigger: &'static str,
@@ -1529,7 +1524,7 @@ pub(crate) async fn perform_vcp_request_registered<R: Runtime>(
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
     cancellation_token: CancellationToken,
-    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask<R>>,
+    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask>,
 ) -> Result<VcpResponse, VcpRequestFailure> {
     log::info!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
@@ -2368,7 +2363,7 @@ async fn handle_streaming_request<R: Runtime>(
     cancellation_token: CancellationToken,
     output: Arc<RequestOutput>,
     is_resume: bool,
-    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask<R>>,
+    #[cfg(target_os = "ios")] ios_reply: Option<&ReplyTask>,
 ) -> Result<VcpResponse, VcpRequestFailure> {
     if !is_resume && cancellation_token.is_cancelled() {
         return Ok(VcpResponse::cancelled());
@@ -2385,7 +2380,7 @@ async fn handle_streaming_request<R: Runtime>(
     let mut send_update = |buffer: &mut AuroraBuffer| {
         output.send_aurora(buffer, &message_id, &context, None, false);
         #[cfg(target_os = "ios")]
-        if let Some(task) = ios_reply.filter(|task| task.is_running()) {
+        if let Some(task) = ios_reply.filter(|task| task.is_observing()) {
             if let Some(count) = received.observe(&buffer.full_text, std::time::Instant::now()) {
                 let speaker = context
                     .as_ref()

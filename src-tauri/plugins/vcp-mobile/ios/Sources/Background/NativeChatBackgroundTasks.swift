@@ -20,13 +20,8 @@ private struct ChatTaskFinish: Decodable {
     let success: Bool
 }
 
-private struct ChatCommit: Decodable {
-    let tag: String
-}
-
-/// A Rust chat already owns the HTTP request. The scheduler grants runtime and
-/// presents its progress; launching a BGTask never initiates a second request.
-final class NativeChatBackgroundTasks {
+/// Presents progress for a reply already running in Rust.
+private final class NativeChatBackgroundTasks {
     static let shared = NativeChatBackgroundTasks()
     fileprivate let schedulerQueue = DispatchQueue(label: "com.vcp.avatar.chat.background")
     private let queueIdentity = DispatchSpecificKey<Bool>()
@@ -36,18 +31,16 @@ final class NativeChatBackgroundTasks {
         let tag: String
         let identifier: String
         let title: String
-        let reportExpiration: (String) -> Void
         var speaker: String
         var characters: Int64 = 0
         var hasReceivedText = false
         var task: BGContinuedProcessingTask?
 
-        init(_ args: ChatTaskStart, identifier: String, reportExpiration: @escaping (String) -> Void) {
+        init(_ args: ChatTaskStart, identifier: String) {
             tag = args.tag
             title = args.title
             speaker = args.speaker
             self.identifier = identifier
-            self.reportExpiration = reportExpiration
         }
 
         var subtitle: String {
@@ -71,17 +64,9 @@ final class NativeChatBackgroundTasks {
     // The scheduler retains registered handlers for this process. Bound their
     // count even if an accepted launch is delayed indefinitely by the system.
     private let maximumRegisteredSlots = 16
-    // UIKit assertions and the Rust event subscription are main-queue owned.
-    private var commits: [String: UIBackgroundTaskIdentifier] = [:]
-    fileprivate private(set) var onExpiration: ((String) -> Void)?
 
     private init() {
         schedulerQueue.setSpecific(key: queueIdentity, value: true)
-    }
-
-    func setExpirationHandler(_ handler: ((String) -> Void)?) {
-        dispatchPrecondition(condition: .onQueue(.main))
-        onExpiration = handler
     }
 
     private func unavailable(_ reason: String) -> NSError {
@@ -102,11 +87,11 @@ final class NativeChatBackgroundTasks {
         return identifier
     }
 
-    fileprivate func begin(_ args: ChatTaskStart, reportExpiration: @escaping (String) -> Void) throws {
+    fileprivate func begin(_ args: ChatTaskStart) throws {
         dispatchPrecondition(condition: .onQueue(schedulerQueue))
         guard chats[args.tag] == nil else { return }
         let identifier = try takeIdentifier()
-        let chat = Chat(args, identifier: identifier, reportExpiration: reportExpiration)
+        let chat = Chat(args, identifier: identifier)
         let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: chat.title, subtitle: chat.subtitle)
         request.strategy = .fail
         do {
@@ -137,9 +122,6 @@ final class NativeChatBackgroundTasks {
             guard let chat else { return }
             let expire = {
                 guard self.chats[chat.tag] === chat else { return }
-                // The immutable process channel synchronously signals Rust's
-                // cancellation token before completion permits iOS to suspend us.
-                chat.reportExpiration(chat.tag)
                 self.finish(tag: chat.tag, success: false)
             }
             if DispatchQueue.getSpecific(key: self.queueIdentity) == true { expire() }
@@ -151,9 +133,9 @@ final class NativeChatBackgroundTasks {
         chat.showProgress()
     }
 
-    fileprivate func update(_ args: ChatTaskUpdate) {
+    fileprivate func update(_ args: ChatTaskUpdate) throws {
         dispatchPrecondition(condition: .onQueue(schedulerQueue))
-        guard let chat = chats[args.tag] else { return }
+        guard let chat = chats[args.tag] else { throw unavailable("chat_background_task_ended") }
         chat.speaker = args.speaker
         chat.characters = args.receivedCharacters
         if args.receivedCharacters > 0 { chat.hasReceivedText = true }
@@ -172,23 +154,6 @@ final class NativeChatBackgroundTasks {
             freeIdentifiers.append(chat.identifier)
         } else {
             finishedBeforeLaunch[chat.identifier] = success
-        }
-    }
-
-    fileprivate func beginCommit(tag: String) throws {
-        dispatchPrecondition(condition: .onQueue(.main))
-        guard commits[tag] == nil else { return }
-        let identifier = UIApplication.shared.beginBackgroundTask(withName: "Save chat reply") { [weak self] in
-            self?.endCommit(tag: tag)
-        }
-        guard identifier != .invalid else { throw unavailable("chat_commit_background_time_unavailable") }
-        commits[tag] = identifier
-    }
-
-    fileprivate func endCommit(tag: String) {
-        dispatchPrecondition(condition: .onQueue(.main))
-        if let identifier = commits.removeValue(forKey: tag) {
-            UIApplication.shared.endBackgroundTask(identifier)
         }
     }
 }
@@ -210,11 +175,11 @@ extension VcpMobilePlugin {
     @objc public func beginChatBackgroundTask(_ invoke: Invoke) {
         let owner = NativeChatBackgroundTasks.shared
         DispatchQueue.main.async {
-            guard UIApplication.shared.applicationState == .active, let sender = owner.onExpiration else {
+            guard UIApplication.shared.applicationState == .active else {
                 invoke.reject("chat_background_task_requires_active_app")
                 return
             }
-            chatCommand(invoke, ChatTaskStart.self, on: owner.schedulerQueue) { try owner.begin($0, reportExpiration: sender) }
+            chatCommand(invoke, ChatTaskStart.self, on: owner.schedulerQueue, owner.begin)
         }
     }
 
@@ -226,13 +191,5 @@ extension VcpMobilePlugin {
     @objc public func finishChatBackgroundTask(_ invoke: Invoke) {
         let owner = NativeChatBackgroundTasks.shared
         chatCommand(invoke, ChatTaskFinish.self, on: owner.schedulerQueue) { owner.finish(tag: $0.tag, success: $0.success) }
-    }
-
-    @objc public func beginChatFinalization(_ invoke: Invoke) {
-        chatCommand(invoke, ChatCommit.self, on: .main) { try NativeChatBackgroundTasks.shared.beginCommit(tag: $0.tag) }
-    }
-
-    @objc public func endChatFinalization(_ invoke: Invoke) {
-        chatCommand(invoke, ChatCommit.self, on: .main) { NativeChatBackgroundTasks.shared.endCommit(tag: $0.tag) }
     }
 }
