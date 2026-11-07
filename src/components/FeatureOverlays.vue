@@ -35,6 +35,9 @@ const TaskCenterView = defineAsyncComponent(() => import('../features/taskcenter
 const AgentMgrView = defineAsyncComponent(() => import('../features/agentmgr/AgentMgrView.vue'));
 const ForumListView = defineAsyncComponent(() => import('../features/forum/ForumListView.vue'));
 const MailListView = defineAsyncComponent(() => import('../features/mail/MailListView.vue'));
+const RemoteDesktopView = defineAsyncComponent(() => import('../features/remotedesktop/RemoteDesktopView.vue'));
+const ScriptoriumRemoteView = defineAsyncComponent(() => import('../features/scriptoriumremote/ScriptoriumRemoteView.vue'));
+const ProjectForgeView = defineAsyncComponent(() => import('../features/projectforge/ProjectForgeView.vue'));
 const GlobalSearchView = defineAsyncComponent(() => import('../features/globalsearch/GlobalSearchView.vue'));
 const VcpCliManifestView = defineAsyncComponent(() => import('../features/cli/components/VcpCliManifestView.vue'));
 const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
@@ -69,6 +72,9 @@ const taskCenterMounted = createFirstOpenLatch(() => overlayStore.isTaskCenterOp
 const agentMgrMounted = createFirstOpenLatch(() => overlayStore.isAgentMgrOpen);
 const forumMounted = createFirstOpenLatch(() => overlayStore.isForumOpen);
 const mailMounted = createFirstOpenLatch(() => overlayStore.isMailOpen);
+const remoteDesktopMounted = createFirstOpenLatch(() => overlayStore.isRemoteDesktopOpen);
+const scriptoriumRemoteMounted = createFirstOpenLatch(() => overlayStore.isScriptoriumRemoteOpen);
+const projectForgeMounted = createFirstOpenLatch(() => overlayStore.isProjectForgeOpen);
 const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSearchOpen);
 </script>
 
@@ -146,6 +152,57 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       v-if="overlayStore.isRebuildSessionOpen"
       :z-index="overlayStore.getPageZIndex('rebuildSession')"
     />
+
+    <Suspense v-if="remoteDesktopMounted">
+      <RemoteDesktopView
+        :is-open="overlayStore.isRemoteDesktopOpen"
+        :z-index="overlayStore.getPageZIndex('remoteDesktop')"
+        @close="overlayStore.closeRemoteDesktop()"
+      />
+      <template #fallback>
+        <div
+          v-if="overlayStore.isRemoteDesktopOpen"
+          class="fixed inset-0 pointer-events-auto grid place-items-center bg-[var(--primary-bg)] text-sm text-[var(--primary-text)]"
+          :style="{ zIndex: overlayStore.getPageZIndex('remoteDesktop') }"
+        >
+          正在连接桌面…
+        </div>
+      </template>
+    </Suspense>
+
+    <Suspense v-if="scriptoriumRemoteMounted">
+      <ScriptoriumRemoteView
+        :is-open="overlayStore.isScriptoriumRemoteOpen"
+        :z-index="overlayStore.getPageZIndex('scriptoriumRemote')"
+        @close="overlayStore.closeScriptoriumRemote()"
+      />
+      <template #fallback>
+        <div
+          v-if="overlayStore.isScriptoriumRemoteOpen"
+          class="fixed inset-0 pointer-events-auto grid place-items-center bg-[var(--primary-bg)] text-sm text-[var(--primary-text)]"
+          :style="{ zIndex: overlayStore.getPageZIndex('scriptoriumRemote') }"
+        >
+          正在读取桌面文坊…
+        </div>
+      </template>
+    </Suspense>
+
+    <Suspense v-if="projectForgeMounted">
+      <ProjectForgeView
+        :is-open="overlayStore.isProjectForgeOpen"
+        :z-index="overlayStore.getPageZIndex('projectForge')"
+        @close="overlayStore.closeProjectForge()"
+      />
+      <template #fallback>
+        <div
+          v-if="overlayStore.isProjectForgeOpen"
+          class="fixed inset-0 pointer-events-auto grid place-items-center bg-[var(--primary-bg)] text-sm text-[var(--primary-text)]"
+          :style="{ zIndex: overlayStore.getPageZIndex('projectForge') }"
+        >
+          正在连接 V工程…
+        </div>
+      </template>
+    </Suspense>
 
     <DistributedView
       :data-vcp-modal-id="pageModalId('distributed')"

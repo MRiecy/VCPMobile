@@ -3,6 +3,7 @@ import { computed, shallowRef, ref, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
+import { applyBridgeConfigFromAppSettings } from "../bridge/bridgeConfig";
 import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, ConfigBackupImportResult, Settings } from "../config/generated/config";
 import { buildSettingsUpdate, cloneConfig, type SettingsFieldValues } from "../config/fields";
 import type { GroupLocalSettingsPatch } from '../types/assistant';
@@ -21,6 +22,8 @@ export const useSettingsStore = defineStore("settings", () => {
   let installingListener: Promise<void> | null = null;
   const acceptSnapshot = (incoming: ConfigSnapshot) => {
     if (disposed) return;
+    // 桌面桥接（V工程/文坊/远程桌面）跟随「设置 → 同步」的桌面地址与 Token。
+    applyBridgeConfigFromAppSettings(incoming.data);
     if (!snapshot.value) { snapshot.value = incoming; return; }
     const next = cloneConfig(snapshot.value);
     for (const domain of Object.keys(incoming.domains) as (keyof ConfigSnapshot['domains'])[]) {

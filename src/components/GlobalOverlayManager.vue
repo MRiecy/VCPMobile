@@ -49,7 +49,8 @@ const handleEditorSave = async (newContent: string) => {
 
     <!-- 全局 Context Menu -->
     <ContextMenuSheet v-if="overlayStore.contextMenuConfig" :is-open="!!overlayStore.contextMenuConfig"
-      :title="overlayStore.contextMenuConfig.title" :actions="overlayStore.contextMenuConfig.actions"
+      :title="overlayStore.contextMenuConfig.title" :note="overlayStore.contextMenuConfig.note"
+      :actions="overlayStore.contextMenuConfig.actions"
       :header-action="overlayStore.contextMenuConfig.headerAction"
       @close="overlayStore.closeContextMenu()" @action-click="overlayStore.closeContextMenu()"
       @header-action-click="overlayStore.closeContextMenu()" />

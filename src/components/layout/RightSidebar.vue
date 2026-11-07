@@ -16,6 +16,8 @@ import {
   Bot,
   MessageSquareText,
   Mail,
+  FolderGit2,
+  MonitorPlay,
 } from '@lucide/vue';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -90,6 +92,24 @@ const moreTools = [
     label: '邮箱',
     icon: Mail,
     open: () => overlayStore.openMail(),
+  },
+  {
+    id: 'scriptorium-remote',
+    label: '文坊',
+    icon: BookOpenText,
+    open: () => overlayStore.openScriptoriumRemote(),
+  },
+  {
+    id: 'project-forge',
+    label: 'V工程',
+    icon: FolderGit2,
+    open: () => overlayStore.openProjectForge(),
+  },
+  {
+    id: 'remote-desktop',
+    label: '远程桌面',
+    icon: MonitorPlay,
+    open: () => overlayStore.openRemoteDesktop(),
   },
   {
     id: 'vcp-cli',
