@@ -25,6 +25,9 @@ export type OverlayPageType =
   | 'taskCenter'
   | 'agentMgr'
   | 'forum'
+  | 'remoteDesktop'
+  | 'scriptoriumRemote'
+  | 'projectForge'
   | 'mail'
   | 'globalSearch';
 
@@ -73,6 +76,9 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isForumOpen = computed(() => pageStack.value.some(p => p.type === 'forum'));
   const isMailOpen = computed(() => pageStack.value.some(p => p.type === 'mail'));
   const isGlobalSearchOpen = computed(() => pageStack.value.some(p => p.type === 'globalSearch'));
+  const isRemoteDesktopOpen = computed(() => pageStack.value.some(p => p.type === 'remoteDesktop'));
+  const isScriptoriumRemoteOpen = computed(() => pageStack.value.some(p => p.type === 'scriptoriumRemote'));
+  const isProjectForgeOpen = computed(() => pageStack.value.some(p => p.type === 'projectForge'));
 
 
   const agentSettingsId = computed(() => {
@@ -338,6 +344,36 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openRemoteDesktop = () => {
+    if (isRemoteDesktopOpen.value) return;
+    pushPage('remoteDesktop');
+  };
+
+  const closeRemoteDesktop = () => {
+    if (pageStackTop.value?.type !== 'remoteDesktop') return;
+    popPage();
+  };
+
+  const openScriptoriumRemote = () => {
+    if (isScriptoriumRemoteOpen.value) return;
+    pushPage('scriptoriumRemote');
+  };
+
+  const closeScriptoriumRemote = () => {
+    if (pageStackTop.value?.type !== 'scriptoriumRemote') return;
+    popPage();
+  };
+
+  const openProjectForge = () => {
+    if (isProjectForgeOpen.value) return;
+    pushPage('projectForge');
+  };
+
+  const closeProjectForge = () => {
+    if (pageStackTop.value?.type !== 'projectForge') return;
+    popPage();
+  };
+
   const openGlobalSearch = () => {
     if (isGlobalSearchOpen.value) return;
     pushPage('globalSearch');
@@ -397,9 +433,11 @@ export const useOverlayStore = defineStore('overlay', () => {
     actions: OverlayActionItem[],
     title?: string,
     headerAction?: OverlayActionItem,
+    note?: string,
   ) => {
     contextMenuConfig.value = {
       title: title || '',
+      note,
       actions,
       headerAction,
     };
@@ -498,6 +536,15 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeMail,
     openGlobalSearch,
     closeGlobalSearch,
+    openRemoteDesktop,
+    closeRemoteDesktop,
+    isRemoteDesktopOpen,
+    openScriptoriumRemote,
+    closeScriptoriumRemote,
+    isScriptoriumRemoteOpen,
+    openProjectForge,
+    closeProjectForge,
+    isProjectForgeOpen,
     // Modals
     promptConfig,
     confirmConfig,
