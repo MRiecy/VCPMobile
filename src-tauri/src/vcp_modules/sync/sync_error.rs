@@ -258,22 +258,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "连接电脑端同步服务超时",
             "确认两端处于同一网络且电脑端同步服务已启动，然后重新同步。",
         ),
-        "MANIFEST_RESPONSE_TIMEOUT" => definition(
-            Category::Connection,
-            Origin::MobileSync,
-            Stage::OwnerMetadata,
-            Retry::Manual,
-            "电脑端未在规定时间内返回所有者数据",
-            "确认电脑端数据服务正常，然后重新同步。",
-        ),
-        "TOPIC_HASH_RESPONSE_TIMEOUT" => definition(
-            Category::Connection,
-            Origin::MobileSync,
-            Stage::TopicValidation,
-            Retry::Manual,
-            "电脑端未在规定时间内返回话题校验结果",
-            "确认电脑端数据服务正常，然后重新同步。",
-        ),
         "FINAL_ACK_TIMEOUT" => definition(
             Category::Connection,
             Origin::MobileSync,

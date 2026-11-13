@@ -104,6 +104,7 @@ struct TopicBatchFailure {
 
 #[derive(Debug, PartialEq, Eq)]
 struct TopicDecision {
+    pull_all: bool,
     pull_message_ids: Vec<String>,
     push_message_ids: Vec<String>,
     push_deleted_messages: Vec<MessageDeleteDecision>,
@@ -116,7 +117,8 @@ fn parse_topic_decision(
 ) -> Result<TopicDecision, Phase3ProtocolError> {
     let topic_id = &topic.topic_id;
     if !decision.ok {
-        if decision.pull_message_ids.is_some()
+        if decision.pull_all.is_some()
+            || decision.pull_message_ids.is_some()
             || decision.push_message_ids.is_some()
             || decision.push_deleted_messages.is_some()
             || decision.delete_messages.is_some()
@@ -145,6 +147,13 @@ fn parse_topic_decision(
         ));
     }
 
+    let pull_all = decision.pull_all.ok_or_else(|| {
+        Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_INVALID",
+            format!("Phase 3 decision for {topic_id} requires pullAll"),
+            topic_id,
+        )
+    })?;
     let pull_message_ids = decision.pull_message_ids.as_ref().ok_or_else(|| {
         Phase3ProtocolError::for_topic(
             "PHASE3_DECISION_INVALID",
@@ -250,7 +259,15 @@ fn parse_topic_decision(
             ));
         }
     }
+    if pull_all && (!seen.is_empty() || !seen_deleted.is_empty()) {
+        return Err(Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_INVALID",
+            format!("Phase 3 pullAll for {topic_id} must not contain per-message actions"),
+            topic_id,
+        ));
+    }
     Ok(TopicDecision {
+        pull_all,
         pull_message_ids: pull_message_ids.clone(),
         push_message_ids: push_message_ids.clone(),
         push_deleted_messages: push_deleted_messages.clone(),
@@ -428,6 +445,7 @@ impl BatchDiffHandler {
                     }
                 };
                 let to_pull_ids = decision.pull_message_ids;
+                let to_pull = decision.pull_all || !to_pull_ids.is_empty();
                 let to_push = !decision.push_message_ids.is_empty()
                     || !decision.push_deleted_messages.is_empty();
                 let to_delete = decision.delete_messages;
@@ -436,7 +454,7 @@ impl BatchDiffHandler {
                 // no-op，也必须进入 finalizer 的 hash-repair 集。
                 tracker.mark_modified(&topic).await;
 
-                if !to_push && to_pull_ids.is_empty() && to_delete.is_empty() {
+                if !to_push && !to_pull && to_delete.is_empty() {
                     // 无需操作，直接标记完成
                     tracker
                         .mark_completed(&topic, logger, tx_internal, app_handle, true)
@@ -451,7 +469,7 @@ impl BatchDiffHandler {
                         deleted_messages: decision.push_deleted_messages,
                     });
                 }
-                if !to_pull_ids.is_empty() {
+                if to_pull {
                     pull_batch.push((topic.clone(), to_pull_ids));
                 }
                 if !to_delete.is_empty() {
@@ -674,6 +692,7 @@ mod tests {
             owner_id: "agent-a".to_string(),
             topic_id: topic_id.to_string(),
             ok: true,
+            pull_all: Some(false),
             pull_message_ids: Some(Vec::new()),
             push_message_ids: Some(Vec::new()),
             push_deleted_messages: Some(Vec::new()),

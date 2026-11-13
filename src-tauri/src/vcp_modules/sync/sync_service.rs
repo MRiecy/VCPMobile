@@ -39,7 +39,6 @@ use tokio_util::sync::CancellationToken;
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
-const PHASE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SYNC_RETRIES: u32 = 3;
 // Bound how long a caller waits, not the lifetime of already accepted DB writes.
@@ -723,79 +722,6 @@ impl ManifestResponseTracker {
                 "SYNC_MANIFEST_RESULT contains duplicate or unexpected manifestType {manifest_type} for wave {phase}"
             )),
         }
-    }
-
-    fn missing_type(&self, phase: u8) -> Result<Option<ManifestType>, String> {
-        let pending = self
-            .pending
-            .lock()
-            .map_err(|_| "Expected manifest response state is poisoned".to_string())?;
-        match *pending {
-            Some(expected) if expected.phase == phase => Ok(Some(expected.manifest_type)),
-            Some(expected) => Err(format!(
-                "Manifest response tracker waits for wave {} while current wave is {phase}",
-                expected.phase
-            )),
-            None => Ok(None),
-        }
-    }
-}
-
-async fn enforce_manifest_response_deadline(
-    tracker: Arc<ManifestResponseTracker>,
-    manifest_phase: Arc<AtomicU8>,
-    expected_phase: u8,
-    tx: mpsc::UnboundedSender<SyncCommand>,
-    attempt_id: u64,
-    deadline: Duration,
-) {
-    tokio::time::sleep(deadline).await;
-    if manifest_phase.load(Ordering::SeqCst) != expected_phase {
-        return;
-    }
-    let missing = match tracker.missing_type(expected_phase) {
-        Ok(None) => return,
-        Ok(Some(missing)) => vec![missing.to_string()],
-        Err(message) => {
-            let _ = tx.send(SyncCommand::FailAttemptDetailed {
-                attempt_id,
-                code: "SYNC_STATE_POISONED".to_string(),
-                message,
-                failed_topic_ids: Vec::new(),
-            });
-            return;
-        }
-    };
-    let _ = tx.send(SyncCommand::FailAttemptDetailed {
-        attempt_id,
-        code: "MANIFEST_RESPONSE_TIMEOUT".to_string(),
-        message: format!("Desktop manifest response timed out with missing data types {missing:?}"),
-        failed_topic_ids: Vec::new(),
-    });
-}
-
-async fn enforce_topic_hash_response_deadline(
-    expected_results: Arc<AsyncMutex<Option<HashSet<TopicKey>>>>,
-    manifest_phase: Arc<AtomicU8>,
-    expected_phase: u8,
-    tx: mpsc::UnboundedSender<SyncCommand>,
-    attempt_id: u64,
-    deadline: Duration,
-) {
-    tokio::time::sleep(deadline).await;
-    if manifest_phase.load(Ordering::SeqCst) != expected_phase {
-        return;
-    }
-    let pending_count = expected_results.lock().await.as_ref().map(HashSet::len);
-    if let Some(pending_count) = pending_count {
-        let _ = tx.send(SyncCommand::FailAttemptDetailed {
-            attempt_id,
-            code: "TOPIC_HASH_RESPONSE_TIMEOUT".to_string(),
-            message: format!(
-                "Desktop topic hash response timed out for {pending_count} expected topics"
-            ),
-            failed_topic_ids: Vec::new(),
-        });
     }
 }
 
@@ -1800,16 +1726,6 @@ async fn run_sync_session(
                                         ).await;
                                         break 'attempt;
                                     }
-                                    task_tracker
-                                        .spawn(enforce_manifest_response_deadline(
-                                            manifest_responses.clone(),
-                                            manifest_phase.clone(),
-                                            1,
-                                            tx_internal.clone(),
-                                            attempt_id,
-                                            PHASE_RESPONSE_TIMEOUT,
-                                        ))
-                                        .await;
                                 }
                                 Err(error) => {
                                     let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
@@ -1939,16 +1855,6 @@ async fn run_sync_session(
                                                 ).await;
                                                 break 'attempt;
                                             }
-                                            task_tracker
-                                                .spawn(enforce_manifest_response_deadline(
-                                                    manifest_responses.clone(),
-                                                    manifest_phase.clone(),
-                                                    3,
-                                                    tx_internal.clone(),
-                                                    attempt_id,
-                                                    PHASE_RESPONSE_TIMEOUT,
-                                                ))
-                                                .await;
                                             }
                                             Err(error) => {
                                                 let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
@@ -2086,16 +1992,6 @@ async fn run_sync_session(
                                                 ).await;
                                                 break 'attempt;
                                             }
-                                            task_tracker
-                                                .spawn(enforce_topic_hash_response_deadline(
-                                                    expected_topic_hash_results.clone(),
-                                                    manifest_phase.clone(),
-                                                    3,
-                                                    tx_internal.clone(),
-                                                    attempt_id,
-                                                    PHASE_RESPONSE_TIMEOUT,
-                                                ))
-                                                .await;
                                         }
                                         Err(e) => {
                                             log::error!("[SyncService] Failed to get targeted topic hashes: {}", e);
@@ -2327,16 +2223,6 @@ async fn run_sync_session(
                                             ).await;
                                             break 'attempt;
                                         }
-                                        task_tracker
-                                            .spawn(enforce_manifest_response_deadline(
-                                                manifest_responses.clone(),
-                                                manifest_phase.clone(),
-                                                2,
-                                                tx_internal.clone(),
-                                                attempt_id,
-                                                PHASE_RESPONSE_TIMEOUT,
-                                            ))
-                                            .await;
                                     }
                                 },
                                 SyncCommand::Finalize { attempt_id: command_attempt } => {
@@ -4206,70 +4092,6 @@ mod tests {
             ..Default::default()
         };
         assert!(build_sync_session_config(&settings, false).is_ok());
-    }
-
-    #[tokio::test]
-    async fn missing_manifest_frame_fails_the_current_attempt() {
-        let expected = Arc::new(ManifestResponseTracker::default());
-        expected
-            .arm(1, ManifestType::Owner)
-            .expect("arm owner manifest response");
-        let phase = Arc::new(AtomicU8::new(1));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        enforce_manifest_response_deadline(expected, phase, 1, tx, 7, Duration::from_millis(1))
-            .await;
-        match rx.recv().await.expect("deadline command") {
-            SyncCommand::FailAttemptDetailed {
-                attempt_id,
-                code,
-                message,
-                ..
-            } => {
-                assert_eq!(attempt_id, 7);
-                assert_eq!(code, "MANIFEST_RESPONSE_TIMEOUT");
-                assert!(message.contains("owner"));
-            }
-            _ => panic!("unexpected deadline command"),
-        }
-    }
-
-    #[tokio::test]
-    async fn consumed_manifest_frame_does_not_timeout() {
-        let expected = Arc::new(ManifestResponseTracker::default());
-        expected
-            .arm(1, ManifestType::Owner)
-            .expect("arm owner manifest response");
-        expected
-            .consume(1, ManifestType::Owner)
-            .expect("consume owner manifest response");
-        let phase = Arc::new(AtomicU8::new(1));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        enforce_manifest_response_deadline(expected, phase, 1, tx, 7, Duration::from_millis(1))
-            .await;
-        assert!(matches!(
-            rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-        ));
-    }
-
-    #[tokio::test]
-    async fn missing_topic_hash_frame_fails_the_current_attempt() {
-        let expected = Arc::new(AsyncMutex::new(Some(HashSet::from([TopicKey::new(
-            "agent", "agent-a", "topic-a",
-        )]))));
-        let phase = Arc::new(AtomicU8::new(3));
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        enforce_topic_hash_response_deadline(expected, phase, 3, tx, 8, Duration::from_millis(1))
-            .await;
-        match rx.recv().await.expect("deadline command") {
-            SyncCommand::FailAttemptDetailed {
-                attempt_id, code, ..
-            } => {
-                assert_eq!(attempt_id, 8);
-                assert_eq!(code, "TOPIC_HASH_RESPONSE_TIMEOUT");
-            }
-            _ => panic!("unexpected deadline command"),
-        }
     }
 
     #[test]

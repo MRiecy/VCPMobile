@@ -18,7 +18,6 @@ use tauri::{AppHandle, Runtime};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WARNING_SAMPLES: usize = 8;
 // Waiting concurrency only: large syncs pause the NDJSON reader instead of rejecting more Topics.
 const PULL_WORKER_CONCURRENCY: usize = 4;
@@ -120,15 +119,6 @@ fn http_transport_error(operation: &str, stage: SyncErrorStage, error: &reqwest:
 
 fn protocol_error(stage: SyncErrorStage, message: impl AsRef<str>) -> String {
     encode_local_sync_error("SYNC_PROTOCOL_INVALID", stage, message.as_ref(), Vec::new())
-}
-
-fn response_too_large(message: &str) -> String {
-    encode_local_sync_error(
-        "RESPONSE_TOO_LARGE",
-        SyncErrorStage::Messages,
-        message,
-        Vec::new(),
-    )
 }
 
 struct TopicNDJSONFrame {
@@ -946,7 +936,7 @@ impl PullExecutor {
             })?;
 
             // Preserve the transport allocation whenever possible. If a partial line exists,
-            // copy only the prefix needed to complete that one bounded frame and defer the
+            // copy only the prefix needed to complete that topic frame and defer the
             // remaining zero-copy slice until the frame has been consumed.
             let mut deferred_chunk: Option<Bytes> = None;
             if buffer.is_empty() {
@@ -955,25 +945,11 @@ impl PullExecutor {
                     Err(bytes) => BytesMut::from(bytes.as_ref()),
                 };
             } else if let Some(pos) = chunk.iter().position(|&byte| byte == b'\n') {
-                let completed_len = buffer
-                    .len()
-                    .checked_add(pos + 1)
-                    .ok_or_else(|| response_too_large("NDJSON frame size overflow"))?;
-                if completed_len > MAX_NDJSON_LINE_BYTES {
-                    return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
-                }
                 buffer.extend_from_slice(&chunk[..=pos]);
                 if pos + 1 < chunk.len() {
                     deferred_chunk = Some(chunk.slice(pos + 1..));
                 }
             } else {
-                let next_len = buffer
-                    .len()
-                    .checked_add(chunk.len())
-                    .ok_or_else(|| response_too_large("NDJSON frame size overflow"))?;
-                if next_len > MAX_NDJSON_LINE_BYTES {
-                    return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
-                }
                 buffer.extend_from_slice(&chunk);
                 search_start = buffer.len();
                 continue;
@@ -982,9 +958,6 @@ impl PullExecutor {
             // 逐行解析 NDJSON（优化为从游标处开始扫描，实现 O(N) 性能）
             while let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
                 let line_end = search_start + pos;
-                if line_end + 1 > MAX_NDJSON_LINE_BYTES {
-                    return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
-                }
                 let line = buffer.split_to(line_end + 1);
                 search_start = 0; // 成功切分一行后，后续扫描从头开始（因为 buffer 已被 drain）
                 if buffer.is_empty() {
@@ -1084,19 +1057,11 @@ impl PullExecutor {
             }
 
             // 循环结束后，游标指向 buffer 末尾，下一轮 chunk 进来时只需扫描新增部分
-            if buffer.len() > MAX_NDJSON_LINE_BYTES {
-                return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
-            }
             search_start = buffer.len();
         }
 
         // 处理流结束后 buffer 中残留的非换行数据（兜底）
         if !buffer.is_empty() {
-            if buffer.len() > MAX_NDJSON_LINE_BYTES {
-                return Err(response_too_large(
-                    "NDJSON trailing frame exceeds 32MB budget",
-                ));
-            }
             let trailing = std::mem::take(&mut buffer);
             wait_for_pull_worker_slot(&mut spawn_handles).await;
             let frame = match parse_ndjson_frame(&trailing)? {

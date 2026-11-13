@@ -79,7 +79,7 @@ Wire 1.5 保持双端共用的结构化错误对象，并统一逐项结果与 N
 | `shutdown` | 取消、join、旧会话退出 |
 | `history` | Change Feed 与诊断日志历史 |
 
-超时码必须保留发生阶段。例如 `WS_CONNECT_TIMEOUT` 是 `connect`，`VERSION_CHECK_TIMEOUT` 是 `handshake`，`TOPIC_HASH_RESPONSE_TIMEOUT` 是 `topic_validation`，`FINAL_ACK_TIMEOUT` 是 `finalize`。
+超时码必须保留发生阶段。例如 `WS_CONNECT_TIMEOUT` 是 `connect`，`VERSION_CHECK_TIMEOUT` 是 `handshake`，`FINAL_ACK_TIMEOUT` 是 `finalize`。Manifest 与 Topic Hash 的计算等待不设置固定总时限。
 
 ### 3.3 类别 `kind`
 

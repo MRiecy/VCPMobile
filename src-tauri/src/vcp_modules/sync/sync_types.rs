@@ -971,6 +971,8 @@ pub struct MessageDiffDecision {
     pub topic_id: String,
     pub ok: bool,
     #[serde(default)]
+    pub pull_all: Option<bool>,
+    #[serde(default)]
     pub pull_message_ids: Option<Vec<String>>,
     #[serde(default)]
     pub push_message_ids: Option<Vec<String>>,

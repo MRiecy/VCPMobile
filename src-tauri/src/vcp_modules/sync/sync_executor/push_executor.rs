@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use tauri::{AppHandle, Manager, Runtime};
 
-const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_MESSAGE_ACK_BYTES: usize = 32 * 1024 * 1024;
 const MESSAGE_REQUEST_CHUNK_BYTES: usize = 8 * 1024 * 1024;
 const MESSAGE_PAGE_SIZE: usize = 100;
 const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -145,38 +145,6 @@ struct SerializedTopicMessages {
     line: Vec<u8>,
 }
 
-struct BoundedJsonLine {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-
-impl BoundedJsonLine {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            limit,
-        }
-    }
-
-    fn into_bytes(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl Write for BoundedJsonLine {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.bytes.len().saturating_add(bytes.len()) > self.limit {
-            return Err(std::io::Error::other("JSON line exceeds its byte budget"));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn parse_message_push_results(
     bytes: &[u8],
     expected_topics: &[TopicKey],
@@ -190,9 +158,6 @@ fn parse_message_push_results(
         let line = raw_line.trim();
         if line.is_empty() {
             continue;
-        }
-        if line.len() > MAX_NDJSON_LINE_BYTES {
-            return Err("Batch push response contains a line over 32 MiB".to_string());
         }
         let frame: MessagePushResponseFrame = serde_json::from_str(line)
             .map_err(|error| format!("Batch push response contains malformed NDJSON: {error}"))?;
@@ -274,7 +239,7 @@ async fn send_message_chunk(
         })?;
     let (status, bytes) = read_response_limited(
         response,
-        MAX_NDJSON_LINE_BYTES,
+        MAX_MESSAGE_ACK_BYTES,
         "Batch push",
         SyncErrorStage::Messages,
     )
@@ -678,7 +643,7 @@ async fn serialize_topic_messages(
     let topic_id = &key.topic_id;
     let owner_type = &key.owner_type;
     let owner_id = &key.owner_id;
-    let mut line = BoundedJsonLine::new(MAX_NDJSON_LINE_BYTES);
+    let mut line = Vec::new();
     line.write_all(br#"{"kind":"topic","topicId":"#)
         .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
     serde_json::to_writer(&mut line, topic_id)
@@ -705,9 +670,7 @@ async fn serialize_topic_messages(
                 })?;
             }
             serde_json::to_writer(&mut line, &message).map_err(|error| {
-                format!(
-                    "Message push topic {topic_id} exceeds the 32 MiB line limit or contains invalid data: {error}"
-                )
+                format!("Message push serialization failed for {topic_id}: {error}")
             })?;
             serialized_count = serialized_count
                 .checked_add(1)
@@ -744,9 +707,7 @@ async fn serialize_topic_messages(
     }
     line.write_all(b"]}\n")
         .map_err(|error| format!("Message push suffix failed for {topic_id}: {error}"))?;
-    Ok(SerializedTopicMessages {
-        line: line.into_bytes(),
-    })
+    Ok(SerializedTopicMessages { line })
 }
 
 pub struct PushExecutor;
@@ -1361,13 +1322,6 @@ mod tests {
         }))
         .expect("serialize contradictory result");
         assert!(parse_message_push_results(&contradictory, &expected).is_err());
-    }
-
-    #[test]
-    fn bounded_writer_rejects_overflow_without_partial_write() {
-        let mut tiny = BoundedJsonLine::new(3);
-        assert!(tiny.write_all(b"four").is_err());
-        assert!(tiny.bytes.is_empty());
     }
 
     #[tokio::test]
