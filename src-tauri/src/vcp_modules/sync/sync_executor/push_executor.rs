@@ -473,8 +473,7 @@ async fn load_outbound_message_page(
                 group_id, finish_reason, content_hash, updated_at
          FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-           AND msg_id IN ({placeholders})
-         ORDER BY timestamp ASC, msg_id ASC"
+           AND msg_id IN ({placeholders})"
     );
     let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&key.owner_type)
@@ -546,6 +545,14 @@ async fn load_outbound_message_page(
             content_hash,
         });
     }
+
+    // Sorting this selected page in memory keeps SQLite on the message-ID lookup.
+    // The page boundaries already follow the same timestamp/ID order.
+    messages.sort_unstable_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.id.cmp(&right.id))
+    });
 
     if messages.is_empty() {
         return Ok(messages);
@@ -1401,7 +1408,11 @@ mod tests {
                  ) VALUES ('agent', 'agent-a', 'topic', ?, 'user', 'body', ?, 0, ?, ?, ?)",
             )
             .bind(format!("message-{index:03}"))
-            .bind(index as i64)
+            .bind(if index == MESSAGE_PAGE_SIZE {
+                0
+            } else {
+                index as i64
+            })
             .bind("a".repeat(64))
             .bind(index as i64)
             .bind(index as i64)
@@ -1458,12 +1469,14 @@ mod tests {
             .expect("first page");
         assert_eq!(first.len(), MESSAGE_PAGE_SIZE);
         assert_eq!(first.first().unwrap().id, "message-000");
-        assert_eq!(first.last().unwrap().id, "message-099");
+        assert_eq!(first[1].id, "message-100");
+        assert_eq!(first[2].id, "message-001");
+        assert_eq!(first.last().unwrap().id, "message-098");
         let second = load_outbound_message_page(&mut read_tx, &key, &ordered[MESSAGE_PAGE_SIZE..])
             .await
             .expect("second page");
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].id, "message-100");
+        assert_eq!(second[0].id, "message-099");
         read_tx.commit().await.expect("close valid snapshot");
 
         sqlx::query(
