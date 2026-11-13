@@ -551,11 +551,10 @@ impl PullExecutor {
                 response_stage,
             ));
         }
-        let response_body = String::from_utf8_lossy(&bytes);
         let response: EntityPullResponse = serde_json::from_slice(&bytes).map_err(|error| {
             protocol_error(
                 response_stage,
-                format!("Entity pull returned invalid JSON: {error}; body={response_body}"),
+                format!("Entity pull returned an invalid response: {error}"),
             )
         })?;
         let results = response.results;

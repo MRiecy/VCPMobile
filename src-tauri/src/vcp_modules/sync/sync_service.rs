@@ -3193,18 +3193,15 @@ pub(crate) fn emit_phase3_batch_log<R: Runtime>(
     topics_in_batch: usize,
 ) {
     let message = if total_batches <= 1 {
-        format!(
-            "⚡ [批次同步中] 当前话题已合并为单批次高效同步 (共 1 批 / {} 个话题)。单批最大可容纳 10,000 条消息，批量合并与数据库写入期间进度条暂不递增，此为正常现象而非卡死，请耐心等待...",
-            topics_in_batch
-        )
+        format!("正在同步 {} 个话题", topics_in_batch)
     } else {
         format!(
-            "⚡ [批次同步中] 正在进行第 {}/{} 批话题消息同步 (本批包含 {} 个话题)。批量合并与数据库写入期间进度条将在整批完成后更新，并非卡住，请耐心等待...",
+            "正在同步第 {}/{} 批（本批 {} 个话题）",
             batch_index, total_batches, topics_in_batch
         )
     };
-    emit_sync_log(app_handle, "warning", &message);
-    emit_operator_sync_log(app_handle, session_id, "warning", &message);
+    emit_sync_log(app_handle, "info", &message);
+    emit_operator_sync_log(app_handle, session_id, "info", &message);
 }
 
 pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {

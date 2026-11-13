@@ -1,5 +1,7 @@
 use crate::vcp_modules::agent_types::AgentConfig;
-use crate::vcp_modules::group_types::{deserialize_member_tags, GroupConfig, MemberTags};
+use crate::vcp_modules::group_types::{
+    default_group_mode, default_tag_match_mode, deserialize_member_tags, GroupConfig, MemberTags,
+};
 use serde::{Deserialize, Serialize};
 
 fn deserialize_required_sha256<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -36,9 +38,13 @@ where
 /// =================================================================
 /// vcp_modules/sync_dto.rs - 双端同步标准契约 (The Shared Truth)
 /// =================================================================
+/// 接收端以手机 DTO 投影已知字段，忽略对端新增字段；必填字段仍由 Serde 校验。
+/// 可选字段缺失时沿用手机强类型默认；显式 null 保留 Option 语义。
+/// 兼容字段的容忍是单向的：桌面到手机可缺省，手机到桌面仍构造其所需投影。
+/// 不因手机没有独立业务消费者而删除兼容字段，也不为真实业务身份补造默认值。
 /// 智能体同步数据传输对象
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentSyncDTO {
     pub name: String,
     pub system_prompt: String,
@@ -65,10 +71,12 @@ impl From<&AgentConfig> for AgentSyncDTO {
 
 /// 群组同步数据传输对象
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupSyncDTO {
     pub name: String,
     pub members: Vec<String>,
+    /// 桌面兼容原值，不驱动手机 chatMode；缺失采用既有默认，回推仍携带。
+    #[serde(default = "default_group_mode")]
     pub mode: String,
     #[serde(
         default,
@@ -83,8 +91,13 @@ pub struct GroupSyncDTO {
     pub use_unified_model: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unified_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_tag_match_mode",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub tag_match_mode: Option<String>,
+    /// 桌面兼容时间；缺失使用配置默认 0，不表示已恢复远端真实创建时间。
+    #[serde(default)]
     pub created_at: i64,
 }
 
@@ -107,7 +120,7 @@ impl From<&GroupConfig> for GroupSyncDTO {
 
 /// Agent Topic 同步 DTO (包含 locked/unread)
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentTopicSyncDTO {
     pub id: String,
     pub name: String,
@@ -126,7 +139,7 @@ pub struct AgentTopicSyncDTO {
 
 /// Group Topic 同步 DTO (无 locked/unread)
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct GroupTopicSyncDTO {
     pub id: String,
     pub name: String,
@@ -151,9 +164,11 @@ pub struct AttachmentSyncDTO {
     pub hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extracted_text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 保留桌面兼容投影；接收可缺失，上传无本机帧元数据时明确输出 null。
+    #[serde(default)]
     pub image_frames: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 接收可缺失；上传从本机附件表读取，不能承诺与远端原始时间原样往返。
+    #[serde(default)]
     pub created_at: Option<u64>,
 }
 
@@ -172,7 +187,9 @@ pub struct MessageSyncDTO {
     pub updated_at: u64,
     #[serde(rename = "agentId", default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
-    #[serde(rename = "groupId", default, skip_serializing_if = "Option::is_none")]
+    /// 以下三项接收可缺省，上传按权威 TopicKey 重建；不替代发言者 agentId。
+    /// 单聊 groupId 明确输出 null，不能用空字符串伪造群组身份。
+    #[serde(rename = "groupId", default)]
     pub group_id: Option<String>,
     #[serde(rename = "topicId", default, skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,

@@ -163,7 +163,7 @@ const LOCAL_ERROR_COPY: Record<
     origin: "mobile_ui",
     stage: "finalize",
     retryAction: "after_user_action",
-    message: "同步响应不符合 Wire 1.5 规范，已安全停止",
+    message: "同步响应不符合 Wire 1.6 规范，已安全停止",
     guidance: "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
   },
   START_SYNC_FAILED: {

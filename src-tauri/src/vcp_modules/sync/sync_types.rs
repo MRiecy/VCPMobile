@@ -247,8 +247,8 @@ pub enum EntityPushData {
     GroupTopic(GroupTopicSyncDTO),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+/// 由 EntityPullResult 的外层身份选择 DTO，不能按字段形状猜测类型。
+#[derive(Debug)]
 pub enum EntityPullData {
     Agent(AgentSyncDTO),
     Group(GroupSyncDTO),
@@ -332,37 +332,122 @@ pub struct EntityPushRequest {
     pub items: Vec<EntityPushItem>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "entityType", rename_all = "lowercase", deny_unknown_fields)]
+#[derive(Debug)]
 pub enum EntityPullResult {
     Owner {
-        #[serde(rename = "ownerType")]
         owner_type: OwnerType,
-        #[serde(rename = "ownerId")]
         owner_id: String,
         ok: bool,
-        #[serde(default)]
         data: Option<EntityPullData>,
-        #[serde(default)]
         error: Option<WireSyncError>,
     },
     Topic {
-        #[serde(rename = "ownerType")]
         owner_type: OwnerType,
-        #[serde(rename = "ownerId")]
         owner_id: String,
-        #[serde(rename = "topicId")]
         topic_id: String,
         ok: bool,
-        #[serde(default)]
         data: Option<EntityPullData>,
-        #[serde(default)]
         error: Option<WireSyncError>,
     },
 }
 
+impl<'de> Deserialize<'de> for EntityPullResult {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // 先读取身份，再按身份解析 data。AgentTopic 的字段包含 GroupTopic 的字段，
+        // 忽略新增字段后，untagged 会误选变体并掩盖真正缺失的字段。
+        #[derive(Deserialize)]
+        #[serde(tag = "entityType", rename_all = "lowercase")]
+        enum WireResult {
+            Owner {
+                #[serde(rename = "ownerType")]
+                owner_type: OwnerType,
+                #[serde(rename = "ownerId")]
+                owner_id: String,
+                ok: bool,
+                data: Option<serde_json::Value>,
+                error: Option<WireSyncError>,
+            },
+            Topic {
+                #[serde(rename = "ownerType")]
+                owner_type: OwnerType,
+                #[serde(rename = "ownerId")]
+                owner_id: String,
+                #[serde(rename = "topicId")]
+                topic_id: String,
+                ok: bool,
+                data: Option<serde_json::Value>,
+                error: Option<WireSyncError>,
+            },
+        }
+
+        match WireResult::deserialize(deserializer)? {
+            WireResult::Owner {
+                owner_type,
+                owner_id,
+                ok,
+                data,
+                error,
+            } => {
+                let data = data
+                    .map(|value| match owner_type {
+                        OwnerType::Agent => {
+                            serde_json::from_value(value).map(EntityPullData::Agent)
+                        }
+                        OwnerType::Group => {
+                            serde_json::from_value(value).map(EntityPullData::Group)
+                        }
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        D::Error::custom(format!(
+                            "Entity pull owner/{owner_type}/{owner_id} data: {error}"
+                        ))
+                    })?;
+                Ok(Self::Owner {
+                    owner_type,
+                    owner_id,
+                    ok,
+                    data,
+                    error,
+                })
+            }
+            WireResult::Topic {
+                owner_type,
+                owner_id,
+                topic_id,
+                ok,
+                data,
+                error,
+            } => {
+                let data = data
+                    .map(|value| match owner_type {
+                        OwnerType::Agent => {
+                            serde_json::from_value(value).map(EntityPullData::AgentTopic)
+                        }
+                        OwnerType::Group => {
+                            serde_json::from_value(value).map(EntityPullData::GroupTopic)
+                        }
+                    })
+                    .transpose()
+                    .map_err(|error| {
+                        D::Error::custom(format!(
+                            "Entity pull topic/{owner_type}/{owner_id}/{topic_id} data: {error}"
+                        ))
+                    })?;
+                Ok(Self::Topic {
+                    owner_type,
+                    owner_id,
+                    topic_id,
+                    ok,
+                    data,
+                    error,
+                })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EntityPullResponse {
     pub results: Vec<EntityPullResult>,
 }
@@ -888,7 +973,9 @@ pub struct MessageDiffDecision {
     #[serde(default)]
     pub pull_message_ids: Option<Vec<String>>,
     #[serde(default)]
-    pub push_topic: Option<bool>,
+    pub push_message_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub push_deleted_messages: Option<Vec<MessageDeleteDecision>>,
     #[serde(default)]
     pub delete_messages: Option<Vec<MessageDeleteDecision>>,
     #[serde(default)]
@@ -1003,6 +1090,313 @@ impl DeleteNotificationFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entity_pull_cases() -> Vec<(serde_json::Value, &'static [&'static str])> {
+        let hash = "a".repeat(64);
+        vec![
+            (
+                serde_json::json!({
+                    "entityType": "owner", "ownerType": "agent", "ownerId": "agent-1", "ok": true,
+                    "data": {
+                        "name": "Agent", "systemPrompt": "Prompt", "model": "model",
+                        "temperature": 0.7, "contextTokenLimit": 8192,
+                        "maxOutputTokens": 2048, "streamOutput": true
+                    }
+                }),
+                &[
+                    "name",
+                    "systemPrompt",
+                    "model",
+                    "temperature",
+                    "contextTokenLimit",
+                    "maxOutputTokens",
+                    "streamOutput",
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "entityType": "owner", "ownerType": "group", "ownerId": "group-1", "ok": true,
+                    "data": {
+                        "name": "Group", "members": ["agent-1"], "mode": "sequential",
+                        "memberTags": {}, "groupPrompt": "", "invitePrompt": "Invite",
+                        "useUnifiedModel": false, "unifiedModel": "", "tagMatchMode": "strict",
+                        "createdAt": 1
+                    }
+                }),
+                &["name", "members", "useUnifiedModel"],
+            ),
+            (
+                serde_json::json!({
+                    "entityType": "topic", "ownerType": "agent", "ownerId": "agent-1",
+                    "topicId": "agent-topic", "ok": true,
+                    "data": {
+                        "id": "agent-topic", "ownerId": "agent-1", "name": "Topic",
+                        "createdAt": 1, "locked": true, "unread": false,
+                        "configHash": hash, "updatedAt": 2
+                    }
+                }),
+                &[
+                    "id",
+                    "ownerId",
+                    "name",
+                    "createdAt",
+                    "locked",
+                    "unread",
+                    "configHash",
+                    "updatedAt",
+                ],
+            ),
+            (
+                serde_json::json!({
+                    "entityType": "topic", "ownerType": "group", "ownerId": "group-1",
+                    "topicId": "group-topic", "ok": true,
+                    "data": {
+                        "id": "group-topic", "ownerId": "group-1", "name": "Topic",
+                        "createdAt": 1, "configHash": hash, "updatedAt": 2
+                    }
+                }),
+                &[
+                    "id",
+                    "ownerId",
+                    "name",
+                    "createdAt",
+                    "configHash",
+                    "updatedAt",
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn entity_pull_batch_accepts_desktop_extensions_and_preserves_dto_identity() {
+        let cases = entity_pull_cases();
+        let mut items = vec![cases[0].0.clone(); 9];
+        items.extend(cases.iter().skip(1).map(|(item, _)| item.clone()));
+        for (index, item) in items.iter_mut().enumerate() {
+            item["traceId"] = serde_json::json!("desktop-trace");
+            item["data"]["futureField"] = serde_json::json!({"nested": [1, null, "extra"]});
+            if index < 9 {
+                item["ownerId"] = serde_json::json!(format!("agent-{index}"));
+            }
+        }
+        items[9]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("futureField");
+        items[9]["data"]["enableContextMessageWindow"] = serde_json::json!(true);
+        items[9]["data"]["contextMessageWindowSize"] = serde_json::json!(100);
+        // 即使字段形状满足 AgentTopic，也必须按 ownerType=group 解析。
+        items[11]["data"]["locked"] = serde_json::json!(true);
+        items[11]["data"]["unread"] = serde_json::json!(true);
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "results": items, "serverRevision": 2
+        }))
+        .expect("serialize batch");
+        let response: EntityPullResponse = serde_json::from_slice(&bytes).expect("extended batch");
+        assert_eq!(response.results.len(), 12);
+        for (index, result) in response.results.iter().enumerate() {
+            let (projection, expected) = match result {
+                EntityPullResult::Owner {
+                    data: Some(EntityPullData::Agent(dto)),
+                    ..
+                } if index < 9 => (serde_json::to_value(dto).unwrap(), &cases[0].0["data"]),
+                EntityPullResult::Owner {
+                    data: Some(EntityPullData::Group(dto)),
+                    ..
+                } if index == 9 => (serde_json::to_value(dto).unwrap(), &cases[1].0["data"]),
+                EntityPullResult::Topic {
+                    data: Some(EntityPullData::AgentTopic(dto)),
+                    ..
+                } if index == 10 => (serde_json::to_value(dto).unwrap(), &cases[2].0["data"]),
+                EntityPullResult::Topic {
+                    data: Some(EntityPullData::GroupTopic(dto)),
+                    ..
+                } if index == 11 => (serde_json::to_value(dto).unwrap(), &cases[3].0["data"]),
+                _ => panic!("wrong DTO at batch index {index}: {result:?}"),
+            };
+            assert_eq!(&projection, expected);
+        }
+    }
+
+    #[test]
+    fn entity_pull_rejects_each_missing_or_null_required_dto_field_with_context() {
+        for (item, required) in entity_pull_cases() {
+            for field in required {
+                for use_null in [false, true] {
+                    let mut invalid = item.clone();
+                    if use_null {
+                        invalid["data"][field] = serde_json::Value::Null;
+                    } else {
+                        invalid["data"].as_object_mut().unwrap().remove(*field);
+                    }
+                    let bytes =
+                        serde_json::to_vec(&serde_json::json!({"results": [invalid]})).unwrap();
+                    let error = serde_json::from_slice::<EntityPullResponse>(&bytes)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(error.contains(item["ownerId"].as_str().unwrap()), "{error}");
+                    if use_null {
+                        assert!(error.contains("invalid type"), "{field}: {error}");
+                    } else {
+                        assert!(
+                            error.contains(&format!("missing field `{field}`")),
+                            "{error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn entity_pull_uses_typed_group_defaults_without_hashing_desktop_extensions() {
+        use crate::vcp_modules::sync_hash::HashAggregator;
+
+        let mut item = entity_pull_cases()[1].0.clone();
+        for field in [
+            "memberTags",
+            "groupPrompt",
+            "invitePrompt",
+            "unifiedModel",
+            "tagMatchMode",
+        ] {
+            item["data"].as_object_mut().unwrap().remove(field);
+        }
+        let EntityPullResult::Owner {
+            data: Some(EntityPullData::Group(dto)),
+            ..
+        } = serde_json::from_value(item.clone()).expect("optional fields may be absent")
+        else {
+            panic!("expected group");
+        };
+        assert!(dto.member_tags.is_none());
+        assert!(dto.group_prompt.is_none());
+        assert!(dto.invite_prompt.is_none());
+        assert!(dto.unified_model.is_none());
+        assert_eq!(dto.tag_match_mode.as_deref(), Some("strict"));
+        item["data"]["enableContextMessageWindow"] = serde_json::json!(true);
+        item["data"]["contextMessageWindowSize"] = serde_json::json!(200);
+        let EntityPullResult::Owner {
+            data: Some(EntityPullData::Group(extended)),
+            ..
+        } = serde_json::from_value(item).expect("desktop-only fields are ignored")
+        else {
+            panic!("expected group");
+        };
+        assert_eq!(
+            HashAggregator::compute_group_config_hash(&dto),
+            HashAggregator::compute_group_config_hash(&extended)
+        );
+    }
+
+    #[test]
+    fn entity_pull_group_defaults_do_not_replace_explicit_values_or_invalid_types() {
+        for (value, expected) in [
+            (serde_json::Value::Null, None),
+            (serde_json::json!(""), Some("")),
+            (serde_json::json!("natural"), Some("natural")),
+        ] {
+            let mut item = entity_pull_cases()[1].0.clone();
+            item["data"]["tagMatchMode"] = value;
+            let EntityPullResult::Owner {
+                data: Some(EntityPullData::Group(dto)),
+                ..
+            } = serde_json::from_value(item).expect("explicit optional value")
+            else {
+                panic!("expected group");
+            };
+            assert_eq!(dto.tag_match_mode.as_deref(), expected);
+        }
+        for value in [
+            serde_json::json!(false),
+            serde_json::json!(1),
+            serde_json::json!([]),
+        ] {
+            let mut item = entity_pull_cases()[1].0.clone();
+            item["data"]["tagMatchMode"] = value;
+            assert!(serde_json::from_value::<EntityPullResult>(item).is_err());
+        }
+    }
+
+    #[test]
+    fn group_desktop_compatibility_fields_may_be_omitted_but_remain_in_uploads() {
+        let mut value = entity_pull_cases()[1].0["data"].clone();
+        value.as_object_mut().unwrap().remove("mode");
+        value.as_object_mut().unwrap().remove("createdAt");
+        let dto: GroupSyncDTO =
+            serde_json::from_value(value.clone()).expect("optional desktop fields");
+        let outgoing = serde_json::to_value(dto).expect("desktop projection");
+        assert_eq!(outgoing["mode"], "sequential");
+        assert_eq!(outgoing["createdAt"], 0);
+
+        value["mode"] = serde_json::json!("desktop-mode");
+        value["createdAt"] = serde_json::json!(123);
+        let dto: GroupSyncDTO =
+            serde_json::from_value(value.clone()).expect("preserve desktop values");
+        assert_eq!(dto.mode, "desktop-mode");
+        assert_eq!(dto.created_at, 123);
+        for field in ["mode", "createdAt"] {
+            let mut invalid = value.clone();
+            invalid[field] = serde_json::Value::Null;
+            assert!(serde_json::from_value::<GroupSyncDTO>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn message_and_attachment_compatibility_fields_may_be_omitted_on_pull() {
+        let dto: crate::vcp_modules::sync_dto::MessageSyncDTO = serde_json::from_value(
+            serde_json::json!({
+                "id": "message", "role": "user", "content": "body",
+                "timestamp": 100, "updatedAt": 100, "contentHash": "a".repeat(64),
+                "attachments": [{"type": "text/plain", "name": "file.txt", "size": 1, "hash": "b".repeat(64)}]
+            }),
+        ).expect("receive without desktop compatibility metadata");
+        assert!(dto.group_id.is_none());
+        assert!(dto.topic_id.is_none());
+        assert!(dto.is_group_message.is_none());
+        let attachment = &dto.attachments.as_ref().unwrap()[0];
+        assert!(attachment.image_frames.is_none());
+        assert!(attachment.created_at.is_none());
+    }
+
+    #[test]
+    fn entity_pull_keeps_identity_and_known_value_validation() {
+        for (item, _) in entity_pull_cases() {
+            for field in ["entityType", "ownerType", "ownerId", "ok"] {
+                let mut invalid = item.clone();
+                invalid.as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<EntityPullResult>(invalid).is_err(),
+                    "{field}"
+                );
+            }
+            for field in ["entityType", "ownerType"] {
+                let mut invalid = item.clone();
+                invalid[field] = serde_json::json!("future-kind");
+                assert!(
+                    serde_json::from_value::<EntityPullResult>(invalid).is_err(),
+                    "{field}"
+                );
+            }
+            let mut invalid = item;
+            invalid["data"]["name"] = serde_json::json!(123);
+            assert!(serde_json::from_value::<EntityPullResult>(invalid).is_err());
+        }
+        for (index, field, value) in [
+            (1, "memberTags", serde_json::json!({"": "tag"})),
+            (1, "memberTags", serde_json::json!({"agent-1": ["tag"]})),
+            (2, "configHash", serde_json::json!("not-sha256")),
+            (3, "updatedAt", serde_json::json!(-1)),
+            (3, "updatedAt", serde_json::json!(1_i64 << 53)),
+        ] {
+            let mut invalid = entity_pull_cases()[index].0.clone();
+            invalid["data"][field] = value;
+            assert!(
+                serde_json::from_value::<EntityPullResult>(invalid).is_err(),
+                "{field}"
+            );
+        }
+    }
 
     #[test]
     fn canonical_json_escapes_dynamic_keys_and_is_injective_for_member_tags() {

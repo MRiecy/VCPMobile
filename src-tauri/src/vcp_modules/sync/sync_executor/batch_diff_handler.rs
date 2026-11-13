@@ -1,3 +1,4 @@
+use super::push_executor::MessagePushSelection;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync::sync_transfer::SyncHttpClient;
 use crate::vcp_modules::sync_error::{
@@ -104,7 +105,8 @@ struct TopicBatchFailure {
 #[derive(Debug, PartialEq, Eq)]
 struct TopicDecision {
     pull_message_ids: Vec<String>,
-    push_topic: bool,
+    push_message_ids: Vec<String>,
+    push_deleted_messages: Vec<MessageDeleteDecision>,
     delete_messages: Vec<MessageDeleteDecision>,
 }
 
@@ -115,7 +117,8 @@ fn parse_topic_decision(
     let topic_id = &topic.topic_id;
     if !decision.ok {
         if decision.pull_message_ids.is_some()
-            || decision.push_topic.is_some()
+            || decision.push_message_ids.is_some()
+            || decision.push_deleted_messages.is_some()
             || decision.delete_messages.is_some()
         {
             return Err(Phase3ProtocolError::for_topic(
@@ -166,13 +169,41 @@ fn parse_topic_decision(
             ));
         }
     }
-    let push_topic = decision.push_topic.ok_or_else(|| {
+    let push_message_ids = decision.push_message_ids.as_ref().ok_or_else(|| {
         Phase3ProtocolError::for_topic(
             "PHASE3_DECISION_INVALID",
-            format!("Phase 3 decision for {topic_id} requires boolean pushTopic"),
+            format!("Phase 3 decision for {topic_id} requires pushMessageIds"),
             topic_id,
         )
     })?;
+    for message_id in push_message_ids {
+        if message_id.is_empty() || !seen.insert(message_id) {
+            return Err(Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 pushMessageIds for {topic_id} contains an empty, duplicate or overlapping id"),
+                topic_id,
+            ));
+        }
+    }
+    let push_deleted_messages = decision.push_deleted_messages.as_ref().ok_or_else(|| {
+        Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_INVALID",
+            format!("Phase 3 decision for {topic_id} requires pushDeletedMessages"),
+            topic_id,
+        )
+    })?;
+    for tombstone in push_deleted_messages {
+        if tombstone.msg_id.is_empty()
+            || !(0..=MAX_SAFE_JSON_INTEGER).contains(&tombstone.deleted_at)
+            || !seen.insert(&tombstone.msg_id)
+        {
+            return Err(Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 pushDeletedMessages for {topic_id} contains an invalid, duplicate or overlapping tombstone"),
+                topic_id,
+            ));
+        }
+    }
     let delete_messages = decision.delete_messages.as_ref().ok_or_else(|| {
         Phase3ProtocolError::for_topic(
             "PHASE3_DECISION_INVALID",
@@ -202,7 +233,7 @@ fn parse_topic_decision(
             return Err(Phase3ProtocolError::for_topic(
                 "PHASE3_DECISION_INVALID",
                 format!(
-                    "Phase 3 decision for {topic_id} contains {} in both pullMessageIds and deleteMessages",
+                    "Phase 3 decision for {topic_id} contains {} in deleteMessages and another action",
                     item.msg_id
                 ),
                 topic_id,
@@ -221,7 +252,8 @@ fn parse_topic_decision(
     }
     Ok(TopicDecision {
         pull_message_ids: pull_message_ids.clone(),
-        push_topic,
+        push_message_ids: push_message_ids.clone(),
+        push_deleted_messages: push_deleted_messages.clone(),
         delete_messages: delete_messages.clone(),
     })
 }
@@ -383,7 +415,7 @@ impl BatchDiffHandler {
 
         {
             // 分类 topics: push、pull、delete 可以在同一个 topic 上组合出现。
-            let mut push_topics: Vec<TopicKey> = Vec::new();
+            let mut push_batch: Vec<MessagePushSelection> = Vec::new();
             let mut pull_batch: Vec<(TopicKey, Vec<String>)> = Vec::new();
             let mut delete_batch: Vec<(TopicKey, Vec<MessageDeleteDecision>)> = Vec::new();
 
@@ -396,7 +428,8 @@ impl BatchDiffHandler {
                     }
                 };
                 let to_pull_ids = decision.pull_message_ids;
-                let to_push = decision.push_topic;
+                let to_push = !decision.push_message_ids.is_empty()
+                    || !decision.push_deleted_messages.is_empty();
                 let to_delete = decision.delete_messages;
 
                 // Phase 2.5 已判定该 topic 聚合哈希有变化；即使消息 diff 是合法
@@ -412,7 +445,11 @@ impl BatchDiffHandler {
                 }
 
                 if to_push {
-                    push_topics.push(topic.clone());
+                    push_batch.push(MessagePushSelection {
+                        topic: topic.clone(),
+                        message_ids: decision.push_message_ids,
+                        deleted_messages: decision.push_deleted_messages,
+                    });
                 }
                 if !to_pull_ids.is_empty() {
                     pull_batch.push((topic.clone(), to_pull_ids));
@@ -422,7 +459,11 @@ impl BatchDiffHandler {
                 }
             }
 
-            let has_push = !push_topics.is_empty();
+            let push_topics = push_batch
+                .iter()
+                .map(|item| item.topic.clone())
+                .collect::<Vec<_>>();
+            let has_push = !push_batch.is_empty();
             let has_pull = !pull_batch.is_empty();
             let has_delete = !delete_batch.is_empty();
 
@@ -458,12 +499,10 @@ impl BatchDiffHandler {
                     tracker.mark_modified(topic).await;
                 }
 
-                if has_pull {
-                    let pull_topics = pull_batch
-                        .iter()
-                        .map(|(topic, _)| topic.clone())
-                        .collect::<Vec<_>>();
-                    let pull_result = PullExecutor::pull_messages_batch(
+                // Diff selects disjoint upload/download messages. Neither direction needs
+                // the other direction's body, so run both within the same batch owner.
+                let (pull_result, push_result) = tokio::join!(
+                    PullExecutor::pull_messages_batch(
                         app_handle,
                         http_client,
                         base_url,
@@ -471,9 +510,22 @@ impl BatchDiffHandler {
                         &pull_batch,
                         write_queue,
                         prerender_enabled,
-                    )
-                    .await
-                    .map(|results| {
+                    ),
+                    PushExecutor::push_messages_batch(
+                        app_handle,
+                        http_client,
+                        base_url,
+                        token,
+                        &push_batch,
+                    ),
+                );
+
+                if has_pull {
+                    let pull_topics = pull_batch
+                        .iter()
+                        .map(|(topic, _)| topic.clone())
+                        .collect::<Vec<_>>();
+                    let pull_result = pull_result.map(|results| {
                         let warning_count = results
                             .iter()
                             .map(|result| result.legacy_attachment_warnings)
@@ -524,26 +576,14 @@ impl BatchDiffHandler {
                         failed_topic_ids.sort();
                         return Err(Phase3ProtocolError {
                             code: "PHASE3_PULL_FAILED".to_string(),
-                            message: format!(
-                                "Phase 3 pull write drain failed before merged push: {message}"
-                            ),
+                            message: format!("Phase 3 pull write drain failed: {message}"),
                             failed_topic_ids,
                         });
                     }
                 }
 
-                // At most one Phase 3 HTTP batch may be in flight. Pull winners are durable
-                // before this whole-topic push reads the merged Mobile view.
                 if has_push {
-                    let push_result = PushExecutor::push_messages_batch(
-                        app_handle,
-                        http_client,
-                        base_url,
-                        token,
-                        &push_topics,
-                    )
-                    .await
-                    .map(|results| {
+                    let push_result = push_result.map(|results| {
                         results
                             .into_iter()
                             .map(|result| TopicBatchOutcome {
@@ -635,7 +675,8 @@ mod tests {
             topic_id: topic_id.to_string(),
             ok: true,
             pull_message_ids: Some(Vec::new()),
-            push_topic: Some(false),
+            push_message_ids: Some(Vec::new()),
+            push_deleted_messages: Some(Vec::new()),
             delete_messages: Some(Vec::new()),
             error: None,
         }

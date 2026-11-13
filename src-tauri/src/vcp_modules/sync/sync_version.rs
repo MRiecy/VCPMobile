@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 
-pub(super) const WIRE_PROTOCOL_VERSION: &str = "1.5";
+pub(super) const WIRE_PROTOCOL_VERSION: &str = "1.6";
 const MAX_VERSION_TOKEN_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Copy, Deserialize, Eq, Hash, PartialEq, Serialize)]

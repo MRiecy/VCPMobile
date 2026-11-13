@@ -875,14 +875,15 @@ mod tests {
             )
             .expect("read preserved local state");
         assert_eq!(stored, (raw, 7));
-        let (mode, hash): (String, String) = connection
+        let (mode, tag_match_mode, hash): (String, String, String) = connection
             .query_row(
-                "SELECT mode,config_hash FROM groups WHERE group_id='group'",
+                "SELECT mode,tag_match_mode,config_hash FROM groups WHERE group_id='group'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("read remote shared state");
         assert_eq!(mode, "sequential");
+        assert_eq!(tag_match_mode, "strict");
         assert_eq!(hash, HashAggregator::compute_group_config_hash(&dto));
     }
 

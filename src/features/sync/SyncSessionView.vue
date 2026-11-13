@@ -49,6 +49,13 @@ const averageTransferSpeed = computed(() => {
   return `${Math.round(bytesPerSecond)} B/s`;
 });
 
+const formatTransferBytes = (bytes: number) => {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+  if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(2)} MB`;
+  if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(2)} KB`;
+  return `${bytes} B`;
+};
+
 const phaseLabel = computed(() => {
   const map: Record<string, string> = {
     'initialization': '初始化',
@@ -368,6 +375,16 @@ const handlePrerenderToggle = async (val: boolean) => {
                   <div class="text-[10px] text-white/40">平均同步速度</div>
                   <div class="mt-1 font-mono text-xs tabular-nums text-white/75">{{ averageTransferSpeed }}</div>
                 </div>
+              </div>
+
+              <div
+                v-if="store.transfer"
+                class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-white/50"
+                role="group"
+                aria-label="累计同步流量"
+              >
+                <span>已下载 <span class="font-mono tabular-nums text-white/75">{{ formatTransferBytes(store.transfer.downloadedBytes) }}</span></span>
+                <span>已上传 <span class="font-mono tabular-nums text-white/75">{{ formatTransferBytes(store.transfer.uploadedBytes) }}</span></span>
               </div>
 
               <!-- 统计条：messages 阶段起随进度事件实时跳动；终态即使全零也展示 -->

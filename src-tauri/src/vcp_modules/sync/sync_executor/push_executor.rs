@@ -10,7 +10,7 @@ use crate::vcp_modules::sync_error::{
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_types::{
     AvatarOwnerType, AvatarPushResponse, EntityPushData, EntityPushItem, EntityPushRequest,
-    EntityPushResponse, EntitySelector, MessagePushResponseFrame, OwnerType,
+    EntityPushResponse, EntitySelector, MessageDeleteDecision, MessagePushResponseFrame, OwnerType,
 };
 use crate::vcp_modules::topic_types::TopicKey;
 use futures_util::StreamExt;
@@ -133,6 +133,12 @@ pub struct PushBatchResult {
     pub topic: TopicKey,
     pub success: bool,
     pub error: Option<String>,
+}
+
+pub struct MessagePushSelection {
+    pub topic: TopicKey,
+    pub message_ids: Vec<String>,
+    pub deleted_messages: Vec<MessageDeleteDecision>,
 }
 
 struct SerializedTopicMessages {
@@ -414,40 +420,69 @@ async fn send_entity_items(
     Ok(())
 }
 
+async fn load_outbound_message_order(
+    tx: &mut Transaction<'_, Sqlite>,
+    key: &TopicKey,
+    message_ids: &[String],
+) -> Result<Vec<String>, String> {
+    let mut ordered = Vec::<(i64, String)>::with_capacity(message_ids.len());
+    for ids in message_ids.chunks(MESSAGE_PAGE_SIZE) {
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!(
+            "SELECT timestamp, msg_id FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND deleted_at IS NULL AND msg_id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_as::<_, (i64, String)>(sqlx::AssertSqlSafe(sql))
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id);
+        for id in ids {
+            query = query.bind(id);
+        }
+        let rows = query
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| error.to_string())?;
+        if rows.len() != ids.len() {
+            return Err(encode_local_sync_error(
+                "SYNC_SNAPSHOT_STALE",
+                SyncErrorStage::Messages,
+                "Selected upload messages changed after message diff",
+                vec![key.topic_id.clone()],
+            ));
+        }
+        ordered.extend(rows);
+    }
+    ordered.sort_unstable();
+    Ok(ordered.into_iter().map(|(_, id)| id).collect())
+}
+
 async fn load_outbound_message_page(
     tx: &mut Transaction<'_, Sqlite>,
     key: &TopicKey,
-    cursor: Option<(i64, &str)>,
+    message_ids: &[String],
 ) -> Result<Vec<MessageSyncDTO>, String> {
+    if message_ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let topic_id = &key.topic_id;
-    let mut query = if cursor.is_some() {
-        sqlx::query(
-            "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, content_hash, updated_at
-             FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
-             ORDER BY timestamp ASC, msg_id ASC
-             LIMIT ?",
-        )
-    } else {
-        sqlx::query(
-            "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, content_hash, updated_at
-             FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-             ORDER BY timestamp ASC, msg_id ASC
-             LIMIT ?",
-        )
-    };
-    query = query
+    let placeholders = vec!["?"; message_ids.len()].join(",");
+    let sql = format!(
+        "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
+                group_id, finish_reason, content_hash, updated_at
+         FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+           AND msg_id IN ({placeholders})
+         ORDER BY timestamp ASC, msg_id ASC"
+    );
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(topic_id);
-    if let Some((timestamp, message_id)) = cursor {
-        query = query.bind(timestamp).bind(timestamp).bind(message_id);
+    for id in message_ids {
+        query = query.bind(id);
     }
-    query = query.bind(MESSAGE_PAGE_SIZE as i64);
     let rows = query
         .fetch_all(&mut **tx)
         .await
@@ -476,9 +511,9 @@ async fn load_outbound_message_page(
         })?;
         let updated_at = u64::try_from(updated_at)
             .map_err(|_| format!("Message {topic_id}/{message_id} has a negative update time"))?;
-        let is_group_message: i64 = row.try_get("is_group_message").map_err(|error| {
-            format!("Message group flag decode failed for {topic_id}/{message_id}: {error}")
-        })?;
+        // 桌面到手机允许缺失兼容标记，历史镜像列可能为空或为默认 false。
+        // 上传必须按实际会话身份重建，不能因缺省把桌面需要的字段一起省略。
+        let is_group_message = key.owner_type == "group";
         let content_hash: String = row.try_get("content_hash").map_err(|error| {
             format!("Message content hash decode failed for {topic_id}/{message_id}: {error}")
         })?;
@@ -501,11 +536,9 @@ async fn load_outbound_message_page(
             agent_id: row
                 .try_get("agent_id")
                 .map_err(|error| format!("Message agent decode failed for {topic_id}: {error}"))?,
-            group_id: row
-                .try_get("group_id")
-                .map_err(|error| format!("Message group decode failed for {topic_id}: {error}"))?,
+            group_id: is_group_message.then(|| key.owner_id.clone()),
             topic_id: Some(topic_id.to_string()),
-            is_group_message: (is_group_message != 0).then_some(true),
+            is_group_message: Some(is_group_message),
             finish_reason: row.try_get("finish_reason").map_err(|error| {
                 format!("Message finish reason decode failed for {topic_id}: {error}")
             })?,
@@ -578,6 +611,8 @@ async fn load_outbound_message_page(
             size.ok_or_else(|| format!("Attachment {relation_hash} has no local size metadata"))?,
         )
         .map_err(|_| format!("Attachment {relation_hash} has a negative size"))?;
+        // 兼容输出保留本机已有元数据；接收可缺省不意味着上传删除字段。
+        // createdAt 来自本机表，imageFrames 无值时由 DTO 明确序列化为 null。
         let created_at: Option<i64> = row.try_get("created_at").map_err(|error| {
             format!("Attachment timestamp decode failed for {relation_hash}: {error}")
         })?;
@@ -630,8 +665,9 @@ async fn load_outbound_message_page(
 
 async fn serialize_topic_messages(
     tx: &mut Transaction<'_, Sqlite>,
-    key: &TopicKey,
+    selection: &MessagePushSelection,
 ) -> Result<SerializedTopicMessages, String> {
+    let key = &selection.topic;
     let topic_id = &key.topic_id;
     let owner_type = &key.owner_type;
     let owner_id = &key.owner_id;
@@ -651,29 +687,11 @@ async fn serialize_topic_messages(
     line.write_all(b",\"messages\":[")
         .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
 
-    let mut cursor: Option<(i64, String)> = None;
+    let ordered_ids = load_outbound_message_order(tx, key, &selection.message_ids).await?;
     let mut serialized_count = 0usize;
-    loop {
-        let page = load_outbound_message_page(
-            tx,
-            key,
-            cursor
-                .as_ref()
-                .map(|(timestamp, message_id)| (*timestamp, message_id.as_str())),
-        )
-        .await?;
-        if page.is_empty() {
-            break;
-        }
-        let page_len = page.len();
+    for ids in ordered_ids.chunks(MESSAGE_PAGE_SIZE) {
+        let page = load_outbound_message_page(tx, key, ids).await?;
         for message in page {
-            let timestamp = i64::try_from(message.timestamp).map_err(|_| {
-                format!(
-                    "Outbound message {} timestamp exceeds the supported range",
-                    message.id
-                )
-            })?;
-            let next_cursor = (timestamp, message.id.clone());
             if serialized_count > 0 {
                 line.write_all(b",").map_err(|error| {
                     format!("Message push separator failed for {topic_id}: {error}")
@@ -687,40 +705,14 @@ async fn serialize_topic_messages(
             serialized_count = serialized_count
                 .checked_add(1)
                 .ok_or_else(|| "Message push count overflow".to_string())?;
-            cursor = Some(next_cursor);
-        }
-        if page_len < MESSAGE_PAGE_SIZE {
-            break;
         }
     }
     line.write_all(b"],\"deletedMessages\":[")
         .map_err(|error| format!("Message tombstone prefix failed for {topic_id}: {error}"))?;
     let mut tombstone_count = 0usize;
-    let mut tombstones = sqlx::query(
-        "SELECT msg_id, deleted_at FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NOT NULL
-         ORDER BY deleted_at ASC, msg_id ASC",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(topic_id)
-    .fetch(&mut **tx);
-    while let Some(row) = tombstones.next().await {
-        let row =
-            row.map_err(|error| format!("Message tombstone query failed for {topic_id}: {error}"))?;
-        let message_id: String = row.try_get("msg_id").map_err(|error| {
-            format!("Message tombstone id decode failed for {topic_id}: {error}")
-        })?;
-        let deleted_at: i64 = row.try_get("deleted_at").map_err(|error| {
-            format!(
-                "Message tombstone timestamp decode failed for {topic_id}/{message_id}: {error}"
-            )
-        })?;
-        if message_id.is_empty() || deleted_at < 0 {
-            return Err(format!(
-                "Message tombstone {topic_id}/{message_id} has an invalid identity or timestamp"
-            ));
-        }
+    for tombstone in &selection.deleted_messages {
+        let message_id = &tombstone.msg_id;
+        let deleted_at = tombstone.deleted_at;
         if tombstone_count > 0 {
             line.write_all(b",").map_err(|error| {
                 format!("Message tombstone separator failed for {topic_id}: {error}")
@@ -743,7 +735,6 @@ async fn serialize_topic_messages(
             .checked_add(1)
             .ok_or_else(|| "Message tombstone count overflow".to_string())?;
     }
-    drop(tombstones);
     line.write_all(b"]}\n")
         .map_err(|error| format!("Message push suffix failed for {topic_id}: {error}"))?;
     Ok(SerializedTopicMessages {
@@ -996,13 +987,16 @@ impl PushExecutor {
         client: &SyncHttpClient,
         http_url: &str,
         sync_token: &str,
-        topic_keys: &[TopicKey],
+        selections: &[MessagePushSelection],
     ) -> Result<Vec<PushBatchResult>, String> {
-        if topic_keys.is_empty() {
+        if selections.is_empty() {
             return Ok(Vec::new());
         }
-        let requested_topics = topic_keys.iter().cloned().collect::<HashSet<_>>();
-        if requested_topics.len() != topic_keys.len()
+        let requested_topics = selections
+            .iter()
+            .map(|item| &item.topic)
+            .collect::<HashSet<_>>();
+        if requested_topics.len() != selections.len()
             || requested_topics.iter().any(|topic| !topic.is_valid())
         {
             return Err("Message push topics must have unique valid identities".to_string());
@@ -1013,9 +1007,9 @@ impl PushExecutor {
         let mut request_body = Vec::new();
         let mut request_topics = Vec::new();
 
-        // Each topic is preflighted, paged, and serialized directly into a bounded writer. This
-        // avoids retaining a full history, a cloned DTO tree, and a JSON String simultaneously.
-        for key in topic_keys {
+        // Only the exact diff selection is read, in the original timestamp/message-ID order.
+        for selection in selections {
+            let key = &selection.topic;
             let topic_id = &key.topic_id;
             let mut read_tx =
                 db.pool.begin().await.map_err(|error| {
@@ -1034,7 +1028,7 @@ impl PushExecutor {
             if !topic_exists {
                 return Err(format!("Message push topic {topic_id} is missing locally"));
             }
-            let serialized = serialize_topic_messages(&mut read_tx, key).await?;
+            let serialized = serialize_topic_messages(&mut read_tx, selection).await?;
             read_tx.commit().await.map_err(|error| {
                 format!("Message push snapshot close failed for {topic_id}: {error}")
             })?;
@@ -1086,7 +1080,7 @@ impl PushExecutor {
         log::info!(
             "[PushExecutor] Batch push completed: {}/{} topics",
             ok_count,
-            topic_keys.len()
+            selections.len()
         );
         Ok(results)
     }
@@ -1148,6 +1142,93 @@ mod tests {
             generate_owner_push_idempotency_key(OwnerType::Agent, "a", "bc", 100),
             generate_owner_push_idempotency_key(OwnerType::Agent, "ab", "c", 100)
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_projection_rebuilds_identity_and_keeps_attachment_metadata() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("projection database");
+        sqlx::query(
+            "CREATE TABLE messages (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                role TEXT, name TEXT, agent_id TEXT, content TEXT, timestamp BIGINT,
+                is_group_message INTEGER, group_id TEXT, finish_reason TEXT,
+                content_hash TEXT, updated_at BIGINT, deleted_at BIGINT
+             );
+             CREATE TABLE message_attachments (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                hash TEXT, display_name TEXT, attachment_order INTEGER
+             );
+             CREATE TABLE attachments (
+                hash TEXT, mime_type TEXT, size BIGINT, extracted_text TEXT,
+                image_frames TEXT, created_at BIGINT
+             );",
+        )
+        .execute(&pool)
+        .await
+        .expect("projection schema");
+        for (owner_type, old_flag, attachment_hash, frames) in [
+            ("agent", 1, "b".repeat(64), None),
+            ("group", 0, "c".repeat(64), Some(r#"["desktop-frame"]"#)),
+        ] {
+            sqlx::query(
+                "INSERT INTO messages VALUES (?, 'owner', 'topic', 'message',
+                 'assistant', 'Speaker', 'speaker', 'body', 100, ?, 'stale-group',
+                 'stop', ?, 100, NULL)",
+            )
+            .bind(owner_type)
+            .bind(old_flag)
+            .bind("a".repeat(64))
+            .execute(&pool)
+            .await
+            .expect("message with stale compatibility mirrors");
+            sqlx::query("INSERT INTO attachments VALUES (?, 'text/plain', 1, NULL, ?, 7)")
+                .bind(&attachment_hash)
+                .bind(frames)
+                .execute(&pool)
+                .await
+                .expect("local attachment metadata");
+            sqlx::query("INSERT INTO message_attachments VALUES (?, 'owner', 'topic', 'message', ?, 'file.txt', 0)")
+                .bind(owner_type)
+                .bind(&attachment_hash)
+                .execute(&pool)
+                .await
+                .expect("attachment relation");
+            let key = TopicKey::new(owner_type, "owner", "topic");
+            let mut tx = pool.begin().await.expect("projection snapshot");
+            let messages = load_outbound_message_page(&mut tx, &key, &["message".into()])
+                .await
+                .expect("build actual upload DTO");
+            let wire = serde_json::to_value(&messages[0]).expect("serialize actual upload");
+            assert!(wire.as_object().unwrap().contains_key("groupId"));
+            assert_eq!(
+                wire["groupId"],
+                if owner_type == "group" {
+                    serde_json::json!("owner")
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(wire["topicId"], "topic");
+            assert_eq!(wire["isGroupMessage"], owner_type == "group");
+            assert_eq!(wire["agentId"], "speaker");
+            assert_eq!(wire["contentHash"], "a".repeat(64));
+            let attachment = &wire["attachments"][0];
+            assert!(attachment.as_object().unwrap().contains_key("imageFrames"));
+            assert_eq!(
+                attachment["imageFrames"],
+                if frames.is_some() {
+                    serde_json::json!(["desktop-frame"])
+                } else {
+                    serde_json::Value::Null
+                }
+            );
+            assert_eq!(attachment["createdAt"], 7);
+            tx.commit().await.expect("close projection snapshot");
+        }
     }
 
     #[tokio::test]
@@ -1341,15 +1422,22 @@ mod tests {
 
         let mut read_tx = pool.begin().await.expect("begin snapshot");
         let key = topic("topic");
-        let serialized = serialize_topic_messages(&mut read_tx, &key)
+        let selection = MessagePushSelection {
+            topic: key.clone(),
+            message_ids: vec!["message-100".into(), "message-000".into()],
+            deleted_messages: vec![MessageDeleteDecision {
+                msg_id: "message-deleted".into(),
+                deleted_at: 1234,
+            }],
+        };
+        let serialized = serialize_topic_messages(&mut read_tx, &selection)
             .await
             .expect("serialize topic snapshot");
         let frame: serde_json::Value =
             serde_json::from_slice(&serialized.line).expect("serialized topic frame");
-        assert_eq!(
-            frame["messages"].as_array().unwrap().len(),
-            MESSAGE_PAGE_SIZE + 1
-        );
+        assert_eq!(frame["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(frame["messages"][0]["id"], "message-000");
+        assert_eq!(frame["messages"][1]["id"], "message-100");
         assert!(frame["messages"]
             .as_array()
             .unwrap()
@@ -1358,13 +1446,20 @@ mod tests {
         assert_eq!(frame["deletedMessages"].as_array().unwrap().len(), 1);
         assert_eq!(frame["deletedMessages"][0]["msgId"], "message-deleted");
         assert_eq!(frame["deletedMessages"][0]["deletedAt"], 1234);
-        let first = load_outbound_message_page(&mut read_tx, &key, None)
+        let ids = (0..=MESSAGE_PAGE_SIZE)
+            .rev()
+            .map(|index| format!("message-{index:03}"))
+            .collect::<Vec<_>>();
+        let ordered = load_outbound_message_order(&mut read_tx, &key, &ids)
+            .await
+            .expect("order selected messages");
+        let first = load_outbound_message_page(&mut read_tx, &key, &ordered[..MESSAGE_PAGE_SIZE])
             .await
             .expect("first page");
         assert_eq!(first.len(), MESSAGE_PAGE_SIZE);
         assert_eq!(first.first().unwrap().id, "message-000");
         assert_eq!(first.last().unwrap().id, "message-099");
-        let second = load_outbound_message_page(&mut read_tx, &key, Some((99, "message-099")))
+        let second = load_outbound_message_page(&mut read_tx, &key, &ordered[MESSAGE_PAGE_SIZE..])
             .await
             .expect("second page");
         assert_eq!(second.len(), 1);
@@ -1381,9 +1476,11 @@ mod tests {
         .await
         .expect("poison outbound hash");
         let mut invalid_tx = pool.begin().await.expect("begin invalid snapshot");
-        assert!(load_outbound_message_page(&mut invalid_tx, &key, None)
-            .await
-            .expect_err("uppercase contentHash must fail")
-            .contains("lowercase 64-character contentHash"));
+        assert!(
+            load_outbound_message_page(&mut invalid_tx, &key, &ordered[..1])
+                .await
+                .expect_err("uppercase contentHash must fail")
+                .contains("lowercase 64-character contentHash")
+        );
     }
 }
