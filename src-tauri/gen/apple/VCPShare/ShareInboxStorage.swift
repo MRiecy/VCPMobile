@@ -15,7 +15,7 @@ final class ShareInboxStorage {
     func begin() throws -> Delivery {
         guard let group = Bundle.main.object(forInfoDictionaryKey: "VCPShareAppGroup") as? String,
               let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
-            throw failure("本次安装的共享容器不可用，请检查主应用与分享扩展的 App Group 签名。")
+            throw failure("当前安装无法从其他 App 接收分享。请打开 VCPMobile，直接选择文件或粘贴文字。")
         }
         root = container.appendingPathComponent("ShareInbox", isDirectory: true)
         guard let root else { throw failure("共享目录不可用") }

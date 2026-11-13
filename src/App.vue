@@ -74,10 +74,10 @@ const handleShareIntent = () => {
 };
 const refreshShare = () => {
   if (lifecycleStore.state !== "READY" || (!isAndroid && !isIOS)) return;
-  // Renew presentation at this entry, before a slow Android file handoff. Its
-  // eventual completion must not erase a close made while processing the share.
-  const pending = isAndroid ? Promise.all([shareStore.refresh(), shareStore.pollAndroid()]) : shareStore.refresh();
-  void pending.catch(shareStore.notify);
+  void shareStore.refresh().catch(shareStore.notify);
+};
+const handleShareInboxChanged = () => {
+  if (lifecycleStore.state === "READY") void shareStore.readCurrent().catch(shareStore.notify);
 };
 watch(() => lifecycleStore.state, state => { if (state === "READY") refreshShare(); });
 watch(() => lifecycleStore.lifecycleSnapshot?.phase, (phase, previous) => {
@@ -490,7 +490,7 @@ onMounted(async () => {
   }
   if (isIOS) {
     window.addEventListener("vcp-notification-pending", readPendingNotification);
-    window.addEventListener("vcp-share-inbox-changed", refreshShare);
+    window.addEventListener("vcp-share-inbox-changed", handleShareInboxChanged);
     void readPendingNotification();
   }
   refreshShare();
@@ -547,7 +547,7 @@ onUnmounted(() => {
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
-  window.removeEventListener("vcp-share-inbox-changed", refreshShare);
+  window.removeEventListener("vcp-share-inbox-changed", handleShareInboxChanged);
   window.removeEventListener("vcp-notification-click", handleNotificationClick);
   window.removeEventListener("vcp-notification-pending", readPendingNotification);
   leftSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);

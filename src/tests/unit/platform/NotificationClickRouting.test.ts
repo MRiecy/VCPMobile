@@ -13,6 +13,7 @@ const context = vi.hoisted(() => ({
   voice: {} as { active: boolean },
   closeTopModal: vi.fn(() => false),
   shareRefresh: vi.fn(async () => {}),
+  shareRead: vi.fn(async () => {}),
   sharePoll: vi.fn(async () => {}),
 }));
 const native = vi.hoisted(() => ({ ios: true }));
@@ -37,7 +38,7 @@ vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStor
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({ agents: [], groups: [] }) }));
 vi.mock('../../../core/stores/shareStore', () => ({ useShareStore: () => ({
   current: null, failures: [], selectorOpen: false, busy: false,
-  refresh: context.shareRefresh, pollAndroid: context.sharePoll, notify: () => {},
+  refresh: context.shareRefresh, readCurrent: context.shareRead, pollAndroid: context.sharePoll, notify: () => {},
 }) }));
 vi.mock('../../../features/cli/vcpCliStore', () => ({ useVcpCliStore: () => ({}) }));
 vi.mock('vue-router', () => ({ useRouter: () => ({ isReady: async () => {}, afterEach: () => () => {} }) }));
@@ -97,6 +98,7 @@ beforeEach(() => {
   context.voice = reactive({ active: false });
   context.closeTopModal.mockReset().mockReturnValue(false);
   context.shareRefresh.mockReset().mockResolvedValue(undefined);
+  context.shareRead.mockReset().mockResolvedValue(undefined);
   context.sharePoll.mockReset().mockResolvedValue(undefined);
   pendingIOSClick = undefined;
   mockInvoke(pendingCommand, takePendingClick);
@@ -113,17 +115,35 @@ describe('root share recovery', () => {
     native.ios = false;
     context.lifecycle.state = 'READY';
     const handoff = deferred<void>();
-    context.sharePoll.mockImplementationOnce(() => handoff.promise);
+    context.shareRefresh.mockImplementationOnce(() => handoff.promise);
     mountApp();
     await flushPromises();
     expect(context.shareRefresh).toHaveBeenCalledTimes(1);
-    expect(context.sharePoll).toHaveBeenCalledTimes(1);
+    expect(context.sharePoll).not.toHaveBeenCalled();
 
     // A user may close the selector now. Completing intake must not renew the
     // entry intent and reopen that retained share a second time.
     handoff.resolve();
     await flushPromises();
     expect(context.shareRefresh).toHaveBeenCalledTimes(1);
+    expect(context.sharePoll).not.toHaveBeenCalled();
+  });
+
+  it('reads iOS inbox changes without renewing the foreground presentation intent', async () => {
+    mountApp();
+    window.dispatchEvent(new Event('vcp-share-inbox-changed'));
+    await flushPromises();
+    expect(context.shareRead).not.toHaveBeenCalled();
+
+    context.lifecycle.state = 'READY';
+    await flushPromises();
+    expect(context.shareRefresh).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event('vcp-share-inbox-changed'));
+    await flushPromises();
+
+    expect(context.shareRead).toHaveBeenCalledTimes(1);
+    expect(context.shareRefresh).toHaveBeenCalledTimes(1);
+    expect(context.sharePoll).not.toHaveBeenCalled();
   });
 });
 

@@ -41,6 +41,10 @@ iOS 用户根据签名工具选择其中一种格式，校验下载文件的 SHA
 
 重签时同时处理主应用和内嵌的 `.appex`，为每个 target 准备对应的 App ID、签名身份和 provisioning profile。仓库默认的主 bundle ID 为 `com.vcp.avatar`，扩展为 `com.vcp.avatar.share`，共享 App Group 为 `group.com.vcp.avatar`。两个 target 的 Xcode 签名配置引用同一份 [App Group entitlement 输入](../src-tauri/gen/apple/VCPShare/AppGroups.entitlements)。使用自己的标识时，确保两份 profile 都授权同一组，两个签名中的 `com.apple.security.application-groups` 与各自 Info.plist 的 `VCPShareAppGroup` 均使用该组名。先签扩展，再签主应用，并保留两者的版本对应关系、扩展入口和 `com.apple.share-services` 声明。
 
+分享接收是否可用，以本次安装能否取得 App Group 共享容器为准，不按免费或付费账号判断。自签工具若改写了组名，须同步核对主应用与扩展最终签名、profile 和 Info.plist 中的实际组名；仅改 bundle ID 不会自动修正这些配置。
+
+共享容器不可用时，主应用在启动和回前台的自动检查保持安静；用户主动从其他 App 分享时，扩展说明当前安装无法接收，并提示在 VCPMobile 内直接选择文件或粘贴文字。应用不会用私有临时目录替代共享容器，也不会将无法交付的内容显示为已保存。
+
 归档验证覆盖打包内容。签名后的授权、系统分享面板能否展示扩展，以及设备上的使用体验，需在最终签名安装后确认。
 
 主应用的持续后台聊天任务还依赖 `UIBackgroundModes` 中的 `processing` 和 `BGTaskSchedulerPermittedIdentifiers` 中的 `<主应用 bundle ID>.chat.*`。Xcode 构建时展开 bundle ID。如果自签工具改了主应用标识，也应在签名前把已展开的任务标识改成对应前缀。

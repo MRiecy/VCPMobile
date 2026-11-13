@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
 import { flushPromises } from '@vue/test-utils';
 import { reactive } from 'vue';
-import { useShareStore, type CurrentShare } from '../../../core/stores/shareStore';
+import { useShareStore, type CurrentShare, type ShareReadResult } from '../../../core/stores/shareStore';
 import { emitTauriEvent, mockInvoke, invokeMock, listenMock } from '../../mocks/tauri';
 
 const context = vi.hoisted(() => ({ session: {} as {
@@ -12,11 +12,12 @@ const context = vi.hoisted(() => ({ session: {} as {
   isNavigationCurrent: (intent: number) => boolean;
   notifyNavigationResult: (result: string) => void;
   selectTopicById: (agentId: string, ownerType: string, topicId: string, intent: number) => Promise<string>;
-}, notices: vi.fn() }));
+}, notices: vi.fn(), android: false }));
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => context.session }));
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({ agents: [{ id: 'agent' }], fetchAgentsAndGroups: async () => {} }) }));
 vi.mock('../../../core/stores/topicListManager', () => ({ useTopicStore: () => ({ loadTopicList: async () => {} }) }));
 vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: context.notices }) }));
+vi.mock('../../../core/utils/platform', () => ({ get isAndroid() { return context.android; } }));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -26,6 +27,9 @@ function deferred<T>() {
 const share = (generation: number, state: CurrentShare['state']): CurrentShare => ({
   generation, deliveryId: `share-${generation}`, state, text: `text-${generation}`,
   items: [], attachments: [], revision: 0,
+});
+const available = (current: CurrentShare | null, needsPreparation = current?.state === 'ready'): ShareReadResult => ({
+  status: 'available', current, needsPreparation,
 });
 let pinia: Pinia;
 beforeEach(() => {
@@ -37,15 +41,89 @@ beforeEach(() => {
     selectTopicById: vi.fn(async () => 'accepted'),
   });
   context.notices.mockClear();
+  context.android = false;
 });
 afterEach(() => disposePinia(pinia));
 
 describe('one current share', () => {
+  it('preserves a draft and its pending edit when the share container is unavailable', async () => {
+    const original = { ...share(1, 'draft'), agentId: 'agent', topicId: 'topic', revision: 2 };
+    let result: ShareReadResult = available(original);
+    mockInvoke('read_current_share', () => result);
+    mockInvoke('update_share_draft', args => ({ ...original, text: args?.text, revision: 3 }));
+    const store = useShareStore();
+    await store.refresh();
+    store.closeSelector();
+    store.editDraft('pending local edit', []);
+
+    result = { status: 'unavailable' };
+    await store.refresh();
+    await store.readCurrent();
+    expect(store.activeDraft).toEqual(original);
+    expect(store.selectorOpen).toBe(false);
+    expect(invokeMock.mock.calls.some(([name]) => name === 'prepare_current_share')).toBe(false);
+    expect(context.notices).not.toHaveBeenCalled();
+
+    await store.flushDraft();
+    expect(invokeMock).toHaveBeenCalledWith('update_share_draft', {
+      generation: 1, deliveryId: 'share-1', revision: 2, text: 'pending local edit', attachments: [],
+    });
+    expect(store.activeDraft?.text).toBe('pending local edit');
+  });
+
+  it('restores a healthy draft without repeating attachment preparation on foreground refresh', async () => {
+    const original = { ...share(2, 'draft'), agentId: 'agent', topicId: 'topic', revision: 4 };
+    mockInvoke('read_current_share', () => available(original));
+    const store = useShareStore();
+    await store.refresh();
+    await store.refresh();
+
+    expect(store.activeDraft).toEqual(original);
+    expect(store.busy).toBe(false);
+    expect(invokeMock.mock.calls.some(([name]) => name === 'prepare_current_share')).toBe(false);
+  });
+
+  it('reads an empty Android inbox once after a foreground native intake', async () => {
+    context.android = true;
+    mockInvoke('receive_android_share', () => undefined);
+    mockInvoke('read_current_share', () => available(null));
+    const store = useShareStore();
+    await store.refresh();
+
+    expect(invokeMock.mock.calls).toEqual([['receive_android_share'], ['read_current_share']]);
+    expect(store.current).toBeNull();
+    expect(store.selectorOpen).toBe(false);
+    expect(context.notices).not.toHaveBeenCalled();
+  });
+
+  it('preserves a dismissed selector across native change reads until a fresh foreground entry', async () => {
+    const prepared = share(3, 'prepared');
+    mockInvoke('read_current_share', () => available(prepared));
+    const store = useShareStore();
+    await store.refresh();
+    store.closeSelector();
+    await store.readCurrent();
+    expect(store.selectorOpen).toBe(false);
+
+    await store.refresh();
+    expect(store.selectorOpen).toBe(true);
+  });
+
+  it('reports a real read failure instead of treating it as an unavailable container', async () => {
+    mockInvoke('read_current_share', async () => { throw new Error('manifest read failed'); });
+    const store = useShareStore();
+    await store.refresh().catch(store.notify);
+
+    expect(context.notices).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      type: 'error', title: '分享处理失败', message: 'manifest read failed',
+    }));
+  });
+
   it('keeps a dismissed selector closed when preparation finishes and resumes on a fresh entry', async () => {
     const prepared = { ...share(1, 'prepared'), text: 'retained shared text', revision: 1 };
     const pending = deferred<CurrentShare>();
     let reads = 0;
-    mockInvoke('read_current_share', () => ++reads === 1 ? share(1, 'ready') : prepared);
+    mockInvoke('read_current_share', () => available(++reads === 1 ? share(1, 'ready') : prepared));
     mockInvoke('prepare_current_share', () => pending.promise);
     const store = useShareStore();
 
@@ -69,7 +147,7 @@ describe('one current share', () => {
     const prepared = share(2, 'prepared');
     const pending = deferred<CurrentShare>();
     let reads = 0;
-    mockInvoke('read_current_share', () => ++reads === 2 ? pending.promise : prepared);
+    mockInvoke('read_current_share', async () => available(++reads === 2 ? await pending.promise : prepared));
     const store = useShareStore();
     await store.refresh();
     const reading = store.refresh();
@@ -88,7 +166,7 @@ describe('one current share', () => {
 
   it('opens a new native share without reviving the dismissed previous share', async () => {
     let current = share(3, 'prepared');
-    mockInvoke('read_current_share', () => current);
+    mockInvoke('read_current_share', () => available(current));
     mockInvoke('receive_android_share', () => {
       current = share(4, 'ready');
       emitTauriEvent('vcp-share-inbox-changed', null);
@@ -108,7 +186,7 @@ describe('one current share', () => {
   it('observes admission and file publication before a cold-start handoff returns', async () => {
     const handoff = deferred<void>();
     let current = share(6, 'receiving');
-    mockInvoke('read_current_share', () => current);
+    mockInvoke('read_current_share', () => available(current));
     mockInvoke('receive_android_share', () => {
       emitTauriEvent('vcp-share-inbox-changed', null);
       return handoff.promise;
@@ -149,7 +227,7 @@ describe('one current share', () => {
       emitTauriEvent('vcp-share-inbox-changed', null);
       return receives === 1 ? oldHandoff.promise : undefined;
     });
-    mockInvoke('read_current_share', () => current);
+    mockInvoke('read_current_share', () => available(current));
     mockInvoke('prepare_current_share', args => {
       current = share(Number(args?.generation), 'prepared');
       return current;
@@ -182,7 +260,7 @@ describe('one current share', () => {
       return stop;
     });
     mockInvoke('receive_android_share', () => undefined);
-    mockInvoke('read_current_share', () => share(11, 'prepared'));
+    mockInvoke('read_current_share', () => available(share(11, 'prepared')));
     const store = useShareStore();
     await store.pollAndroid();
     const reads = invokeMock.mock.calls.filter(([name]) => name === 'read_current_share').length;
@@ -210,7 +288,7 @@ describe('one current share', () => {
   it('does not prepare a read that completes after store disposal', async () => {
     const pending = deferred<CurrentShare>();
     mockInvoke('receive_android_share', () => undefined);
-    mockInvoke('read_current_share', () => pending.promise);
+    mockInvoke('read_current_share', async () => available(await pending.promise));
     const store = useShareStore();
     const polling = store.pollAndroid();
     await flushPromises();
@@ -225,7 +303,7 @@ describe('one current share', () => {
     const pending = deferred<CurrentShare>();
     const store = useShareStore();
     let reads = 0;
-    mockInvoke('read_current_share', () => ++reads === 1 ? share(1, 'ready') : share(2, 'receiving'));
+    mockInvoke('read_current_share', () => available(++reads === 1 ? share(1, 'ready') : share(2, 'receiving')));
     mockInvoke('prepare_current_share', () => pending.promise);
     await store.refresh();
     await store.refresh();
@@ -241,7 +319,7 @@ describe('one current share', () => {
     const pending = deferred<CurrentShare>();
     const store = useShareStore();
     let reads = 0;
-    mockInvoke('read_current_share', () => ++reads === 1 ? pending.promise : share(2, 'failed'));
+    mockInvoke('read_current_share', async () => available(++reads === 1 ? await pending.promise : share(2, 'failed')));
     const first = store.refresh();
     void store.refresh();
     pending.resolve(share(1, 'receiving'));
@@ -256,7 +334,7 @@ describe('one current share', () => {
     const preparing = deferred<CurrentShare>();
     const prepared = share(10, 'prepared');
     let reads = 0;
-    mockInvoke('read_current_share', () => ++reads === 1 ? share(10, 'ready') : pending.promise);
+    mockInvoke('read_current_share', async () => available(++reads === 1 ? share(10, 'ready') : await pending.promise));
     mockInvoke('prepare_current_share', () => preparing.promise);
     const store = useShareStore();
     await store.refresh();
@@ -278,7 +356,7 @@ describe('one current share', () => {
       : [];
     let current: CurrentShare = { ...share(13, 'ready'), text: 'shared text' };
     mockInvoke('receive_android_share', () => { emitTauriEvent('vcp-share-inbox-changed', null); });
-    mockInvoke('read_current_share', () => current);
+    mockInvoke('read_current_share', () => available(current));
     mockInvoke('prepare_current_share', () => {
       if (current.state === 'ready') current = { ...current, state: 'prepared', attachments };
       return current;
@@ -308,7 +386,7 @@ describe('one current share', () => {
 
   it('recovers the last acknowledged draft and serializes later edits by revision', async () => {
     const restored = { ...share(3, 'draft'), agentId: 'agent', topicId: 'topic', text: 'recovered edit', revision: 8 };
-    mockInvoke('read_current_share', () => restored);
+    mockInvoke('read_current_share', () => available(restored));
     mockInvoke('prepare_current_share', () => restored);
     const pending = deferred<CurrentShare>();
     let writes = 0;
@@ -329,7 +407,7 @@ describe('one current share', () => {
   it('does not let an older preparation reply roll back a confirmed revision', async () => {
     const original = { ...share(4, 'draft'), agentId: 'agent', topicId: 'topic', revision: 8 };
     const prepare = deferred<CurrentShare>();
-    mockInvoke('read_current_share', () => original);
+    mockInvoke('read_current_share', () => available(original, true));
     mockInvoke('prepare_current_share', () => prepare.promise);
     mockInvoke('update_share_draft', () => ({ ...original, text: 'new edit', revision: 9 }));
     const store = useShareStore();
@@ -343,7 +421,7 @@ describe('one current share', () => {
   it.each(['draft', 'sent'] as const)('keeps a committed share closed when preparation returns %s', async (state) => {
     const original = { ...share(5, 'draft'), agentId: 'agent', topicId: 'topic', revision: 8 };
     const pending = deferred<CurrentShare>();
-    mockInvoke('read_current_share', () => original);
+    mockInvoke('read_current_share', () => available(original, true));
     mockInvoke('prepare_current_share', () => pending.promise);
     mockInvoke('commit_share_message', () => ({ message: { id: 'msg_share-5' }, persisted: { blocks: [], topicUpdatedAt: 1 }, alreadySent: false }));
     const store = useShareStore();
@@ -365,7 +443,7 @@ describe('one current share', () => {
 
     // A confirmed terminal belongs only to that delivery; the next share still opens.
     const next = share(6, 'prepared');
-    mockInvoke('read_current_share', () => next);
+    mockInvoke('read_current_share', () => available(next));
     await store.refresh();
     expect(store.current).toEqual(next);
     expect(store.selectorOpen).toBe(true);
@@ -375,7 +453,7 @@ describe('one current share', () => {
     const original = share(7, 'prepared');
     const pending = deferred<CurrentShare>();
     let reads = 0;
-    mockInvoke('read_current_share', () => ++reads === 1 ? original : pending.promise);
+    mockInvoke('read_current_share', async () => available(++reads === 1 ? original : await pending.promise));
     mockInvoke('discard_current_share', () => undefined);
     const store = useShareStore();
     await store.refresh();
@@ -396,7 +474,7 @@ describe('one current share', () => {
   it('keeps a sent receipt when an overlapping discard acknowledgement arrives later', async () => {
     const original = { ...share(8, 'draft'), agentId: 'agent', topicId: 'topic', revision: 1 };
     const discarded = deferred<void>();
-    mockInvoke('read_current_share', () => original);
+    mockInvoke('read_current_share', () => available(original));
     mockInvoke('prepare_current_share', () => original);
     mockInvoke('discard_current_share', () => discarded.promise);
     mockInvoke('commit_share_message', () => ({ message: { id: 'msg_share-8' }, persisted: { blocks: [], topicUpdatedAt: 1 }, alreadySent: false }));
@@ -416,7 +494,7 @@ describe('one current share', () => {
 
   it('does not revive a sent share when a repeated native wake reads an older draft', async () => {
     const original = { ...share(9, 'draft'), agentId: 'agent', topicId: 'topic', revision: 1 };
-    mockInvoke('read_current_share', () => original);
+    mockInvoke('read_current_share', () => available(original, true));
     mockInvoke('prepare_current_share', () => original);
     mockInvoke('commit_share_message', () => ({ message: { id: 'msg_share-9' }, persisted: { blocks: [], topicUpdatedAt: 1 }, alreadySent: false }));
     const finished = deferred<void>();
@@ -443,7 +521,7 @@ describe('one current share', () => {
 
   it('releases the send button as soon as the message commits', async () => {
     const original = { ...share(5, 'draft'), agentId: 'agent', topicId: 'topic', revision: 1 };
-    mockInvoke('read_current_share', () => original);
+    mockInvoke('read_current_share', () => available(original));
     mockInvoke('prepare_current_share', () => original);
     mockInvoke('commit_share_message', () => ({ message: { id: 'msg_share-5' }, persisted: { blocks: [], topicUpdatedAt: 1 }, alreadySent: false }));
     const store = useShareStore(); await store.refresh(); await flushPromises();

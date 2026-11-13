@@ -18,7 +18,7 @@ enum NativeShareInbox {
     static func location(_ invoke: Invoke) {
         guard let group = Bundle.main.object(forInfoDictionaryKey: "VCPShareAppGroup") as? String,
               let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
-            invoke.reject("share_container_unavailable: 请检查主应用与分享扩展的 App Group 签名")
+            invoke.resolve(["path": NSNull()])
             return
         }
         invoke.resolve(["path": container.appendingPathComponent("ShareInbox", isDirectory: true).path])

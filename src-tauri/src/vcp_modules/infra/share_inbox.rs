@@ -11,8 +11,10 @@ use crate::vcp_modules::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     fs::File,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
 };
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use tauri::Manager;
@@ -26,6 +28,7 @@ const MAX_TEXT: usize = 1024 * 1024;
 #[derive(Default)]
 pub struct ShareInboxState {
     intake: tokio::sync::Mutex<()>,
+    cleanup_checked: AtomicBool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,6 +84,17 @@ pub struct CurrentShare {
     message: Option<ChatMessage>,
 }
 
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum ShareReadResult {
+    Unavailable,
+    Available {
+        current: Option<Box<CurrentShare>>,
+        #[serde(rename = "needsPreparation")]
+        needs_preparation: bool,
+    },
+}
+
 #[derive(Deserialize)]
 struct Manifest {
     text: String,
@@ -99,12 +113,12 @@ fn leaf(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn root(app: &AppHandle) -> Result<PathBuf, String> {
+async fn available_root(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     #[cfg(target_os = "ios")]
     let path = {
         #[derive(Deserialize)]
         struct Location {
-            path: String,
+            path: Option<String>,
         }
         let app = app.clone();
         let result: Location = tauri::async_runtime::spawn_blocking(move || {
@@ -115,10 +129,17 @@ async fn root(app: &AppHandle) -> Result<PathBuf, String> {
         })
         .await
         .map_err(|e| e.to_string())??;
-        PathBuf::from(result.path)
+        result.path.map(PathBuf::from)
     };
     #[cfg(not(target_os = "ios"))]
-    let path = super::file_manager::get_support_root_dir(app)?.join("ShareInbox");
+    let path = Some(super::file_manager::get_support_root_dir(app)?.join("ShareInbox"));
+    Ok(path)
+}
+
+async fn root(app: &AppHandle) -> Result<PathBuf, String> {
+    let path = available_root(app)
+        .await?
+        .ok_or("当前安装无法从其他 App 接收分享，请在应用内选择文件或粘贴文字")?;
     tokio::fs::create_dir_all(&path)
         .await
         .map_err(|e| e.to_string())?;
@@ -188,15 +209,20 @@ async fn lock(root: &Path) -> Result<File, String> {
 }
 
 fn slot(root: &Path) -> Result<Option<Slot>, String> {
+    use std::io::Read;
     let path = root.join("current.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 8192 {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if file.metadata().map_err(|e| e.to_string())?.len() > 8192 {
         return Err("分享槽位损坏".into());
     }
-    let slot: Slot = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    let slot: Slot = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     leaf(&slot.delivery_id)?;
     if slot.generation == 0 || !["receiving", "ready", "failed"].contains(&slot.state.as_str()) {
         return Err("分享槽位状态损坏".into());
@@ -243,23 +269,72 @@ async fn refresh_share_attachment_paths<R: tauri::Runtime>(
     app: &AppHandle<R>,
     share: &mut CurrentShare,
 ) {
-    for attachment in &mut share.attachments {
-        super::file_manager::refresh_attachment_paths(app, attachment).await;
-    }
-    for item in &mut share.items {
-        if let Some(attachment) = item.attachment.as_mut() {
-            super::file_manager::refresh_attachment_paths(app, attachment).await;
-        }
-    }
-    if let Some(attachments) = share
+    let message_attachments = share
         .message
         .as_mut()
-        .and_then(|message| message.attachments.as_mut())
+        .and_then(|message| message.attachments.as_mut());
+    // One file may occur in both the original items and the editable draft.
+    // Reuse only its path projection, preserving each copy's other fields.
+    let mut paths: HashMap<_, (String, String, Option<String>, Option<String>)> = HashMap::new();
+    for (attachment, composer) in share
+        .attachments
+        .iter_mut()
+        .chain(
+            share
+                .items
+                .iter_mut()
+                .filter_map(|item| item.attachment.as_mut()),
+        )
+        .map(|attachment| (attachment, true))
+        .chain(
+            message_attachments
+                .into_iter()
+                .flatten()
+                .map(|attachment| (attachment, false)),
+        )
     {
-        for attachment in attachments {
+        let key = (
+            attachment.hash.clone(),
+            attachment.size,
+            attachment.internal_path.clone(),
+            attachment.src.clone(),
+            attachment.thumbnail_path.clone(),
+            attachment.status.clone(),
+        );
+        if let Some((internal_path, src, status, thumbnail)) = paths.get(&key) {
+            attachment.internal_path = internal_path.clone();
+            attachment.src = src.clone();
+            attachment.status = status.clone();
+            attachment.thumbnail_path = thumbnail.clone();
+        } else {
             super::file_manager::refresh_attachment_paths(app, attachment).await;
+            paths.insert(
+                key,
+                (
+                    attachment.internal_path.clone(),
+                    attachment.src.clone(),
+                    attachment.status.clone(),
+                    attachment.thumbnail_path.clone(),
+                ),
+            );
+        }
+        // The composer consumes import status (`done`); stored messages use
+        // the generic local-availability status (`ready`).
+        if composer && attachment.status.as_deref() == Some("ready") {
+            attachment.status = Some("done".into());
         }
     }
+}
+
+fn needs_preparation(share: &CurrentShare) -> bool {
+    share.state == "ready"
+        || share.state == "draft"
+            && share.items.iter().any(|item| {
+                !item.sha256.is_empty()
+                    && item.attachment.as_ref().is_none_or(|attachment| {
+                        attachment.status.as_deref() == Some("desktop_only")
+                    })
+            })
 }
 
 /// The startup relocation transaction owns this update; share identity,
@@ -300,6 +375,7 @@ fn terminal(share: &CurrentShare) -> bool {
     share.state == "sent" || share.state == "discarded"
 }
 
+#[derive(Clone)]
 struct AndroidOwnerSnapshot {
     observed_slot: Option<Slot>,
     owner_id: Option<String>,
@@ -353,11 +429,12 @@ pub(crate) fn active_attachment_hashes(record: &str) -> Result<Vec<String>, Stri
         .collect())
 }
 
-async fn cleanup(root: PathBuf, finished_delivery: Option<String>) {
-    let _ = tokio::task::spawn_blocking(move || {
+async fn cleanup(root: PathBuf, finished_delivery: Option<String>) -> bool {
+    tokio::task::spawn_blocking(move || {
         let Ok(entries) = std::fs::read_dir(&root) else {
-            return;
+            return false;
         };
+        let mut pending = false;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if leaf(&name).is_err() {
@@ -395,28 +472,190 @@ async fn cleanup(root: PathBuf, finished_delivery: Option<String>) {
             else {
                 continue;
             };
-            if try_lock_file(&lease).is_err() {
-                continue;
+            match try_lock_file(&lease) {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    pending = true;
+                    continue;
+                }
+                Err(_) => continue,
             }
             // A live provider/import holds this directory lease. No other generation is touched.
-            let _ = std::fs::remove_dir_all(path);
+            pending |= std::fs::remove_dir_all(path).is_err();
         }
+        pending
     })
+    .await
+    .unwrap_or(true)
+}
+
+async fn cleanup_if_needed(
+    root: PathBuf,
+    db: &DbState,
+    state: &ShareInboxState,
+) -> Result<(), String> {
+    if state.cleanup_checked.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    let result = async {
+        // Read the terminal receipt after claiming cleanup. An older UI snapshot
+        // must not consume a retry left by a send whose files still had a lease.
+        let finished = {
+            let mut connection = db.pool.acquire().await.map_err(|error| error.to_string())?;
+            load(&mut connection)
+                .await?
+                .filter(terminal)
+                .map(|share| share.delivery_id)
+        };
+        Ok::<_, String>(cleanup(root, finished).await)
+    }
     .await;
+    if !matches!(result, Ok(false)) {
+        state.cleanup_checked.store(false, Ordering::Release);
+    }
+    result.map(|_| ())
+}
+
+async fn cleanup_finished(root: PathBuf, delivery_id: String, state: &ShareInboxState) {
+    // A stale read may have claimed the startup scan before it saw this terminal
+    // state. The operation that finished the delivery always performs its cleanup.
+    state.cleanup_checked.store(true, Ordering::Release);
+    if cleanup(root, Some(delivery_id)).await {
+        state.cleanup_checked.store(false, Ordering::Release);
+    }
+}
+
+async fn read_slot(root: &Path) -> Result<Option<Slot>, String> {
+    let root = root.to_owned();
+    tokio::task::spawn_blocking(move || slot(&root))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+async fn locked_slot(
+    root: &Path,
+    android_owner: Option<&AndroidOwnerSnapshot>,
+) -> Result<(File, Option<Slot>, bool), String> {
+    let guard = lock(root).await?;
+    let root = root.to_owned();
+    let android_owner = android_owner.cloned();
+    tokio::task::spawn_blocking(move || {
+        let source = slot(&root)?;
+        let interrupted = source
+            .as_ref()
+            .is_some_and(|source| acquisition_interrupted(&root, source, android_owner.as_ref()));
+        Ok((guard, source, interrupted))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn needs_reconciliation(previous: Option<&CurrentShare>, source: &Slot) -> bool {
+    let Some(previous) =
+        previous.filter(|share| matches(share, source.generation, &source.delivery_id))
+    else {
+        return true;
+    };
+    !terminal(previous)
+        && match source.state.as_str() {
+            "failed" | "receiving" => {
+                previous.state != source.state || previous.error != source.error
+            }
+            "ready" => previous.state == "receiving",
+            _ => false,
+        }
+}
+
+async fn reconcile_share(
+    root: &Path,
+    db: &DbState,
+    android_owner: Option<&AndroidOwnerSnapshot>,
+) -> Result<(Option<CurrentShare>, Vec<String>, bool), String> {
+    // Acquire a read connection before the slot lock. A normal snapshot never
+    // enters the global writer queue or waits for a connection while holding the slot.
+    {
+        let mut connection = db.pool.acquire().await.map_err(|error| error.to_string())?;
+        let (_guard, source, interrupted) = locked_slot(root, android_owner).await?;
+        let Some(source) = source else {
+            return Ok((None, vec![], false));
+        };
+        let previous = load(&mut connection).await?;
+        if !interrupted && !needs_reconciliation(previous.as_ref(), &source) {
+            return Ok((previous, vec![], false));
+        }
+    }
+    // Only transitions write. Re-read after acquiring DB -> slot in the same
+    // order as editors/senders; never commit the earlier read-only snapshot.
+    let mut tx = db.write_transaction("share.reconcile").await?;
+    let (guard, source, interrupted) = locked_slot(root, android_owner).await?;
+    let Some(mut source) = source else {
+        return Ok((None, vec![], false));
+    };
+    let guard = if interrupted {
+        source.state = "failed".into();
+        source.error = Some("分享获取已中断，请从来源应用重新分享".into());
+        let root = root.to_owned();
+        let failed = source.clone();
+        tokio::task::spawn_blocking(move || {
+            write_slot(&root, &failed)?;
+            Ok::<_, String>(guard)
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    } else {
+        guard
+    };
+    let previous = load(&mut tx).await?;
+    let changed = needs_reconciliation(previous.as_ref(), &source);
+    let replaced = previous
+        .as_ref()
+        .filter(|share| !matches(share, source.generation, &source.delivery_id));
+    let old_operations = replaced
+        .map(|share| {
+            share
+                .items
+                .iter()
+                .map(|item| format!("share_{}_{}", share.delivery_id, item.item_id))
+                .collect()
+        })
+        .unwrap_or_default();
+    let new_delivery = previous
+        .as_ref()
+        .is_none_or(|share| !matches(share, source.generation, &source.delivery_id));
+    let mut share = previous
+        .filter(|share| matches(share, source.generation, &source.delivery_id))
+        .unwrap_or_else(|| from_slot(&source));
+    if !terminal(&share) && (source.state == "failed" || source.state == "receiving") {
+        share.state = source.state;
+        share.error = source.error;
+    } else if share.state == "receiving" && source.state == "ready" {
+        share.state = "ready".into();
+    }
+    if changed {
+        save(&mut tx, &share).await?;
+    }
+    tx.commit().await.map_err(|error| error.to_string())?;
+    drop(guard);
+    Ok((Some(share), old_operations, new_delivery))
 }
 
 #[tauri::command]
 pub async fn read_current_share(
     app: AppHandle,
     db: State<'_, DbState>,
-) -> Result<Option<CurrentShare>, String> {
-    let root = root(&app).await?;
+    state: State<'_, ShareInboxState>,
+) -> Result<ShareReadResult, String> {
+    let Some(root) = available_root(&app).await? else {
+        return Ok(ShareReadResult::Unavailable);
+    };
+    let Some(observed_slot) = read_slot(&root).await? else {
+        return Ok(ShareReadResult::Available {
+            current: None,
+            needs_preparation: false,
+        });
+    };
     #[cfg(target_os = "android")]
-    let android_owner = {
-        let observed_slot = {
-            let _guard = lock(&root).await?;
-            slot(&root)?
-        };
+    let android_owner = if observed_slot.state == "receiving" {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Owner {
@@ -432,60 +671,38 @@ pub async fn read_current_share(
         .await
         .map_err(|e| e.to_string())??;
         Some(AndroidOwnerSnapshot {
-            observed_slot,
+            observed_slot: Some(observed_slot),
             owner_id: result.delivery_id,
+        })
+    } else {
+        Some(AndroidOwnerSnapshot {
+            observed_slot: Some(observed_slot),
+            owner_id: None,
         })
     };
     #[cfg(not(target_os = "android"))]
-    let android_owner: Option<AndroidOwnerSnapshot> = None;
-    let mut tx = db.write_transaction("share.reconcile").await?;
-    let guard = lock(&root).await?;
-    let Some(mut slot) = slot(&root)? else {
-        return Ok(None);
+    let android_owner: Option<AndroidOwnerSnapshot> = {
+        let _ = observed_slot;
+        None
     };
-    if acquisition_interrupted(&root, &slot, android_owner.as_ref()) {
-        slot.state = "failed".into();
-        slot.error = Some("分享获取已中断，请从来源应用重新分享".into());
-        write_slot(&root, &slot)?;
-    }
-    let previous = load(&mut tx).await?;
-    let replaced = previous
-        .as_ref()
-        .filter(|p| !matches(p, slot.generation, &slot.delivery_id));
-    let old_operations: Vec<String> = replaced
-        .map(|p| {
-            p.items
-                .iter()
-                .map(|i| format!("share_{}_{}", p.delivery_id, i.item_id))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut share = previous
-        .filter(|p| matches(p, slot.generation, &slot.delivery_id))
-        .unwrap_or_else(|| from_slot(&slot));
-    if !terminal(&share) && (slot.state == "failed" || slot.state == "receiving") {
-        share.state = slot.state.clone();
-        share.error = slot.error.clone();
-    } else if share.state == "receiving" && slot.state == "ready" {
-        share.state = "ready".into();
-    }
-    refresh_share_attachment_paths(&app, &mut share).await;
-    save(&mut tx, &share).await?;
-    tx.commit().await.map_err(|e| e.to_string())?;
-    drop(guard);
+    let (mut current, old_operations, new_delivery) =
+        reconcile_share(&root, &db, android_owner.as_ref()).await?;
     for operation in old_operations {
         super::file_manager::cancel_attachment_operation(&operation).await;
     }
-    cleanup(
-        root,
-        if terminal(&share) {
-            Some(share.delivery_id.clone())
-        } else {
-            None
-        },
-    )
-    .await;
-    Ok(Some(share))
+    if let Some(share) = current.as_mut().filter(|share| !terminal(share)) {
+        // Filesystem projections belong to this response, outside DB/slot locks.
+        refresh_share_attachment_paths(&app, share).await;
+    }
+    if new_delivery {
+        state.cleanup_checked.store(false, Ordering::Release);
+    }
+    cleanup_if_needed(root, &db, &state).await?;
+    let needs_preparation = current.as_ref().is_some_and(needs_preparation);
+    Ok(ShareReadResult::Available {
+        current: current.map(Box::new),
+        needs_preparation,
+    })
 }
 
 #[tauri::command]
@@ -497,17 +714,16 @@ pub async fn prepare_current_share(
 ) -> Result<CurrentShare, String> {
     let root = root(&app).await?;
     {
-        let mut tx = db.write_transaction("share.prepare-status").await?;
+        let mut connection = db.pool.acquire().await.map_err(|error| error.to_string())?;
         let guard = lock(&root).await?;
         assert_current(&root, generation, &delivery_id)?;
-        let share = load(&mut tx)
+        let share = load(&mut connection)
             .await?
             .filter(|s| matches(s, generation, &delivery_id))
             .ok_or("分享已被替换")?;
         if terminal(&share) {
             return Ok(share);
         }
-        tx.commit().await.map_err(|e| e.to_string())?;
         drop(guard);
     }
     let folder = root.join(&delivery_id);
@@ -567,8 +783,8 @@ pub async fn prepare_current_share(
         share.text = manifest.text;
         share.items = manifest.items;
         share.manifest_hash = manifest_hash;
+        save(&mut tx, &share).await?;
     }
-    save(&mut tx, &share).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
     for index in 0..share.items.len() {
@@ -690,11 +906,12 @@ pub async fn prepare_current_share(
             .iter()
             .filter_map(|item| item.attachment.clone())
             .collect();
+        save(&mut tx, &share).await?;
     }
-    save(&mut tx, &share).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
     drop(lease);
+    refresh_share_attachment_paths(&app, &mut share).await;
     Ok(share)
 }
 
@@ -730,6 +947,7 @@ pub async fn receive_android_share(
     else {
         return Ok(());
     };
+    intake_state.cleanup_checked.store(false, Ordering::Release);
     // Publish acceptance before any potentially slow native ACK or file work.
     // Consumers read the current record; no delayed command returns its old snapshot.
     notify_share_changed(&app);
@@ -744,6 +962,7 @@ pub async fn receive_android_share(
             payload.state == "failed",
         )
         .await;
+        cleanup_if_needed(root, &db, &intake_state).await?;
         return Ok(());
     }
     let result = finish_android_share(
@@ -773,6 +992,7 @@ pub async fn receive_android_share(
         notify_share_changed(&app);
         return Err(error);
     }
+    cleanup_if_needed(root, &db, &intake_state).await?;
     Ok(())
 }
 
@@ -1197,6 +1417,9 @@ pub async fn bind_current_share(
         let available: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM topics t JOIN agents a ON a.agent_id=t.owner_id AND a.owner_type=t.owner_type WHERE t.owner_type='agent' AND t.owner_id=? AND t.topic_id=? AND t.deleted_at IS NULL AND a.deleted_at IS NULL")
             .bind(&share.agent_id).bind(&share.topic_id).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
         if available > 0 {
+            tx.commit().await.map_err(|error| error.to_string())?;
+            drop(guard);
+            refresh_share_attachment_paths(&app, &mut share).await;
             return Ok(share);
         }
         share.state = "prepared".into();
@@ -1234,6 +1457,7 @@ pub async fn bind_current_share(
     save(&mut tx, &share).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
+    refresh_share_attachment_paths(&app, &mut share).await;
     Ok(share)
 }
 
@@ -1274,6 +1498,7 @@ pub async fn update_share_draft(
 pub async fn discard_current_share(
     app: AppHandle,
     db: State<'_, DbState>,
+    state: State<'_, ShareInboxState>,
     generation: u64,
     delivery_id: String,
 ) -> Result<(), String> {
@@ -1291,7 +1516,7 @@ pub async fn discard_current_share(
     }
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
-    cleanup(root, Some(delivery_id)).await;
+    cleanup_finished(root, delivery_id, &state).await;
     Ok(())
 }
 
@@ -1334,6 +1559,7 @@ async fn store_message(
 pub async fn commit_share_message(
     app: AppHandle,
     db: State<'_, DbState>,
+    state: State<'_, ShareInboxState>,
     generation: u64,
     delivery_id: String,
     revision: u64,
@@ -1406,7 +1632,7 @@ pub async fn commit_share_message(
     let topic_updated_at = store_message(&mut tx, &mut share, &mut message, &render).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
-    cleanup(root, Some(delivery_id)).await;
+    cleanup_finished(root, delivery_id, &state).await;
     Ok(ShareCommit {
         message,
         persisted: MessageWriteResultDto {
@@ -1950,5 +2176,178 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(count, 1);
+    }
+
+    async fn share_wal_database(root: &Path) -> DbState {
+        let path = root.join("share-read.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0101_current_share.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode, "wal");
+        DbState::new(pool, path)
+    }
+
+    #[tokio::test]
+    async fn unchanged_share_reconciliation_reads_while_another_writer_holds_the_database() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path();
+        let db = share_wal_database(root).await;
+        let source = test_slot(9, "draft");
+        let slot_guard = lock(root).await.unwrap();
+        write_slot(root, &source).unwrap();
+        drop(slot_guard);
+        let mut draft = from_slot(&source);
+        draft.state = "draft".into();
+        draft.text = "unsent user edit".into();
+        draft.revision = 12;
+        let before = serde_json::to_string(&draft).unwrap();
+        {
+            let mut connection = db.pool.acquire().await.unwrap();
+            save(&mut connection, &draft).await.unwrap();
+        }
+        let mut metrics = db.subscribe_write_metrics();
+        let writer = db.write_transaction("test.share.writer").await.unwrap();
+
+        // This is a concurrency deadline, not a latency benchmark. A read that
+        // entered the writer queue would wait forever for the writer below.
+        let (observed, cancelled, replaced) =
+            tokio::time::timeout(Duration::from_secs(2), reconcile_share(root, &db, None))
+                .await
+                .expect("an unchanged share must remain readable while a writer is active")
+                .unwrap();
+        let observed = observed.unwrap();
+        assert_eq!(observed.text, "unsent user edit");
+        assert_eq!(observed.revision, 12);
+        assert!(cancelled.is_empty());
+        assert!(!replaced);
+        let after: String =
+            sqlx::query_scalar("SELECT record FROM current_share WHERE singleton = 1")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(after, before);
+        assert!(matches!(
+            metrics.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        writer.rollback().await.unwrap();
+        assert_eq!(metrics.recv().await.unwrap().operation, "test.share.writer");
+        assert!(matches!(
+            metrics.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        db.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_retry_survives_a_late_read_until_its_file_lease_is_released() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path();
+        let db = share_wal_database(root).await;
+        let state = ShareInboxState::default();
+        let source = test_slot(5, "sent-delivery");
+        let slot_guard = lock(root).await.unwrap();
+        write_slot(root, &source).unwrap();
+        let lease = directory(root, &source.delivery_id);
+        lock_file(&lease).unwrap();
+        drop(slot_guard);
+        let mut receipt = from_slot(&source);
+        receipt.state = "sent".into();
+        {
+            let mut connection = db.pool.acquire().await.unwrap();
+            save(&mut connection, &receipt).await.unwrap();
+        }
+
+        cleanup_finished(root.to_owned(), source.delivery_id.clone(), &state).await;
+        assert!(root.join("sent-delivery/payload").exists());
+        assert!(!state.cleanup_checked.load(Ordering::Acquire));
+
+        // A read started before send may finish now with its old draft view.
+        // Cleanup must consult the committed receipt rather than consume the
+        // retry while treating this delivery as a still-active draft.
+        cleanup_if_needed(root.to_owned(), &db, &state)
+            .await
+            .unwrap();
+        assert!(root.join("sent-delivery/payload").exists());
+        assert!(!state.cleanup_checked.load(Ordering::Acquire));
+        drop(lease);
+        cleanup_if_needed(root.to_owned(), &db, &state)
+            .await
+            .unwrap();
+        assert!(!root.join("sent-delivery").exists());
+        assert!(state.cleanup_checked.load(Ordering::Acquire));
+        assert_eq!(
+            read_slot(root).await.unwrap().unwrap().delivery_id,
+            "sent-delivery"
+        );
+        {
+            let mut connection = db.pool.acquire().await.unwrap();
+            assert_eq!(load(&mut connection).await.unwrap().unwrap().state, "sent");
+        }
+        db.pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn receiving_share_reconciliation_writes_only_when_its_provider_lease_disappears() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path();
+        let db = share_wal_database(root).await;
+        let mut source = test_slot(3, "provider");
+        source.state = "receiving".into();
+        let slot_guard = lock(root).await.unwrap();
+        write_slot(root, &source).unwrap();
+        let lease = directory(root, &source.delivery_id);
+        lock_file(&lease).unwrap();
+        drop(slot_guard);
+        {
+            let mut connection = db.pool.acquire().await.unwrap();
+            save(&mut connection, &from_slot(&source)).await.unwrap();
+        }
+        let mut metrics = db.subscribe_write_metrics();
+
+        let (live, _, replaced) = reconcile_share(root, &db, None).await.unwrap();
+        assert_eq!(live.unwrap().state, "receiving");
+        assert!(!replaced);
+        assert!(matches!(
+            metrics.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        drop(lease);
+        let (failed, _, replaced) = reconcile_share(root, &db, None).await.unwrap();
+        let failed = failed.unwrap();
+        assert_eq!(failed.state, "failed");
+        assert!(failed.error.is_some());
+        assert!(!replaced);
+        let published = read_slot(root).await.unwrap().unwrap();
+        assert_eq!(published.state, "failed");
+        assert_eq!(published.error, failed.error);
+        assert_eq!(metrics.recv().await.unwrap().operation, "share.reconcile");
+
+        let (stable, _, _) = reconcile_share(root, &db, None).await.unwrap();
+        assert_eq!(
+            serde_json::to_string(&stable.unwrap()).unwrap(),
+            serde_json::to_string(&failed).unwrap()
+        );
+        assert!(matches!(
+            metrics.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        db.pool.close().await;
     }
 }

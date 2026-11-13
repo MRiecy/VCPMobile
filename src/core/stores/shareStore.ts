@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { useChatSessionStore } from './chatSessionStore';
 import { useAssistantStore } from './assistant';
 import { useNotificationStore } from './notification';
+import { isAndroid } from '../utils/platform';
 import type { Attachment, ChatMessage, MessageWriteResultDto } from '../types/chat';
 
 export interface ShareIdentity { generation: number; deliveryId: string }
@@ -23,6 +24,9 @@ export interface ShareCommit {
   persisted: MessageWriteResultDto;
   alreadySent: boolean;
 }
+export type ShareReadResult =
+  | { status: 'unavailable' }
+  | { status: 'available'; current: CurrentShare | null; needsPreparation: boolean };
 
 export const useShareStore = defineStore('share', () => {
   const current = ref<CurrentShare | null>(null);
@@ -91,13 +95,14 @@ export const useShareStore = defineStore('share', () => {
     if (readInFlight) { readAgain = true; return readInFlight; }
     readInFlight = (async () => {
       const observed = current.value;
-      const value = await invoke<CurrentShare | null>('read_current_share');
-      if (disposed) return;
+      const result = await invoke<ShareReadResult>('read_current_share');
+      if (disposed || result.status === 'unavailable') return;
+      const value = result.current;
       // An empty read has no generation; it cannot erase a share accepted or
       // settled while this snapshot was in flight.
       if (value === null && current.value !== observed) return;
       if (!apply(value)) return;
-      if (value && ['ready', 'draft'].includes(value.state)) void prepare().catch(notify);
+      if (value && result.needsPreparation) void prepare().catch(notify);
       else if (value && ['draft', 'prepared', 'failed'].includes(value.state) && !activeDraft.value) showSelector();
     })().finally(() => {
       readInFlight = null;
@@ -109,7 +114,7 @@ export const useShareStore = defineStore('share', () => {
     // A fresh READY/foreground entry may resume the retained share. Continuations of
     // an older read/import keep the user's close intent until such an entry occurs.
     dismissedShare = null;
-    return readCurrent();
+    return isAndroid ? pollAndroid() : readCurrent();
   };
   const ensureListening = (): Promise<void> => {
     if (disposed || unlisten) return Promise.resolve();
@@ -206,5 +211,5 @@ export const useShareStore = defineStore('share', () => {
     unlisten = null;
     if (saveTimer) clearTimeout(saveTimer);
   });
-  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, pollAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
+  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, readCurrent, prepare, pollAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
 });
