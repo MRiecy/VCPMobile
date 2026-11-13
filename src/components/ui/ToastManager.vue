@@ -32,17 +32,13 @@ const store = useNotificationStore();
 }
 
 .toast-leave-active {
-  transition: all 0.4s ease-in;
+  /* 立即释放显示位置，避免退场气泡与新气泡同时堆叠超过上限。 */
+  display: none;
 }
 
 .toast-enter-from {
   opacity: 0;
   transform: translateY(-40px) scale(0.8);
-}
-
-.toast-leave-to {
-  opacity: 0;
-  transform: translateY(-20px) scale(0.9);
 }
 
 .toast-move {

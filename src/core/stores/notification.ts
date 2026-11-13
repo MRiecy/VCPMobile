@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia';
 import { onScopeDispose, ref } from 'vue';
 
+const MAX_ACTIVE_TOASTS = 4;
+
 export interface VcpNotification {
   id: string;
   type: 'info' | 'success' | 'warning' | 'error' | 'tool' | 'agent';
@@ -133,7 +135,8 @@ export const useNotificationStore = defineStore('notification', () => {
 
     // 2. 推入活动气泡 (抽屉打开或开启 historyOnly 时抑制 Toast)
     if (!isDrawerOpen.value && !payload.historyOnly) {
-      activeToasts.value.push(notification);
+      // 超出上限时按 FIFO 淘汰最旧气泡，通知历史不受影响。
+      activeToasts.value = [...activeToasts.value, notification].slice(-MAX_ACTIVE_TOASTS);
 
       // 3. 自动移除逻辑 (如果 duration 为 0 则不自动消失)
       if (notification.duration !== 0) {
